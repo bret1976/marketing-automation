@@ -1,0 +1,1790 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="color-scheme" content="dark">
+    <title>6Frame Studio - Multi-Agent Social Hub</title>
+    <!-- Google Fonts: Inter & Outfit -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;600;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/index.css?v=2.2">
+</head>
+<body>
+    <div class="glow-bg"></div>
+    <div id="auth-overlay" class="auth-overlay hidden">
+        <form id="auth-form" class="auth-card glass-card">
+            <div class="header-logo"><span class="logo-accent">6</span>FRAME <span class="logo-subtitle">STUDIO</span></div>
+            <h1>Admin Access</h1>
+            <p>Enter the workspace password to manage publishing, automations, API keys, and paid generation.</p>
+            <input id="auth-password" type="password" autocomplete="current-password" placeholder="Password">
+            <button class="primary-btn" type="submit">Unlock</button>
+            <span id="auth-error" class="auth-error"></span>
+        </form>
+    </div>
+    
+    <header class="app-header">
+        <div class="header-logo">
+            <span class="logo-accent">6</span>FRAME <span class="logo-subtitle">STUDIO</span>
+        </div>
+        <div class="main-nav">
+            <button id="nav-automation" class="nav-link">Autopilot & Cockpit</button>
+            <button id="nav-campaigns" class="nav-link active">Viral Trends & Recreation</button>
+            <button id="nav-growth" class="nav-link">Growth OS</button>
+            <button id="nav-repurposer" class="nav-link">Repurposer Workshop</button>
+            <button id="nav-pipeline" class="nav-link">Upload & Analyze Video</button>
+        </div>
+        <button id="settings-btn" class="icon-btn" title="API Settings">
+            <svg viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+            Settings
+        </button>
+    </header>
+
+    <main class="app-container">
+        <!-- Pipeline Hub View -->
+        <div id="pipeline-view" class="view-content">
+            <div class="split-layout">
+        <!-- LEFT PANEL: Upload & Stepper -->
+        <section class="left-panel">
+            <div class="glass-card upload-card">
+                <h2>Upload Visual Asset</h2>
+                
+                <div class="drop-zone" id="drop-zone">
+                    <div class="drop-zone-icon">
+                        <svg viewBox="0 0 24 24" width="48" height="48" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line></svg>
+                    </div>
+                    <p class="drop-zone-text">Drag & drop your cinematic MP4 file here</p>
+                    <span class="drop-zone-sub">or click to browse local files</span>
+                    <input type="file" id="file-input" accept="video/mp4" style="display: none;">
+                </div>
+                
+                <div id="file-details" class="file-details hidden">
+                    <span class="file-name" id="file-name">filename.mp4</span>
+                    <button id="remove-file-btn" class="text-btn">Remove</button>
+                </div>
+
+                <div class="input-group">
+                    <label for="url-input">Target Website / Campaign URL</label>
+                    <input type="url" id="url-input" value="https://6framestudio.com/" placeholder="e.g. https://6framestudio.com/project-neon">
+                </div>
+
+                <button id="trigger-btn" class="primary-btn glow-btn" disabled>
+                    <span>Generate Social Campaigns</span>
+                </button>
+            </div>
+
+            <!-- Pipeline Progress Stepper -->
+            <div class="glass-card progress-card hidden" id="progress-card">
+                <h3>Multi-Agent Orchestration Status</h3>
+                <div class="progress-bar-container">
+                    <div class="progress-bar" id="progress-bar" style="width: 0%;"></div>
+                </div>
+                <p class="status-msg" id="status-msg">Initiating agent system...</p>
+
+                <div class="stepper">
+                    <div class="step" id="step-upload">
+                        <div class="step-circle">1</div>
+                        <div class="step-label">Asset Uploading</div>
+                    </div>
+                    <div class="step" id="step-context">
+                        <div class="step-circle">2</div>
+                        <div class="step-label">Context Agent (Gemini Pro)</div>
+                    </div>
+                    <div class="step" id="step-copy">
+                        <div class="step-circle">3</div>
+                        <div class="step-label">Copy Agents (Gemini Flash)</div>
+                    </div>
+                    <div class="step" id="step-review">
+                        <div class="step-circle">4</div>
+                        <div class="step-label">Staged for Review</div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- RIGHT PANEL: Generated Staged Posts -->
+        <section class="right-panel">
+            <div class="placeholder-card" id="review-placeholder">
+                <svg viewBox="0 0 24 24" width="64" height="64" stroke="currentColor" stroke-width="1" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line><polyline points="10 9 9 9 8 9"></polyline></svg>
+                <h3>Staging Environment</h3>
+                <p>Upload a video asset and run the agents to generate platform-optimized, cinematic copy.</p>
+            </div>
+
+            <!-- Content Workspace (Visible after success) -->
+            <div class="workspace-content hidden" id="workspace-content">
+                <!-- TABS -->
+                <div class="tabs-container">
+                    <button class="tab-btn active" data-tab="linkedin">LinkedIn</button>
+                    <button class="tab-btn" data-tab="twitter">Twitter / X</button>
+                    <button class="tab-btn" data-tab="instagram">Instagram</button>
+                    <button class="tab-btn" data-tab="brief">Context Brief</button>
+                </div>
+
+                <!-- TAB CONTENTS -->
+                <div class="tab-content active" id="tab-linkedin">
+                    <div class="glass-card workspace-card">
+                        <div class="card-header">
+                            <h3>LinkedIn Staged Post</h3>
+                            <span class="badge">B2B Strategy</span>
+                        </div>
+                        <textarea id="linkedin-text" rows="12" class="post-textarea"></textarea>
+                        <div class="card-footer">
+                            <button class="secondary-btn copy-btn" data-target="linkedin-text">Copy to Clipboard</button>
+                            <button id="publish-linkedin-btn" class="primary-btn publish-btn">Publish to LinkedIn</button>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="tab-content" id="tab-twitter">
+                    <div class="glass-card workspace-card">
+                        <div class="card-header">
+                            <h3>Twitter / X Thread</h3>
+                            <span class="badge">Viral Hook</span>
+                        </div>
+                        
+                        <div id="tweet-cards-container" class="tweet-cards-container">
+                            <!-- Tweets will be dynamically injected here -->
+                        </div>
+
+                        <div class="card-footer">
+                            <button class="secondary-btn" id="copy-twitter-btn">Copy Full Thread</button>
+                            <button id="publish-twitter-btn" class="primary-btn publish-btn">Publish Thread to X</button>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="tab-content" id="tab-instagram">
+                    <div class="glass-card workspace-card">
+                        <div class="card-header">
+                            <h3>Instagram Visual Caption</h3>
+                            <span class="badge">Mood & Tone</span>
+                        </div>
+                        <textarea id="instagram-text" rows="10" class="post-textarea"></textarea>
+                        <div class="card-footer">
+                            <button class="secondary-btn copy-btn" data-target="instagram-text">Copy to Clipboard</button>
+                            <span class="info-tag">Manual upload to Instagram recommended</span>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="tab-content" id="tab-brief">
+                    <div class="glass-card brief-card">
+                        <h3>Multimodal Intelligence Context Brief</h3>
+                        <p class="brief-intro">This information was extracted by the Context Agent using Gemini 2.5 Pro multi-modal analysis.</p>
+                        
+                        <div class="brief-section">
+                            <h4>Video Visual Summary</h4>
+                            <p id="brief-summary"></p>
+                        </div>
+
+                        <div class="brief-section">
+                            <h4>Key Themes</h4>
+                            <div class="tags" id="brief-themes"></div>
+                        </div>
+
+                        <div class="brief-section">
+                            <h4>Brand Alignment Analysis</h4>
+                            <p id="brief-alignment"></p>
+                        </div>
+
+                        <div class="brief-section">
+                            <h4>Visual Style Tags</h4>
+                            <div class="tags" id="brief-style"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+        </div><!-- close split-layout -->
+        </div><!-- close pipeline-view -->
+
+        <!-- Viral Campaigns View -->
+        <div id="campaigns-view" class="view-content active-view">
+            <!-- Sub Navigation Toggles -->
+            <div class="sub-nav">
+                <button id="subnav-prebuilt" class="subnav-link">Curated Concepts</button>
+                <button id="subnav-scanner" class="subnav-link active">Live Trend Scanner (24h)</button>
+            </div>
+
+            <!-- Prebuilt Curated Concepts -->
+            <div id="prebuilt-campaigns-container" class="view-content hidden">
+                <div class="campaigns-grid-container">
+                <!-- Left panel: Campaign selector cards -->
+                <div class="campaigns-sidebar">
+                    <h2>Viral AI Campaigns</h2>
+                    <p class="sidebar-help">Select a campaign concept to view staged content and motion prompts.</p>
+                    <div class="campaign-cards-list" id="campaign-cards-list">
+                        <!-- Dynamically filled with campaign cards -->
+                    </div>
+                    
+                    <!-- Scheduled Queue Card -->
+                    <div class="glass-card queue-card" style="margin-top: 1.5rem; padding: 1rem; border: 1px solid var(--border-color); background: rgba(0,0,0,0.1); border-radius: var(--radius-md);">
+                        <h3 style="font-family:'Outfit', sans-serif; font-size: 0.85rem; color: var(--text-primary); margin-bottom: 0.5rem; display: flex; align-items: center; justify-content: space-between;">
+                            <span>Scheduled Queue</span>
+                            <span class="pulse-dot"></span>
+                        </h3>
+                        <div class="scheduled-posts-list" id="concept-queue-list" style="max-height: 250px; overflow-y: auto; display: flex; flex-direction: column; gap: 0.5rem;">
+                            <p style="font-size: 0.75rem; color: var(--text-secondary); text-align: center; margin: 0.5rem 0;">No scheduled posts.</p>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Right panel: Active campaign workspace -->
+                <div class="campaign-workspace glass-card" id="campaign-workspace">
+                    <div class="workspace-placeholder" id="campaign-workspace-placeholder">
+                        <svg viewBox="0 0 24 24" width="64" height="64" stroke="currentColor" stroke-width="1" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"></path></svg>
+                        <h3>Select a Campaign Concept</h3>
+                        <p>Select a concept from the list to load the cinematic asset, social copy, and motion scripting parameters.</p>
+                    </div>
+                    
+                    <div class="workspace-layout hidden" id="campaign-workspace-layout">
+                        <!-- Left column: visual preview & prompt -->
+                        <div class="campaign-visual-panel">
+                            <div class="visual-preview-container">
+                                <img src="" id="campaign-visual-img" class="campaign-preview-img" alt="Visual Preview">
+                            </div>
+                            <div class="input-group">
+                                <label for="campaign-video-prompt">Image-to-Video Motion Prompt</label>
+                                <textarea id="campaign-video-prompt" rows="5" class="post-textarea" readonly></textarea>
+                            </div>
+                             <button class="secondary-btn" id="copy-motion-btn" style="margin-top: 0.5rem; width: 100%;">Copy Motion Prompt</button>
+                             
+                             <!-- Dynamic Video Generator Container -->
+                             <div class="glass-card video-preview-card" style="margin-top: 1rem; padding: 1.2rem; background: rgba(255, 255, 255, 0.01); border: 1px solid var(--border-color); border-radius: var(--radius-md); text-align: center;">
+                                  <h4 style="font-size:0.85rem; color:var(--text-primary); margin-bottom:0.5rem; display: flex; align-items: center; justify-content: center; gap: 0.5rem;">
+                                      <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round" style="color: var(--primary-color);"><polygon points="23 7 16 12 23 17 23 7"></polygon><rect x="1" y="5" width="15" height="14" rx="2" ry="2"></rect></svg>
+                                      Cinematic AI Video Renderer
+                                  </h4>
+                                  
+                                  <div id="concept-video-placeholder" class="video-placeholder">
+                                      <div class="input-group" style="margin-bottom: 0.6rem; text-align: left;">
+                                          <label for="concept-video-engine" style="font-size: 0.7rem; color: var(--text-secondary); margin-bottom: 0.25rem;">Select AI Render Engine</label>
+                                          <select id="concept-video-engine" style="background: rgba(0,0,0,0.4); border: 1px solid var(--border-color); color: var(--text-primary); border-radius: 4px; padding: 0.35rem 0.5rem; font-size: 0.75rem; width: 100%;">
+                                              <option value="google_veo">Google Veo 3.1 (Cinematic)</option>
+                                              <option value="google_veo_lite">Google Veo 3.1 Lite (Lower Cost)</option>
+                                              <option value="google_veo_fast">Google Veo 3.1 Fast</option>
+                                              <option value="fal_hailuo_23">FAL Hailuo 2.3 Standard (Budget)</option>
+                                              <option value="fal_hailuo_02">FAL Hailuo 02 Standard (Lowest Cost)</option>
+                                              <option value="fal_seedance_fast">FAL Seedance Fast (Social)</option>
+                                              <option value="fal_ltx_fast">FAL LTX Video 2.0 Fast</option>
+                                              <option value="runway_gen3">Runway Gen-3 (Alpha Turbo / Gen-4.5)</option>
+                                          </select>
+                                      </div>
+                                      <div class="input-group" style="margin-bottom: 0.6rem; text-align: left;">
+                                          <label for="concept-video-duration" style="font-size: 0.7rem; color: var(--text-secondary); margin-bottom: 0.25rem;">Select Video Duration</label>
+                                          <select id="concept-video-duration" style="background: rgba(0,0,0,0.4); border: 1px solid var(--border-color); color: var(--text-primary); border-radius: 4px; padding: 0.35rem 0.5rem; font-size: 0.75rem; width: 100%;">
+                                              <option value="5" disabled>5 seconds (retired)</option>
+                                              <option value="6" disabled>6 seconds (FAL Standard)</option>
+                                              <option value="8" selected>8 seconds</option>
+                                              <option value="10">10 seconds</option>
+                                              <option value="12" disabled>12 seconds (Seedance / LTX)</option>
+                                              <option value="15">15 seconds</option>
+                                              <option value="14" disabled>14 seconds (FAL LTX)</option>
+                                              <option value="16" disabled>16 seconds (FAL LTX)</option>
+                                              <option value="18" disabled>18 seconds (FAL LTX)</option>
+                                              <option value="20" disabled>20 seconds (FAL LTX Max)</option>
+                                              <option value="30" disabled>30 seconds (Cinematic Cut - Runway Only)</option>
+                                          </select>
+                                      </div>
+                                      <button id="concept-generate-video-btn" class="primary-btn glow-btn" style="width: 100%; font-size: 0.8rem; padding: 0.5rem 1rem;">Generate Preview Video</button>
+                                  </div></div>
+                                 
+                                 <div id="concept-video-loading" class="video-loading-container hidden" style="padding: 0.5rem 0;">
+                                     <div class="spinner"></div>
+                                     <p id="concept-video-status-msg" style="font-size: 0.75rem; color: var(--text-secondary); margin-top: 0.5rem;">Enqueuing job...</p>
+                                 </div>
+                                 
+                                 <div id="concept-video-player-container" class="video-player-container hidden">
+                                     <video id="concept-video-player" src="" controls style="width: 100%; border-radius: 6px; border: 1px solid var(--border-color); margin-bottom: 0.5rem;"></video>
+                                     <a id="concept-download-video-btn" href="" download class="secondary-btn" style="display: block; text-decoration: none; text-align: center; font-size: 0.75rem; padding: 0.4rem;">Download Rendered Video</a>
+                                 </div>
+                             </div>
+                         </div>
+                        
+                        <!-- Right column: Social copies tabs -->
+                        <div class="campaign-copy-panel">
+                            <div class="campaign-tabs-container">
+                                <button class="c-tab-btn active" data-ctab="c-linkedin">LinkedIn</button>
+                                <button class="c-tab-btn" data-ctab="c-twitter">Twitter / X</button>
+                                <button class="c-tab-btn" data-ctab="c-instagram">Instagram</button>
+                            </div>
+                            
+                            <div class="c-tab-content active" id="c-linkedin">
+                                <h3>LinkedIn Post</h3>
+                                <textarea id="c-linkedin-text" rows="10" class="post-textarea"></textarea>
+                                <div class="c-actions">
+                                    <button class="secondary-btn copy-btn" data-target="c-linkedin-text">Copy Post</button>
+                                    <button id="publish-c-linkedin-btn" class="primary-btn publish-btn">Publish</button>
+                                </div>
+                            </div>
+                            
+                            <div class="c-tab-content" id="c-twitter">
+                                <h3>Twitter / X Thread</h3>
+                                <div id="c-tweet-cards-container" class="tweet-cards-container">
+                                    <!-- Dynamic tweets -->
+                                </div>
+                                <div class="c-actions">
+                                    <button class="secondary-btn" id="copy-c-twitter-btn">Copy Thread</button>
+                                    <button id="publish-c-twitter-btn" class="primary-btn publish-btn">Publish Thread</button>
+                                </div>
+                            </div>
+                            
+                            <div class="c-tab-content" id="c-instagram">
+                                <h3>Instagram Caption</h3>
+                                <textarea id="c-instagram-text" rows="10" class="post-textarea"></textarea>
+                                <div class="c-actions">
+                                    <button class="secondary-btn copy-btn" data-target="c-instagram-text">Copy Caption</button>
+                                    <span class="info-tag">Manual upload recommended</span>
+                                </div>
+                            </div>
+                            
+                            <!-- Scheduler Widget -->
+                            <div class="glass-card scheduler-card" style="margin-top: 1rem; padding: 1rem; border: 1px solid var(--border-color); background: rgba(0,0,0,0.15); text-align: left;">
+                                <h4 style="font-size: 0.8rem; color: var(--text-primary); margin-bottom: 0.5rem; display: flex; align-items: center; gap: 0.25rem;">
+                                    <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round" style="color: var(--primary-color);"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect><line x1="16" y1="2" x2="16" y2="6"></line><line x1="8" y1="2" x2="8" y2="6"></line><line x1="3" y1="10" x2="21" y2="10"></line></svg>
+                                    Schedule Post Release
+                                </h4>
+                                <div style="display: flex; gap: 0.5rem; align-items: center; margin-bottom: 0.5rem;">
+                                    <input type="datetime-local" id="concept-schedule-time" style="background: rgba(0,0,0,0.4); border: 1px solid var(--border-color); color: var(--text-primary); border-radius: 4px; padding: 0.35rem; font-size: 0.75rem; flex: 1;">
+                                    <select id="concept-schedule-platform" style="background: rgba(0,0,0,0.4); border: 1px solid var(--border-color); color: var(--text-primary); border-radius: 4px; padding: 0.35rem 0.5rem; font-size: 0.75rem; width: 100px;">
+                                        <option value="both">Both</option>
+                                        <option value="linkedin">LinkedIn</option>
+                                        <option value="twitter">Twitter / X</option>
+                                    </select>
+                                </div>
+                                <button id="concept-schedule-btn" class="primary-btn schedule-btn" style="width: 100%; font-size: 0.75rem; padding: 0.4rem;">Schedule Release</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div><!-- close prebuilt-campaigns-container -->
+
+        <!-- Live Trend Scanner View -->
+        <div id="scanner-campaigns-container" class="view-content">
+            <div class="campaigns-grid-container">
+                <!-- Left panel: Scanner controls & trend list -->
+                <div class="campaigns-sidebar">
+                    <h2>Live Trends Scanner</h2>
+                    <p class="sidebar-help">Find top viral AI films and logo videos from the last 24h, adapted for 6Frame Studio.</p>
+                    
+                    <button id="scanner-trigger-btn" class="primary-btn glow-btn" style="width:100%; margin-bottom: 1rem;">
+                        <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+                        Scan Social Trends
+                    </button>
+
+                    <!-- Scanning progress box -->
+                    <div id="scanner-progress-card" class="glass-card hidden" style="padding: 1.2rem; margin-bottom: 1rem;">
+                        <div class="scanner-radar-container">
+                            <div class="radar-ping"></div>
+                            <div class="radar-beam"></div>
+                        </div>
+                        <p class="status-msg" id="scanner-status-msg" style="margin: 0.5rem 0 0; text-align: center;">Scanning networks...</p>
+                    </div>
+
+                    <div class="campaign-cards-list" id="trend-cards-list">
+                        <!-- Dynamically filled with trending cards -->
+                    </div>
+                    
+                    <!-- Scheduled Queue Card -->
+                    <div class="glass-card queue-card" style="margin-top: 1.5rem; padding: 1rem; border: 1px solid var(--border-color); background: rgba(0,0,0,0.1); border-radius: var(--radius-md);">
+                        <h3 style="font-family:'Outfit', sans-serif; font-size: 0.85rem; color: var(--text-primary); margin-bottom: 0.5rem; display: flex; align-items: center; justify-content: space-between;">
+                            <span>Scheduled Queue</span>
+                            <span class="pulse-dot"></span>
+                        </h3>
+                        <div class="scheduled-posts-list" id="trend-queue-list" style="max-height: 250px; overflow-y: auto; display: flex; flex-direction: column; gap: 0.5rem;">
+                            <p style="font-size: 0.75rem; color: var(--text-secondary); text-align: center; margin: 0.5rem 0;">No scheduled posts.</p>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Right panel: Active Trend workspace -->
+                <div class="campaign-workspace glass-card" id="trend-workspace">
+                    <div class="workspace-placeholder" id="trend-workspace-placeholder">
+                        <svg viewBox="0 0 24 24" width="64" height="64" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M21.21 15.89A10 10 0 1 1 8 2.83"></path><path d="M22 12A10 10 0 0 0 12 2v10z"></path></svg>
+                        <h3>Live Trend Staging</h3>
+                        <p>Trigger the scanner to find real-time viral concepts, or select a trend from the scanned list to load the assets.</p>
+                    </div>
+
+                    <div class="workspace-layout hidden" id="trend-workspace-layout">
+                        <!-- Top Mode Selector -->
+                        <div class="workspace-mode-selector" style="grid-column: span 2; display: flex; gap: 1rem; margin-bottom: 0.5rem; border-bottom: 1px solid var(--border-color); padding-bottom: 1rem; width: 100%;">
+                            <button id="trend-mode-recreate" class="secondary-btn active" style="flex: 1; text-align: center; font-family: 'Outfit', sans-serif; font-size: 0.9rem; padding: 0.6rem 1rem;">Option 1: Recreate Concept (AI Video Render)</button>
+                            <button id="trend-mode-repurpose" class="secondary-btn" style="flex: 1; text-align: center; font-family: 'Outfit', sans-serif; font-size: 0.9rem; padding: 0.6rem 1rem;">Option 2: Repurpose Video (Attributed Commentary)</button>
+                        </div>
+
+                        <!-- Left column: Trend origin details & prompt -->
+                        <div class="campaign-visual-panel">
+                            <div class="glass-card trend-info-card" style="padding: 1.2rem; background: rgba(255, 255, 255, 0.01); margin-bottom: 1rem;">
+                                <h3 style="font-family:'Outfit', sans-serif; font-size:1.1rem; color:var(--primary-color);" id="trend-title-header">Viral AI Film</h3>
+                                <div style="display:flex; justify-content:space-between; font-size:0.8rem; color:var(--text-secondary); margin-top:0.5rem;">
+                                    <span id="trend-platform-tag">YouTube</span>
+                                    <span id="trend-author-tag">@creator</span>
+                                </div>
+                                <div style="display:flex; justify-content:space-between; align-items:center; font-size:0.8rem; color:var(--text-secondary); margin-top:0.25rem;">
+                                    <span id="trend-metrics-tag">120K Views</span>
+                                    <a id="trend-original-link-anchor" href="" target="_blank" style="color: var(--primary-color); text-decoration: underline; font-weight: 500;">Open Original Link ↗</a>
+                                </div>
+                                <hr style="border:0; border-top:1px solid var(--border-color); margin: 0.8rem 0;">
+                                <h4 style="font-size:0.85rem; color:var(--text-primary); margin-bottom:0.25rem;">Original Trend Breakdown</h4>
+                                <p id="trend-original-concept" style="font-size:0.8rem; color:var(--text-secondary); line-height:1.4;"></p>
+                                <hr style="border:0; border-top:1px solid var(--border-color); margin: 0.8rem 0;">
+                                <h4 style="font-size:0.85rem; color:var(--text-primary); margin-bottom:0.25rem;">6Frame Studio Twist</h4>
+                                <p id="trend-studio-twist" style="font-size:0.8rem; color:var(--text-secondary); line-height:1.4;"></p>
+                            </div>
+
+                            <!-- Option 1: Recreate Container (Veo/Runway prompt and renderer) -->
+                            <div id="trend-recreate-container" class="mode-container">
+                                <div class="input-group">
+                                    <label for="trend-video-prompt">Recreated Image-to-Video Motion Prompt</label>
+                                    <textarea id="trend-video-prompt" rows="4" class="post-textarea" readonly></textarea>
+                                </div>
+                                <button class="secondary-btn copy-btn" id="copy-trend-motion-btn" style="margin-top: 0.2rem; width: 100%; margin-bottom: 1rem;">Copy Motion Prompt</button>
+
+                                <!-- Virality Score: usable as soon as a trend is selected, no video required -->
+                                <button id="trend-virality-score-btn" class="secondary-btn" style="width: 100%; font-size: 0.75rem; padding: 0.5rem; margin-bottom: 0.5rem;">Get Virality Score</button>
+                                <div id="trend-virality-result" class="hidden" style="background: rgba(0,0,0,0.25); border: 1px solid var(--border-color); border-radius: 6px; padding: 0.6rem; margin-bottom: 1rem; font-size: 0.7rem; text-align: left;">
+                                    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.3rem;">
+                                        <strong style="color:var(--text-primary);">Virality Score</strong>
+                                        <span id="trend-virality-score-value" style="font-family:'Outfit',sans-serif; font-size:1.1rem; font-weight:700; color:var(--primary-color);">--</span>
+                                    </div>
+                                    <p id="trend-virality-reasoning" style="color:var(--text-secondary); margin-bottom:0.4rem;"></p>
+                                    <ul id="trend-virality-suggestions" style="color:var(--text-secondary); margin:0; padding-left:1.1rem;"></ul>
+                                </div>
+
+                                 <!-- Dynamic Video Generator Container -->
+                                 <div class="glass-card video-preview-card" style="padding: 1.2rem; background: rgba(255, 255, 255, 0.01); border: 1px solid var(--border-color); border-radius: var(--radius-md); text-align: center;">
+                                     <h4 style="font-size:0.85rem; color:var(--text-primary); margin-bottom:0.5rem; display: flex; align-items: center; justify-content: center; gap: 0.5rem;">
+                                         <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round" style="color: var(--primary-color);"><polygon points="23 7 16 12 23 17 23 7"></polygon><rect x="1" y="5" width="15" height="14" rx="2" ry="2"></rect></svg>
+                                          Cinematic AI Video Renderer
+                                     </h4>
+                                     
+                                     <div id="trend-video-placeholder" class="video-placeholder">
+                                          <div class="input-group" style="margin-bottom: 0.6rem; text-align: left;">
+                                              <label for="trend-video-engine" style="font-size: 0.7rem; color: var(--text-secondary); margin-bottom: 0.25rem;">Select AI Render Engine</label>
+                                              <select id="trend-video-engine" style="background: rgba(0,0,0,0.4); border: 1px solid var(--border-color); color: var(--text-primary); border-radius: 4px; padding: 0.35rem 0.5rem; font-size: 0.75rem; width: 100%;">
+                                                  <option value="google_veo">Google Veo 3.1 (Cinematic)</option>
+                                                  <option value="google_veo_lite">Google Veo 3.1 Lite (Lower Cost)</option>
+                                                  <option value="google_veo_fast">Google Veo 3.1 Fast</option>
+                                                  <option value="fal_hailuo_23">FAL Hailuo 2.3 Standard (Budget)</option>
+                                                  <option value="fal_hailuo_02">FAL Hailuo 02 Standard (Lowest Cost)</option>
+                                                  <option value="fal_seedance_fast">FAL Seedance Fast (Social)</option>
+                                                  <option value="fal_ltx_fast">FAL LTX Video 2.0 Fast</option>
+                                                  <option value="runway_gen3">Runway Gen-3 (Alpha Turbo)</option>
+                                              </select>
+                                          </div>
+                                          <div class="input-group" style="margin-bottom: 0.6rem; text-align: left;">
+                                              <label for="trend-video-duration" style="font-size: 0.7rem; color: var(--text-secondary); margin-bottom: 0.25rem;">Select Video Duration</label>
+                                              <select id="trend-video-duration" style="background: rgba(0,0,0,0.4); border: 1px solid var(--border-color); color: var(--text-primary); border-radius: 4px; padding: 0.35rem 0.5rem; font-size: 0.75rem; width: 100%;">
+                                                  <option value="5" disabled>5 seconds (retired)</option>
+                                                  <option value="6" disabled>6 seconds (FAL Standard)</option>
+                                                  <option value="8" selected>8 seconds</option>
+                                                  <option value="10">10 seconds</option>
+                                                  <option value="12" disabled>12 seconds (Seedance / LTX)</option>
+                                                  <option value="15">15 seconds</option>
+                                              <option value="14" disabled>14 seconds (FAL LTX)</option>
+                                                  <option value="16" disabled>16 seconds (FAL LTX)</option>
+                                                  <option value="18" disabled>18 seconds (FAL LTX)</option>
+                                                  <option value="20" disabled>20 seconds (FAL LTX Max)</option>
+                                                  <option value="30" disabled>30 seconds (Cinematic Cut - Runway Only)</option>
+                                              </select>
+                                          </div>
+                                          <button id="trend-generate-video-btn" class="primary-btn glow-btn" style="width: 100%; font-size: 0.8rem; padding: 0.5rem 1rem;">Generate Preview Video</button>
+                                      </div>
+                                     
+                                     <div id="trend-video-loading" class="video-loading-container hidden" style="padding: 0.5rem 0;">
+                                         <div class="spinner"></div>
+                                         <p id="trend-video-status-msg" style="font-size: 0.75rem; color: var(--text-secondary); margin-top: 0.5rem;">Enqueuing job...</p>
+                                     </div>
+                                     
+                                     <div id="trend-video-player-container" class="video-player-container hidden">
+                                         <video id="trend-video-player" src="" controls style="width: 100%; border-radius: 6px; border: 1px solid var(--border-color); margin-bottom: 0.5rem;"></video>
+                                         <a id="trend-download-video-btn" href="" download class="secondary-btn" style="display: block; text-decoration: none; text-align: center; font-size: 0.75rem; padding: 0.4rem; margin-bottom: 0.5rem;">Download Rendered Video</a>
+
+                                         <div style="border-top: 1px solid var(--border-color); padding-top: 0.6rem; margin-top: 0.2rem;">
+                                             <button id="trend-generate-variants-btn" class="secondary-btn" style="width: 100%; font-size: 0.7rem; padding: 0.4rem;">Generate Platform Variants (9:16, 1:1, 16:9)</button>
+                                             <div id="trend-variants-loading" class="hidden" style="text-align:center; padding: 0.5rem 0;">
+                                                 <div class="spinner" style="margin: 0 auto;"></div>
+                                                 <p id="trend-variants-status-msg" style="font-size: 0.7rem; color: var(--text-secondary); margin-top: 0.4rem;">Rendering variants...</p>
+                                             </div>
+                                             <div id="trend-variants-result" class="hidden" style="display: flex; flex-direction: column; gap: 0.35rem; margin-top: 0.5rem;"></div>
+                                         </div>
+                                     </div>
+
+                                     <div id="trend-template-panel" style="border-top: 1px solid var(--border-color); padding-top: 0.7rem; margin-top: 0.7rem; text-align: left;">
+                                         <label for="trend-template-style" style="display:block; font-size: 0.68rem; color: var(--text-secondary); margin-bottom: 0.25rem;">Internal HyperFrames template</label>
+                                         <div style="display: grid; grid-template-columns: 1fr auto; gap: 0.45rem; align-items: center;">
+                                             <select id="trend-template-style" style="background: rgba(0,0,0,0.4); border: 1px solid var(--border-color); color: var(--text-primary); border-radius: 4px; padding: 0.35rem 0.5rem; font-size: 0.72rem; min-width: 0;">
+                                                 <option value="hook_burst">Hook Burst</option>
+                                                 <option value="cinematic_stack">Cinematic Stack</option>
+                                                 <option value="trend_radar">Trend Radar</option>
+                                                 <option value="documentary_interview">Documentary Interview</option>
+                                                 <option value="then_vs_now">Then vs. Now</option>
+                                                 <option value="movie_star_entrance">Movie Star Entrance</option>
+                                                 <option value="meme_master_reaction">Meme Master Reaction</option>
+                                                 <option value="summer_schedule_loop">Summer Schedule Loop</option>
+                                             </select>
+                                             <button id="trend-apply-template-btn" class="secondary-btn" style="font-size: 0.68rem; padding: 0.35rem 0.55rem; white-space: nowrap;">Apply template</button>
+                                         </div>
+                                         <div id="trend-template-loading" class="hidden" style="text-align:center; padding: 0.5rem 0 0;">
+                                             <div class="spinner" style="margin: 0 auto;"></div>
+                                             <p id="trend-template-status-msg" style="font-size: 0.7rem; color: var(--text-secondary); margin-top: 0.4rem;">Applying template...</p>
+                                         </div>
+                                     </div>
+                                 </div>
+                            </div>
+
+                            <!-- Option 2: Repurpose Container (Original text and video downloader) -->
+                            <div id="trend-repurpose-container" class="mode-container hidden">
+                                <div class="glass-card" style="padding: 0.8rem; margin-bottom: 1rem; border: 1px dashed var(--primary-color); background: rgba(138, 43, 226, 0.05); text-align: left; font-size: 0.75rem;">
+                                    <h5 style="color: var(--primary-color); font-weight: bold; margin-bottom: 0.35rem; font-family: 'Outfit', sans-serif;">How to Repurpose:</h5>
+                                    <ol style="margin-left: 1.1rem; color: var(--text-secondary); line-height: 1.4; padding-left: 0;">
+                                        <li style="margin-bottom: 0.2rem;">Click <strong>Open Original Link ↗</strong> in the header details card to review the source.</li>
+                                        <li style="margin-bottom: 0.2rem;">Click <strong>Download & Load Video</strong> below to crawl the video file locally.</li>
+                                        <li style="margin-bottom: 0.2rem;">Staged copies on the right automatically rewrite commentaries to credit the creator in 6Frame's brand voice.</li>
+                                        <li style="margin-bottom: 0.2rem;">Publish or Schedule to post the copy together with the video file.</li>
+                                    </ol>
+                                </div>
+
+                                <div class="input-group" style="margin-bottom: 1rem;">
+                                    <label for="trend-original-post-text">Original Video Post Copy</label>
+                                    <textarea id="trend-original-post-text" rows="4" class="post-textarea" readonly></textarea>
+                                </div>
+
+                                <div class="glass-card video-preview-card" style="padding: 1.2rem; background: rgba(255, 255, 255, 0.01); border: 1px solid var(--border-color); border-radius: var(--radius-md); text-align: center;">
+                                    <h4 style="font-size:0.85rem; color:var(--text-primary); margin-bottom:0.5rem; display: flex; align-items: center; justify-content: center; gap: 0.5rem;">
+                                        <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round" style="color: var(--primary-color);"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+                                        Original Video Loader
+                                    </h4>
+
+                                    <div id="trend-orig-video-placeholder" class="video-placeholder">
+                                        <p style="font-size: 0.75rem; color: var(--text-secondary); margin-bottom: 1rem; line-height: 1.4;">
+                                            This will automatically download and stitch/convert the original viral video using <code>yt-dlp</code> so it is loaded into your active post.
+                                        </p>
+                                        <button id="trend-load-orig-video-btn" class="primary-btn glow-btn" style="width: 100%; font-size: 0.8rem; padding: 0.5rem 1rem;">Download & Load Video</button>
+                                    </div>
+
+                                    <div id="trend-orig-video-loading" class="video-loading-container hidden" style="padding: 0.5rem 0;">
+                                        <div class="spinner"></div>
+                                        <p id="trend-orig-video-status-msg" style="font-size: 0.75rem; color: var(--text-secondary); margin-top: 0.5rem;">Running yt-dlp to scrape video file...</p>
+                                    </div>
+
+                                    <div id="trend-orig-video-player-container" class="video-player-container hidden">
+                                        <video id="trend-orig-video-player" src="" controls style="width: 100%; border-radius: 6px; border: 1px solid var(--border-color); margin-bottom: 0.5rem;"></video>
+                                        <button id="trend-orig-remove-btn" class="text-btn" style="font-size: 0.7rem; text-decoration: none;">Remove Loaded Video</button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+
+                        <!-- Right column: Adapted Social copies tabs -->
+                        <div class="campaign-copy-panel">
+                            <div class="campaign-tabs-container">
+                                <button class="t-tab-btn active" data-ttab="t-linkedin">LinkedIn</button>
+                                <button class="t-tab-btn" data-ttab="t-twitter">Twitter / X</button>
+                                <button class="t-tab-btn" data-ttab="t-instagram">Instagram</button>
+                            </div>
+
+                            <div class="t-tab-content active" id="t-linkedin">
+                                <h3>LinkedIn Adaptation</h3>
+                                <textarea id="t-linkedin-text" rows="10" class="post-textarea"></textarea>
+                                <div class="c-actions">
+                                    <button class="secondary-btn copy-btn" data-target="t-linkedin-text">Copy Post</button>
+                                    <button id="publish-t-linkedin-btn" class="primary-btn publish-btn">Publish</button>
+                                </div>
+                            </div>
+
+                            <div class="t-tab-content" id="t-twitter">
+                                <h3>Twitter / X Thread Adaptation</h3>
+                                <div id="t-tweet-cards-container" class="tweet-cards-container">
+                                    <!-- Dynamic tweets -->
+                                </div>
+                                <div class="c-actions">
+                                    <button class="secondary-btn" id="copy-t-twitter-btn">Copy Thread</button>
+                                    <button id="publish-t-twitter-btn" class="primary-btn publish-btn">Publish Thread</button>
+                                </div>
+                            </div>
+
+                            <div class="t-tab-content" id="t-instagram">
+                                <h3>Instagram Caption Adaptation</h3>
+                                <textarea id="t-instagram-text" rows="10" class="post-textarea"></textarea>
+                                <div class="c-actions">
+                                    <button class="secondary-btn copy-btn" data-target="t-instagram-text">Copy Caption</button>
+                                    <span class="info-tag">Manual upload recommended</span>
+                                </div>
+                            </div>
+                            
+                            <!-- Scheduler Widget -->
+                            <div class="glass-card scheduler-card" style="margin-top: 1rem; padding: 1rem; border: 1px solid var(--border-color); background: rgba(0,0,0,0.15); text-align: left;">
+                                <h4 style="font-size: 0.8rem; color: var(--text-primary); margin-bottom: 0.5rem; display: flex; align-items: center; gap: 0.25rem;">
+                                    <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round" style="color: var(--primary-color);"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect><line x1="16" y1="2" x2="16" y2="6"></line><line x1="8" y1="2" x2="8" y2="6"></line><line x1="3" y1="10" x2="21" y2="10"></line></svg>
+                                    Schedule Post Release
+                                </h4>
+                                <div style="display: flex; gap: 0.5rem; align-items: center; margin-bottom: 0.5rem;">
+                                    <input type="datetime-local" id="trend-schedule-time" style="background: rgba(0,0,0,0.4); border: 1px solid var(--border-color); color: var(--text-primary); border-radius: 4px; padding: 0.35rem; font-size: 0.75rem; flex: 1;">
+                                    <select id="trend-schedule-platform" style="background: rgba(0,0,0,0.4); border: 1px solid var(--border-color); color: var(--text-primary); border-radius: 4px; padding: 0.35rem 0.5rem; font-size: 0.75rem; width: 100px;">
+                                        <option value="both">Both</option>
+                                        <option value="linkedin">LinkedIn</option>
+                                        <option value="twitter">Twitter / X</option>
+                                    </select>
+                                </div>
+                                <button id="trend-schedule-btn" class="primary-btn schedule-btn" style="width: 100%; font-size: 0.75rem; padding: 0.4rem;">Schedule Release</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        </div><!-- close campaigns-view -->
+
+        <!-- VIRAL VIDEO REPURPOSER WORKSHOP VIEW -->
+        <div id="repurposer-view" class="view-content" style="width: 100%;">
+            <div class="glass-card" style="padding: 1.5rem; margin-bottom: 2rem; border: 1px solid var(--border-color); border-radius: var(--radius-md);">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.2rem;">
+                    <div>
+                        <h2 style="font-family: 'Outfit', sans-serif; font-size: 1.3rem; color: var(--text-primary); font-weight: 700;">Viral Video Repurposer Workshop</h2>
+                        <p style="color: var(--text-secondary); font-size: 0.8rem; margin-top: 0.2rem;">Paste any public video link to download the media asset and generate attributed commentary in 6Frame Studio's cinematic brand voice.</p>
+                    </div>
+                    <span class="badge" style="background: rgba(138, 43, 226, 0.2); color: #c084fc; font-size: 0.65rem;">Standalone Workshop</span>
+                </div>
+                <div class="glass-card" style="padding: 0.8rem; margin-bottom: 1.2rem; border: 1px dashed var(--primary-color); background: rgba(138, 43, 226, 0.05); text-align: left; font-size: 0.75rem;">
+                    <h5 style="color: var(--primary-color); font-weight: bold; margin-bottom: 0.35rem; font-family: 'Outfit', sans-serif;">Workshop Steps:</h5>
+                    <ol style="margin-left: 1.1rem; color: var(--text-secondary); line-height: 1.4; padding-left: 0;">
+                        <li style="margin-bottom: 0.2rem;">Paste any public video link (YouTube, X/Twitter, Instagram Reels, Reddit) into the URL field.</li>
+                        <li style="margin-bottom: 0.2rem;">Click <strong>Analyze & Scrape Video</strong>. The system will crawl the video metadata, write credit-based commentaries in 6Frame's brand voice, and download the original video file.</li>
+                        <li style="margin-bottom: 0.2rem;">Once processed, the video file will play in the left workspace, and the staged text templates on the right will be ready to Publish or Schedule!</li>
+                    </ol>
+                </div>
+                <!-- Input card -->
+                <div class="glass-card" style="padding: 1.2rem; background: rgba(0,0,0,0.2); border: 1px solid rgba(255,255,255,0.03); margin-bottom: 1.5rem;">
+                    <div style="display: flex; gap: 1rem; align-items: flex-end; flex-wrap: wrap;">
+                        <div class="input-group" style="flex: 1; min-width: 250px; margin-bottom: 0;">
+                            <label for="repurpose-input-url" style="font-size: 0.75rem; color: var(--text-secondary); margin-bottom: 0.4rem;">Pasted Original Video Link</label>
+                            <input type="text" id="repurpose-input-url" placeholder="e.g. https://www.youtube.com/watch?v=... or https://x.com/... or Instagram Reels URL" style="background: rgba(0,0,0,0.4); border: 1px solid var(--border-color); color: var(--text-primary); border-radius: 6px; padding: 0.6rem 0.8rem; font-size: 0.85rem; width: 100%;">
+                        </div>
+                        <button id="repurpose-run-btn" class="primary-btn glow-btn" style="padding: 0.6rem 1.5rem; font-size: 0.85rem; height: 38px;">Analyze & Scrape Video</button>
+                    </div>
+                </div>
+
+                <!-- Loader state -->
+                <div id="repurpose-global-loader" class="hidden" style="text-align: center; padding: 2rem 0;">
+                    <div class="spinner" style="margin: 0 auto 1rem;"></div>
+                    <h4 style="font-size: 0.9rem; color: var(--text-primary); margin-bottom: 0.25rem;" id="repurpose-loader-title">Running Search Grounding...</h4>
+                    <p style="font-size: 0.75rem; color: var(--text-secondary);" id="repurpose-loader-status">Fetching details from the pasted URL using Gemini 2.5 Pro...</p>
+                </div>
+
+                <!-- Workshop Workspace -->
+                <div id="repurpose-workspace" class="workspace-layout hidden" style="margin-top: 1rem;">
+                    
+                    <!-- Left Column: Video Scraped preview -->
+                    <div class="campaign-visual-panel">
+                        <div class="glass-card" style="padding: 1.2rem; background: rgba(255, 255, 255, 0.01); margin-bottom: 1rem;">
+                            <h3 style="font-family:'Outfit', sans-serif; font-size:1.0rem; color:var(--primary-color);" id="repurpose-author-header">Scraped Creator</h3>
+                            <div style="font-size:0.75rem; color:var(--text-secondary); margin-top:0.25rem; display: flex; justify-content: space-between;">
+                                <span id="repurpose-platform-tag">Detected Platform</span>
+                                <a id="repurpose-original-link-anchor" href="" target="_blank" style="color: var(--primary-color); text-decoration: underline;">Verify Original ↗</a>
+                            </div>
+                        </div>
+
+                        <div class="input-group" style="margin-bottom: 1rem;">
+                            <label for="repurpose-orig-post-text">Scraped Original Copy</label>
+                            <textarea id="repurpose-orig-post-text" rows="4" class="post-textarea" readonly style="font-size: 0.8rem;"></textarea>
+                        </div>
+
+                        <!-- Video Player Card -->
+                        <div class="glass-card video-preview-card" style="padding: 1.2rem; background: rgba(255, 255, 255, 0.01); border: 1px solid var(--border-color); border-radius: var(--radius-md); text-align: center;">
+                            <h4 style="font-size:0.85rem; color:var(--text-primary); margin-bottom:0.5rem; display: flex; align-items: center; justify-content: center; gap: 0.5rem;">
+                                <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round" style="color: var(--primary-color);"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+                                Scraped Video Asset
+                            </h4>
+
+                            <div id="repurpose-video-placeholder" class="video-placeholder">
+                                <p style="font-size: 0.75rem; color: var(--text-secondary); margin-bottom: 1rem;">Downloading video from url...</p>
+                                <div class="spinner" style="margin: 0 auto;"></div>
+                            </div>
+
+                            <div id="repurpose-video-player-container" class="video-player-container hidden">
+                                <video id="repurpose-video-player" src="" controls style="width: 100%; border-radius: 6px; border: 1px solid var(--border-color); margin-bottom: 0.5rem;"></video>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Right Column: Staged social copies -->
+                    <div class="campaign-copy-panel">
+                        <div class="campaign-tabs-container">
+                            <button class="w-tab-btn active" data-wtab="w-linkedin">LinkedIn</button>
+                            <button class="w-tab-btn" data-wtab="w-twitter">Twitter / X</button>
+                            <button class="w-tab-btn" data-wtab="w-instagram">Instagram</button>
+                        </div>
+
+                        <div class="w-tab-content active" id="w-linkedin">
+                            <h3>LinkedIn Repurposed Copy</h3>
+                            <textarea id="w-linkedin-text" rows="10" class="post-textarea" style="font-size: 0.85rem;"></textarea>
+                            <div class="c-actions">
+                                <button class="secondary-btn copy-btn" data-target="w-linkedin-text">Copy Post</button>
+                                <button id="publish-w-linkedin-btn" class="primary-btn publish-btn">Publish</button>
+                            </div>
+                        </div>
+
+                        <div class="w-tab-content" id="w-twitter">
+                            <h3>Twitter / X Thread</h3>
+                            <div id="w-tweet-cards-container" class="tweet-cards-container">
+                                <!-- Dynamic tweet cards -->
+                            </div>
+                            <div class="c-actions">
+                                <button class="secondary-btn" id="copy-w-twitter-btn">Copy Thread</button>
+                                <button id="publish-w-twitter-btn" class="primary-btn publish-btn">Publish Thread</button>
+                            </div>
+                        </div>
+
+                        <div class="w-tab-content" id="w-instagram">
+                            <h3>Instagram Repurposed Copy</h3>
+                            <textarea id="w-instagram-text" rows="10" class="post-textarea" style="font-size: 0.85rem;"></textarea>
+                            <div class="c-actions">
+                                <button class="secondary-btn copy-btn" data-target="w-instagram-text">Copy Caption</button>
+                            </div>
+                        </div>
+
+                        <!-- Scheduler Widget -->
+                        <hr style="border:0; border-top:1px solid var(--border-color); margin:1.5rem 0;">
+                        <div class="glass-card schedule-release-card" style="padding: 1.2rem; background: rgba(0,0,0,0.2); border: 1px solid rgba(255,255,255,0.02);">
+                            <h4 style="font-family:'Outfit', sans-serif; font-size:0.9rem; color:var(--text-primary); margin-bottom:0.8rem; display:flex; align-items:center; gap:0.4rem;">
+                                <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round" style="color:var(--primary-color);"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect><line x1="16" y1="2" x2="16" y2="6"></line><line x1="8" y1="2" x2="8" y2="6"></line><line x1="3" y1="10" x2="21" y2="10"></line></svg>
+                                Schedule Repurposed Post Release
+                            </h4>
+                            <div style="display:grid; grid-template-columns: 1.2fr 1fr; gap:0.8rem; margin-bottom:0.8rem;">
+                                <div class="input-group" style="margin-bottom:0;">
+                                    <label for="repurpose-schedule-time" style="font-size:0.7rem; color:var(--text-secondary);">Date & Time</label>
+                                    <input type="datetime-local" id="repurpose-schedule-time" style="background:rgba(0,0,0,0.4); border:1px solid var(--border-color); color:var(--text-primary); border-radius:4px; padding:0.4rem; font-size:0.75rem; width:100%;">
+                                </div>
+                                <div class="input-group" style="margin-bottom:0;">
+                                    <label for="repurpose-schedule-platform" style="font-size:0.7rem; color:var(--text-secondary);">Target Channel</label>
+                                    <select id="repurpose-schedule-platform" style="background:rgba(0,0,0,0.4); border:1px solid var(--border-color); color:var(--text-primary); border-radius:4px; padding:0.4rem; font-size:0.75rem; width:100%;">
+                                        <option value="linkedin">LinkedIn Profile</option>
+                                        <option value="twitter">Twitter / X Feed</option>
+                                        <option value="both">Both Channels</option>
+                                    </select>
+                                </div>
+                            </div>
+                            <button id="repurpose-schedule-btn" class="primary-btn schedule-btn" style="width: 100%; font-size: 0.75rem; padding: 0.4rem;">Schedule Release</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- AUTOMATION & COCKPIT VIEW -->
+        <div id="automation-view" class="view-content" style="width: 100%;">
+            <!-- QUICK START ONBOARDING WIZARD -->
+            <div class="glass-card" style="padding: 1.5rem; margin-bottom: 2rem; border: 1px solid rgba(255,255,255,0.15); background: linear-gradient(135deg, rgba(138, 43, 226, 0.15) 0%, rgba(255, 0, 128, 0.1) 100%); border-radius: var(--radius-md); text-align: left; position: relative; overflow: hidden;">
+                <div style="position: absolute; top: -50px; right: -50px; width: 150px; height: 150px; background: var(--primary-color); filter: blur(80px); opacity: 0.3; border-radius: 50%; pointer-events: none;"></div>
+                
+                <div style="display: flex; justify-content: space-between; align-items: flex-start; gap: 2rem; flex-wrap: wrap;">
+                    <div style="flex: 1.5; min-width: 300px;">
+                        <span class="badge" style="background: rgba(138, 43, 226, 0.2); color: #c084fc; font-size: 0.65rem; padding: 0.2rem 0.5rem; border-radius: 4px; font-weight: bold; text-transform: uppercase; margin-bottom: 0.5rem; display: inline-block; letter-spacing: 0.5px;">6Frame Studio Autopilot</span>
+                        <h2 style="font-family: 'Outfit', sans-serif; font-size: 1.4rem; color: var(--text-primary); margin-bottom: 0.5rem; font-weight: 700;">Automatic Social Media Marketing Hub</h2>
+                        <p style="color: var(--text-secondary); font-size: 0.85rem; line-height: 1.5; margin-bottom: 1.25rem;">
+                            This platform autonomously scans daily social media trends (Reddit, Twitter, YouTube), adapts them into platform-optimized posts matching your brand voice, renders matching high-fidelity cinematic video previews, and autoposts them to your LinkedIn & Twitter accounts.
+                        </p>
+                        
+                        <!-- Automated Pipeline Status Steps -->
+                        <div style="display: flex; gap: 1rem; flex-wrap: wrap; margin-bottom: 0.5rem;">
+                            <div style="display: flex; align-items: center; gap: 0.35rem; background: rgba(0,0,0,0.25); padding: 0.4rem 0.6rem; border-radius: 6px; border: 1px solid rgba(255,255,255,0.05); font-size: 0.75rem;">
+                                <span class="pulse-dot" style="background: #28a745; width: 6px; height: 6px; border-radius: 50%;"></span>
+                                <span style="color: var(--text-primary); font-weight: 500;">Step 1: Scan Trends</span>
+                            </div>
+                            <div style="display: flex; align-items: center; gap: 0.35rem; background: rgba(0,0,0,0.25); padding: 0.4rem 0.6rem; border-radius: 6px; border: 1px solid rgba(255,255,255,0.05); font-size: 0.75rem;">
+                                <span class="pulse-dot" style="background: #28a745; width: 6px; height: 6px; border-radius: 50%;"></span>
+                                <span style="color: var(--text-primary); font-weight: 500;">Step 2: Generate Video</span>
+                            </div>
+                            <div style="display: flex; align-items: center; gap: 0.35rem; background: rgba(0,0,0,0.25); padding: 0.4rem 0.6rem; border-radius: 6px; border: 1px solid rgba(255,255,255,0.05); font-size: 0.75rem;">
+                                <span class="pulse-dot" style="background: #28a745; width: 6px; height: 6px; border-radius: 50%;"></span>
+                                <span style="color: var(--text-primary); font-weight: 500;">Step 3: Auto-Publish</span>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- Quick Setup & Autopilot Switch Box -->
+                    <div style="flex: 1; min-width: 250px; background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; padding: 1.2rem; display: flex; flex-direction: column; gap: 1rem; justify-content: space-between;">
+                        <div>
+                            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
+                                <span style="font-size: 0.85rem; font-weight: 600; color: var(--text-primary);">24/7 Autopilot Automation</span>
+                                <label class="switch-toggle" style="position: relative; display: inline-block; width: 42px; height: 22px; margin: 0; line-height: normal;">
+                                    <input type="checkbox" id="wizard-autonomous-posting" style="opacity: 0; width: 0; height: 0; position: absolute;">
+                                    <span class="slider-toggle" style="position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: rgba(255,255,255,0.15); transition: .3s; border-radius: 34px;"></span>
+                                </label>
+                            </div>
+                            <p style="font-size: 0.7rem; color: var(--text-secondary); line-height: 1.3; margin: 0;">
+                                Toggle this on to let the system generate and post content daily on its own based on active social credentials.
+                            </p>
+                        </div>
+                        
+                        <div style="display: flex; gap: 0.5rem; margin-top: 0.25rem;">
+                            <button id="wizard-run-now-btn" class="primary-btn" style="flex: 1.2; font-size: 0.75rem; padding: 0.5rem; font-weight: 600; text-transform: none; display: flex; align-items: center; justify-content: center; gap: 0.25rem;">
+                                <svg viewBox="0 0 24 24" width="12" height="12" stroke="currentColor" stroke-width="2" fill="none"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
+                                Run Pipeline Now
+                            </button>
+                            <button id="wizard-configure-btn" class="secondary-btn" style="flex: 1; font-size: 0.75rem; padding: 0.5rem; font-weight: 600; text-transform: none; border: 1px solid var(--border-color); background: transparent; color: var(--text-primary);">
+                                Configure Keys
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div style="margin-bottom: 2rem;">
+                <h1 style="font-family: 'Outfit', sans-serif; font-size: 1.8rem; font-weight: 700; color: var(--text-primary); margin-bottom: 0.5rem; text-shadow: 0 2px 4px rgba(0,0,0,0.5);">
+                    Autopilot & Automation Cockpit
+                </h1>
+                <p style="color: var(--text-secondary); font-size: 0.9rem;">
+                    Monitor system health, manage platform integrations, configure autopilot schedules, and trigger instant marketing pipelines.
+                </p>
+            </div>
+
+            <div class="cockpit-grid" style="display: grid; grid-template-columns: 1.2fr 1.5fr 1.3fr; gap: 1.5rem; align-items: start; margin-bottom: 2rem;">
+                
+                <!-- COLUMN 1: AUTOPILOT CONTROL -->
+                <div class="glass-card" style="padding: 1.5rem; min-height: 480px; display: flex; flex-direction: column; justify-content: space-between; border: 1px solid var(--border-color); background: rgba(255,255,255,0.03); border-radius: var(--radius-md);">
+                    <div>
+                        <h2 style="font-family: 'Outfit', sans-serif; font-size: 1.1rem; color: var(--text-primary); margin-bottom: 1.25rem; border-bottom: 1px solid var(--border-color); padding-bottom: 0.5rem; display: flex; align-items: center; gap: 0.5rem;">
+                            <svg viewBox="0 0 24 24" width="18" height="18" stroke="var(--primary-color)" stroke-width="2" fill="none"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"></path></svg>
+                            Autopilot Settings
+                        </h2>
+
+                        <div class="form-toggle-group" style="margin-bottom: 1.5rem; background: rgba(255,255,255,0.02); padding: 0.8rem; border-radius: 8px; border: 1px solid rgba(255,255,255,0.05); display: flex; flex-direction: column; gap: 0.25rem;">
+                            <div style="display: flex; justify-content: space-between; align-items: center;">
+                                <label for="cockpit-autonomous-posting" style="font-size: 0.85rem; font-weight: 600; color: var(--text-primary); cursor: pointer;">Enable Autopilot</label>
+                                <input type="checkbox" id="cockpit-autonomous-posting" style="width: 1.5rem; height: 1.5rem; cursor: pointer;">
+                            </div>
+                            <span class="toggle-help" style="display: block; font-size: 0.7rem; color: var(--text-secondary); margin-top: 0.35rem;">
+                                Automatically scans social networks daily, selects top trends, renders cinematic videos, and publishes them.
+                            </span>
+                        </div>
+
+                        <div class="input-group" style="margin-bottom: 1.25rem;">
+                            <label for="cockpit-autonomous-hour" style="font-size: 0.75rem; margin-bottom: 0.35rem; display: block; color: var(--text-secondary);">Daily Posting Hour</label>
+                            <select id="cockpit-autonomous-hour" style="background: rgba(0,0,0,0.4); border: 1px solid var(--border-color); color: var(--text-primary); border-radius: 6px; padding: 0.5rem; font-size: 0.8rem; width: 100%;">
+                                <option value="0">12:00 AM (Midnight)</option>
+                                <option value="1">1:00 AM</option>
+                                <option value="2">2:00 AM</option>
+                                <option value="3">3:00 AM</option>
+                                <option value="4">4:00 AM</option>
+                                <option value="5">5:00 AM</option>
+                                <option value="6">6:00 AM</option>
+                                <option value="7">7:00 AM</option>
+                                <option value="8">8:00 AM</option>
+                                <option value="9">9:00 AM (Recommended)</option>
+                                <option value="10">10:00 AM</option>
+                                <option value="11">11:00 AM</option>
+                                <option value="12">12:00 PM (Noon)</option>
+                                <option value="13">1:00 PM</option>
+                                <option value="14">2:00 PM</option>
+                                <option value="15">3:00 PM</option>
+                                <option value="16">4:00 PM</option>
+                                <option value="17">5:00 PM</option>
+                                <option value="18">6:00 PM</option>
+                                <option value="19">7:00 PM</option>
+                                <option value="20">8:00 PM</option>
+                                <option value="21">9:00 PM</option>
+                                <option value="22">10:00 PM</option>
+                                <option value="23">11:00 PM</option>
+                            </select>
+                        </div>
+
+                        <div style="margin-bottom: 1.5rem;">
+                            <span style="font-size: 0.75rem; color: var(--text-secondary); display: block; margin-bottom: 0.5rem;">Target Social Platforms</span>
+                            <div style="display: flex; gap: 1.2rem; align-items: center; flex-wrap: wrap; background: rgba(0,0,0,0.2); padding: 0.75rem; border-radius: 6px; border: 1px solid var(--border-color);">
+                                <label style="font-size: 0.8rem; display: flex; align-items: center; gap: 0.35rem; color: var(--text-primary); cursor: pointer; font-weight: normal; margin: 0;">
+                                    <input type="checkbox" id="cockpit-auto-platform-twitter" checked> Twitter / X
+                                </label>
+                                <label style="font-size: 0.8rem; display: flex; align-items: center; gap: 0.35rem; color: var(--text-primary); cursor: pointer; font-weight: normal; margin: 0;">
+                                    <input type="checkbox" id="cockpit-auto-platform-linkedin" checked> LinkedIn
+                                </label>
+                                <label style="font-size: 0.8rem; display: flex; align-items: center; gap: 0.35rem; color: var(--text-primary); cursor: pointer; font-weight: normal; margin: 0;">
+                                    <input type="checkbox" id="cockpit-auto-platform-instagram"> Instagram
+                                </label>
+                                <label style="font-size: 0.8rem; display: flex; align-items: center; gap: 0.35rem; color: var(--text-primary); cursor: pointer; font-weight: normal; margin: 0;">
+                                    <input type="checkbox" id="cockpit-auto-platform-tiktok"> TikTok
+                                </label>
+                                <label style="font-size: 0.8rem; display: flex; align-items: center; gap: 0.35rem; color: var(--text-primary); cursor: pointer; font-weight: normal; margin: 0;">
+                                    <input type="checkbox" id="cockpit-auto-platform-youtube"> YouTube
+                                </label>
+                                <label style="font-size: 0.8rem; display: flex; align-items: center; gap: 0.35rem; color: var(--text-primary); cursor: pointer; font-weight: normal; margin: 0;">
+                                    <input type="checkbox" id="cockpit-auto-platform-facebook"> Facebook
+                                </label>
+                                <label style="font-size: 0.8rem; display: flex; align-items: center; gap: 0.35rem; color: var(--text-primary); cursor: pointer; font-weight: normal; margin: 0;">
+                                    <input type="checkbox" id="cockpit-auto-platform-threads"> Threads
+                                </label>
+                            </div>
+                        </div>
+                        <div class="input-group" style="margin-bottom: 1.25rem;">
+                            <label for="cockpit-autonomous-video-engine" style="font-size: 0.75rem; margin-bottom: 0.35rem; display: block; color: var(--text-secondary);">Autopilot Video Render Engine</label>
+                            <select id="cockpit-autonomous-video-engine" style="background: rgba(0,0,0,0.4); border: 1px solid var(--border-color); color: var(--text-primary); border-radius: 6px; padding: 0.5rem; font-size: 0.8rem; width: 100%;">
+                                <option value="google_veo">Google Veo 3.1 (Cinematic)</option>
+                                <option value="google_veo_lite">Google Veo 3.1 Lite (Lower Cost)</option>
+                                <option value="google_veo_fast">Google Veo 3.1 Fast</option>
+                                <option value="fal_hailuo_23">FAL Hailuo 2.3 Standard (Budget)</option>
+                                <option value="fal_hailuo_02">FAL Hailuo 02 Standard (Lowest Cost)</option>
+                                <option value="fal_seedance_fast">FAL Seedance Fast (Social)</option>
+                                <option value="fal_ltx_fast">FAL LTX Video 2.0 Fast</option>
+                                <option value="runway_gen3">Runway Gen-3 (Alpha Turbo / Gen-4.5)</option>
+                            </select>
+                        </div>
+                        <div class="input-group" style="margin-bottom: 1.25rem;">
+                            <label for="cockpit-autonomous-video-duration" style="font-size: 0.75rem; margin-bottom: 0.35rem; display: block; color: var(--text-secondary);">Autopilot Video Duration</label>
+                            <select id="cockpit-autonomous-video-duration" style="background: rgba(0,0,0,0.4); border: 1px solid var(--border-color); color: var(--text-primary); border-radius: 6px; padding: 0.5rem; font-size: 0.8rem; width: 100%;">
+                                <option value="5" disabled>5 seconds (retired)</option>
+                                <option value="6">6 seconds (FAL Standard)</option>
+                                <option value="8">8 seconds</option>
+                                <option value="10" selected>10 seconds</option>
+                                <option value="12">12 seconds (Seedance / LTX)</option>
+                                <option value="15">15 seconds</option>
+                                              <option value="14">14 seconds (FAL LTX)</option>
+                                <option value="16">16 seconds (FAL LTX)</option>
+                                <option value="18">18 seconds (FAL LTX)</option>
+                                <option value="20">20 seconds (FAL LTX Max)</option>
+                                <option value="30">30 seconds (Cinematic Cut - Runway Only)</option>
+                            </select>
+                        </div>
+                        <div class="form-toggle-group" style="background: rgba(255,255,255,0.02); padding: 0.8rem; border-radius: 8px; border: 1px solid rgba(255,255,255,0.05); display: flex; flex-direction: column; gap: 0.25rem; margin-bottom: 1.25rem;">
+                            <div style="display: flex; justify-content: space-between; align-items: center;">
+                                <label for="cockpit-viral-template-enabled" style="font-size: 0.85rem; font-weight: 600; color: var(--text-primary); cursor: pointer;">Viral Template Packaging</label>
+                                <input type="checkbox" id="cockpit-viral-template-enabled" style="width: 1.5rem; height: 1.5rem; cursor: pointer;">
+                            </div>
+                            <span class="toggle-help" style="display: block; font-size: 0.7rem; color: var(--text-secondary); margin-top: 0.35rem;">
+                                Wrap Autopilot videos in a reusable 9:16 template before staging or publishing.
+                            </span>
+                            <div style="display:grid; grid-template-columns: 1fr 1fr; gap:0.6rem; margin-top:0.55rem;">
+                                <div>
+                                    <label for="cockpit-viral-template-style" style="font-size: 0.7rem; color: var(--text-secondary); display:block; margin-bottom:0.25rem;">Template</label>
+                                    <select id="cockpit-viral-template-style" style="background: rgba(0,0,0,0.4); border: 1px solid var(--border-color); color: var(--text-primary); border-radius: 6px; padding: 0.5rem; font-size: 0.78rem; width: 100%;">
+                                        <option value="hook_burst">Hook Burst</option>
+                                        <option value="cinematic_stack">Cinematic Stack</option>
+                                        <option value="trend_radar">Trend Radar</option>
+                                        <option value="documentary_interview">Documentary Interview</option>
+                                        <option value="then_vs_now">Then vs. Now</option>
+                                        <option value="movie_star_entrance">Movie Star Entrance</option>
+                                        <option value="meme_master_reaction">Meme Master Reaction</option>
+                                        <option value="summer_schedule_loop">Summer Schedule Loop</option>
+                                    </select>
+                                </div>
+                                <div>
+                                    <label for="cockpit-viral-template-quality" style="font-size: 0.7rem; color: var(--text-secondary); display:block; margin-bottom:0.25rem;">Quality</label>
+                                    <select id="cockpit-viral-template-quality" style="background: rgba(0,0,0,0.4); border: 1px solid var(--border-color); color: var(--text-primary); border-radius: 6px; padding: 0.5rem; font-size: 0.78rem; width: 100%;">
+                                        <option value="draft">Draft</option>
+                                        <option value="standard">Standard</option>
+                                        <option value="high">High</option>
+                                    </select>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="form-toggle-group" style="background: rgba(255,255,255,0.02); padding: 0.8rem; border-radius: 8px; border: 1px solid rgba(255,255,255,0.05); display: flex; flex-direction: column; gap: 0.25rem;">
+                            <div style="display: flex; justify-content: space-between; align-items: center;">
+                                <label for="cockpit-require-approval" style="font-size: 0.85rem; font-weight: 600; color: var(--text-primary); cursor: pointer;">Require Approval Before Publishing</label>
+                                <input type="checkbox" id="cockpit-require-approval" style="width: 1.5rem; height: 1.5rem; cursor: pointer;">
+                            </div>
+                            <span class="toggle-help" style="display: block; font-size: 0.7rem; color: var(--text-secondary); margin-top: 0.35rem;">
+                                Autonomous with guardrails: Autopilot's daily pick is staged in the Pending Approval queue below instead of publishing immediately. Turn off for fully autonomous posting.
+                            </span>
+                        </div>
+                        <div class="input-group" style="margin-top: 1rem;">
+                            <label for="cockpit-postproxy-daily-publish-limit" style="font-size: 0.75rem; margin-bottom: 0.35rem; display: block; color: var(--text-secondary);">PostProxy Daily Safety Limit</label>
+                            <input type="number" id="cockpit-postproxy-daily-publish-limit" min="1" max="25" step="1" value="2" style="background: rgba(0,0,0,0.4); border: 1px solid var(--border-color); color: var(--text-primary); border-radius: 6px; padding: 0.5rem; font-size: 0.8rem; width: 100%;">
+                            <span class="toggle-help" style="display: block; font-size: 0.7rem; color: var(--text-secondary); margin-top: 0.35rem;">
+                                Caps automatic PostProxy publish records per day. Manual approval can still publish above this limit.
+                            </span>
+                        </div>
+                    </div>
+
+                    <div style="border-top: 1px solid var(--border-color); padding-top: 1.25rem; margin-top: 1.25rem;">
+                        <button id="cockpit-trigger-pipeline-btn" class="primary-btn" style="width: 100%; display: flex; align-items: center; justify-content: center; gap: 0.5rem; padding: 0.75rem; font-weight: 600;">
+                            <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
+                            Run Autopilot Pipeline Now
+                        </button>
+                        <p style="font-size: 0.65rem; color: var(--text-secondary); text-align: center; margin-top: 0.4rem; margin-bottom: 0;">
+                            Force runs scanning, rendering and posting loops in parallel.
+                        </p>
+                    </div>
+                </div>
+
+                <!-- COLUMN 2: CAPABILITIES & SYSTEM DIAGNOSTICS -->
+                <div class="glass-card" style="padding: 1.5rem; min-height: 480px; border: 1px solid var(--border-color); background: rgba(255,255,255,0.03); border-radius: var(--radius-md);">
+                    <h2 style="font-family: 'Outfit', sans-serif; font-size: 1.1rem; color: var(--text-primary); margin-bottom: 1.25rem; border-bottom: 1px solid var(--border-color); padding-bottom: 0.5rem; display: flex; align-items: center; gap: 0.5rem;">
+                        <svg viewBox="0 0 24 24" width="18" height="18" stroke="var(--primary-color)" stroke-width="2" fill="none"><path d="M22 12h-4l-3 9L9 3l-3 9H2"></path></svg>
+                        Capabilities & Credentials Cockpit
+                    </h2>
+
+                    <!-- SYSTEM HEALTH BADGES -->
+                    <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 0.5rem; margin-bottom: 1.25rem;">
+                        <div style="background: rgba(255,255,255,0.02); border: 1px solid var(--border-color); border-radius: 6px; padding: 0.5rem; display: flex; align-items: center; justify-content: space-between;">
+                            <span style="font-size: 0.7rem; color: var(--text-secondary);">Gemini Engine</span>
+                            <span id="diag-gemini-status" class="badge" style="font-size: 0.55rem; padding: 0.1rem 0.3rem; border-radius: 4px; font-weight: bold; background: rgba(220, 53, 69, 0.2); color: #dc3545;">INACTIVE</span>
+                        </div>
+                        <div style="background: rgba(255,255,255,0.02); border: 1px solid var(--border-color); border-radius: 6px; padding: 0.5rem; display: flex; align-items: center; justify-content: space-between;">
+                            <span style="font-size: 0.7rem; color: var(--text-secondary);">Runway Engine</span>
+                            <span id="diag-runway-status" class="badge" style="font-size: 0.55rem; padding: 0.1rem 0.3rem; border-radius: 4px; font-weight: bold; background: rgba(220, 53, 69, 0.2); color: #dc3545;">INACTIVE</span>
+                        </div>
+                        <div style="background: rgba(255,255,255,0.02); border: 1px solid var(--border-color); border-radius: 6px; padding: 0.5rem; display: flex; align-items: center; justify-content: space-between;">
+                            <span style="font-size: 0.7rem; color: var(--text-secondary);">FAL Engine</span>
+                            <span id="diag-fal-status" class="badge" style="font-size: 0.55rem; padding: 0.1rem 0.3rem; border-radius: 4px; font-weight: bold; background: rgba(220, 53, 69, 0.2); color: #dc3545;">INACTIVE</span>
+                        </div>
+                        <div style="background: rgba(255,255,255,0.02); border: 1px solid var(--border-color); border-radius: 6px; padding: 0.5rem; display: flex; align-items: center; justify-content: space-between;">
+                            <span style="font-size: 0.7rem; color: var(--text-secondary);">Twitter Integration</span>
+                            <span id="diag-twitter-status" class="badge" style="font-size: 0.55rem; padding: 0.1rem 0.3rem; border-radius: 4px; font-weight: bold; background: rgba(220, 53, 69, 0.2); color: #dc3545;">INACTIVE</span>
+                        </div>
+                        <div style="background: rgba(255,255,255,0.02); border: 1px solid var(--border-color); border-radius: 6px; padding: 0.5rem; display: flex; align-items: center; justify-content: space-between;">
+                            <span style="font-size: 0.7rem; color: var(--text-secondary);">LinkedIn Integration</span>
+                            <span id="diag-linkedin-status" class="badge" style="font-size: 0.55rem; padding: 0.1rem 0.3rem; border-radius: 4px; font-weight: bold; background: rgba(220, 53, 69, 0.2); color: #dc3545;">INACTIVE</span>
+                        </div>
+                        <div style="background: rgba(255,255,255,0.02); border: 1px solid var(--border-color); border-radius: 6px; padding: 0.5rem; display: flex; align-items: center; justify-content: space-between;">
+                            <span style="font-size: 0.7rem; color: var(--text-secondary);">Instagram</span>
+                            <span id="diag-instagram-status" class="badge" style="font-size: 0.55rem; padding: 0.1rem 0.3rem; border-radius: 4px; font-weight: bold; background: rgba(220, 53, 69, 0.2); color: #dc3545;">INACTIVE</span>
+                        </div>
+                        <div style="background: rgba(255,255,255,0.02); border: 1px solid var(--border-color); border-radius: 6px; padding: 0.5rem; display: flex; align-items: center; justify-content: space-between;">
+                            <span style="font-size: 0.7rem; color: var(--text-secondary);">TikTok</span>
+                            <span id="diag-tiktok-status" class="badge" style="font-size: 0.55rem; padding: 0.1rem 0.3rem; border-radius: 4px; font-weight: bold; background: rgba(220, 53, 69, 0.2); color: #dc3545;">INACTIVE</span>
+                        </div>
+                        <div style="background: rgba(255,255,255,0.02); border: 1px solid var(--border-color); border-radius: 6px; padding: 0.5rem; display: flex; align-items: center; justify-content: space-between;">
+                            <span style="font-size: 0.7rem; color: var(--text-secondary);">YouTube</span>
+                            <span id="diag-youtube-status" class="badge" style="font-size: 0.55rem; padding: 0.1rem 0.3rem; border-radius: 4px; font-weight: bold; background: rgba(220, 53, 69, 0.2); color: #dc3545;">INACTIVE</span>
+                        </div>
+                        <div style="background: rgba(255,255,255,0.02); border: 1px solid var(--border-color); border-radius: 6px; padding: 0.5rem; display: flex; align-items: center; justify-content: space-between;">
+                            <span style="font-size: 0.7rem; color: var(--text-secondary);">Facebook</span>
+                            <span id="diag-facebook-status" class="badge" style="font-size: 0.55rem; padding: 0.1rem 0.3rem; border-radius: 4px; font-weight: bold; background: rgba(220, 53, 69, 0.2); color: #dc3545;">INACTIVE</span>
+                        </div>
+                        <div style="background: rgba(255,255,255,0.02); border: 1px solid var(--border-color); border-radius: 6px; padding: 0.5rem; display: flex; align-items: center; justify-content: space-between;">
+                            <span style="font-size: 0.7rem; color: var(--text-secondary);">Threads</span>
+                            <span id="diag-threads-status" class="badge" style="font-size: 0.55rem; padding: 0.1rem 0.3rem; border-radius: 4px; font-weight: bold; background: rgba(220, 53, 69, 0.2); color: #dc3545;">INACTIVE</span>
+                        </div>
+                        <div style="background: rgba(255,255,255,0.02); border: 1px solid var(--border-color); border-radius: 6px; padding: 0.5rem; display: flex; align-items: center; justify-content: space-between;">
+                            <span style="font-size: 0.7rem; color: var(--text-secondary);">Report Email</span>
+                            <span id="diag-report-email-status" class="badge" style="font-size: 0.55rem; padding: 0.1rem 0.3rem; border-radius: 4px; font-weight: bold; background: rgba(220, 53, 69, 0.2); color: #dc3545;">INACTIVE</span>
+                        </div>
+                    </div>
+
+                    <div id="postproxy-socials-panel" class="socials-panel">
+                        <div class="socials-panel-header">
+                            <div>
+                                <h3>Socials / PostProxy</h3>
+                                <p>All socials connect through Bret Jenny's PostProxy account. Sync profiles, then Connect or Reconnect a platform.</p>
+                            </div>
+                            <button id="cockpit-postproxy-sync-btn" type="button" class="secondary-btn">Refresh / Sync</button>
+                        </div>
+                        <div id="cockpit-postproxy-status" class="socials-panel-status">Checking PostProxy…</div>
+                        <div id="cockpit-postproxy-socials" class="socials-grid"></div>
+                    </div>
+
+                    <!-- DIRECT KEY INPUTS -->
+                    <div style="max-height: 290px; overflow-y: auto; display: flex; flex-direction: column; gap: 0.8rem; padding-right: 0.25rem;">
+                        <div class="form-toggle-group" style="padding: 0.25rem 0; display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.2rem;">
+                            <label for="cockpit-mock-mode" style="font-size: 0.75rem; color: var(--text-primary); cursor: pointer;">Mock Publish Mode</label>
+                            <input type="checkbox" id="cockpit-mock-mode">
+                        </div>
+                        
+                        <div class="input-group" style="margin-bottom: 0;">
+                            <label for="cockpit-gemini-key" style="font-size: 0.7rem; color: var(--text-secondary); display: block; margin-bottom: 0.25rem;">Gemini API Key</label>
+                            <input type="password" id="cockpit-gemini-key" style="background: rgba(0,0,0,0.3); border: 1px solid var(--border-color); color: var(--text-primary); border-radius: 6px; padding: 0.45rem; font-size: 0.75rem; width: 100%;">
+                        </div>
+
+                        <div class="input-group" style="margin-bottom: 0;">
+                            <label for="cockpit-runway-key" style="font-size: 0.7rem; color: var(--text-secondary); display: block; margin-bottom: 0.25rem;">Runway API Key</label>
+                            <input type="password" id="cockpit-runway-key" style="background: rgba(0,0,0,0.3); border: 1px solid var(--border-color); color: var(--text-primary); border-radius: 6px; padding: 0.45rem; font-size: 0.75rem; width: 100%;">
+                        </div>
+
+                        <div class="input-group" style="margin-bottom: 0;">
+                            <label for="cockpit-fal-key" style="font-size: 0.7rem; color: var(--text-secondary); display: block; margin-bottom: 0.25rem;">FAL API Key</label>
+                            <input type="password" id="cockpit-fal-key" placeholder="fal-..." style="background: rgba(0,0,0,0.3); border: 1px solid var(--border-color); color: var(--text-primary); border-radius: 6px; padding: 0.45rem; font-size: 0.75rem; width: 100%;">
+                        </div>
+
+                        <div class="input-group" style="margin-bottom: 0;">
+                            <label for="cockpit-brand-voice" style="font-size: 0.7rem; color: var(--text-secondary); display: block; margin-bottom: 0.25rem;">Brand Voice Guidelines</label>
+                            <textarea id="cockpit-brand-voice" rows="3" style="background: rgba(0,0,0,0.3); border: 1px solid var(--border-color); color: var(--text-primary); border-radius: 6px; padding: 0.45rem; font-size: 0.75rem; width: 100%; font-family: sans-serif; resize: vertical;"></textarea>
+                        </div>
+                        
+                        <div style="border-top: 1px solid rgba(255,255,255,0.05); padding-top: 0.5rem; margin-top: 0.25rem;">
+                            <button id="cockpit-save-settings-btn" class="primary-btn" style="width: 100%; font-size: 0.75rem; padding: 0.5rem;">Save Credentials & Voice</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- COLUMN 3: AUTOMATED SCHEDULED QUEUE -->
+                <div class="glass-card" style="padding: 1.5rem; min-height: 480px; display: flex; flex-direction: column; border: 1px solid var(--border-color); background: rgba(255,255,255,0.03); border-radius: var(--radius-md);">
+                    <h2 style="font-family: 'Outfit', sans-serif; font-size: 1.1rem; color: var(--text-primary); margin-bottom: 1.25rem; border-bottom: 1px solid var(--border-color); padding-bottom: 0.5rem; display: flex; align-items: center; justify-content: space-between;">
+                        <span style="display: flex; align-items: center; gap: 0.5rem;">
+                            <svg viewBox="0 0 24 24" width="18" height="18" stroke="var(--primary-color)" stroke-width="2" fill="none"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect><line x1="16" y1="2" x2="16" y2="6"></line><line x1="8" y1="2" x2="8" y2="6"></line><line x1="3" y1="10" x2="21" y2="10"></line></svg>
+                            Automation Queue
+                        </span>
+                        <span class="pulse-dot"></span>
+                    </h2>
+                    
+                    <div class="scheduled-posts-list" id="cockpit-queue-list" style="flex: 1; max-height: 380px; overflow-y: auto; display: flex; flex-direction: column; gap: 0.5rem; padding-right: 0.25rem;">
+                        <p style="font-size: 0.75rem; color: var(--text-secondary); text-align: center; margin: auto 0;">No scheduled posts.</p>
+                    </div>
+                </div>
+
+            </div>
+
+            <!-- PENDING APPROVAL QUEUE (autonomous-with-guardrails review step) -->
+            <div class="glass-card" id="pending-approval-card" style="padding: 1.5rem; margin-bottom: 2rem; border: 1px solid rgba(255, 193, 7, 0.35); background: rgba(255, 193, 7, 0.04); border-radius: var(--radius-md);">
+                <h2 style="font-family: 'Outfit', sans-serif; font-size: 1.1rem; color: var(--text-primary); margin-bottom: 0.5rem; display: flex; align-items: center; gap: 0.5rem;">
+                    <svg viewBox="0 0 24 24" width="18" height="18" stroke="#ffc107" stroke-width="2" fill="none"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>
+                    Pending Approval
+                    <span id="pending-approval-count" class="badge" style="font-size: 0.65rem; padding: 0.15rem 0.4rem; border-radius: 4px; font-weight: bold; background: rgba(255, 193, 7, 0.2); color: #ffc107;">0</span>
+                </h2>
+                <p style="font-size: 0.75rem; color: var(--text-secondary); margin-bottom: 1rem;">Autopilot's daily pick waits here for your review before it publishes. Edit the copy, then Approve & Publish or Reject.</p>
+                <div id="pending-approval-list" style="display: flex; flex-direction: column; gap: 1rem;">
+                    <p style="font-size: 0.75rem; color: var(--text-secondary); text-align: center; margin: 0.5rem 0;">No posts awaiting approval.</p>
+                </div>
+            </div>
+
+            <!-- PERFORMANCE ANALYTICS (feedback loop: tracks real engagement, recommends best posting hour) -->
+            <div class="glass-card" style="padding: 1.5rem; margin-bottom: 2rem; border: 1px solid var(--border-color); background: rgba(255,255,255,0.03); border-radius: var(--radius-md);">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem; flex-wrap: wrap; gap: 0.5rem;">
+                    <h2 style="font-family: 'Outfit', sans-serif; font-size: 1.1rem; color: var(--text-primary); display: flex; align-items: center; gap: 0.5rem; margin: 0;">
+                        <svg viewBox="0 0 24 24" width="18" height="18" stroke="var(--primary-color)" stroke-width="2" fill="none"><line x1="18" y1="20" x2="18" y2="10"></line><line x1="12" y1="20" x2="12" y2="4"></line><line x1="6" y1="20" x2="6" y2="14"></line></svg>
+                        Performance Analytics
+                    </h2>
+                    <button id="analytics-refresh-btn" class="secondary-btn" style="font-size: 0.7rem; padding: 0.35rem 0.75rem;">Refresh Metrics</button>
+                </div>
+                <p style="font-size: 0.75rem; color: var(--text-secondary); margin-bottom: 1rem;">Tracks real engagement on published Twitter/X posts and recommends a data-driven posting hour. LinkedIn engagement isn't available via its standard API.</p>
+
+                <div style="display: flex; gap: 1rem; align-items: center; flex-wrap: wrap; background: rgba(0,0,0,0.2); border: 1px solid var(--border-color); border-radius: 8px; padding: 0.9rem; margin-bottom: 1rem;">
+                    <div>
+                        <span style="font-size: 0.7rem; color: var(--text-secondary); display: block;">Recommended Posting Hour</span>
+                        <span id="analytics-best-hour" style="font-family: 'Outfit', sans-serif; font-size: 1.3rem; font-weight: 700; color: var(--primary-color);">Not enough data yet</span>
+                    </div>
+                    <button id="analytics-apply-hour-btn" class="primary-btn" style="font-size: 0.75rem; padding: 0.5rem 1rem; margin-left: auto;" disabled>Apply to Autopilot</button>
+                </div>
+
+                <div id="analytics-posts-list" style="display: flex; flex-direction: column; gap: 0.5rem;">
+                    <p style="font-size: 0.75rem; color: var(--text-secondary); text-align: center; margin: 0.5rem 0;">No performance data yet — publish a post and check back after it's had time to gather engagement.</p>
+                </div>
+            </div>
+
+            <!-- ENGAGEMENT INBOX (AI-drafted replies to mentions, staged for approval) -->
+            <div class="glass-card" style="padding: 1.5rem; margin-bottom: 2rem; border: 1px solid var(--border-color); background: rgba(255,255,255,0.03); border-radius: var(--radius-md);">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem; flex-wrap: wrap; gap: 0.5rem;">
+                    <h2 style="font-family: 'Outfit', sans-serif; font-size: 1.1rem; color: var(--text-primary); display: flex; align-items: center; gap: 0.5rem; margin: 0;">
+                        <svg viewBox="0 0 24 24" width="18" height="18" stroke="var(--primary-color)" stroke-width="2" fill="none"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"></path></svg>
+                        Engagement Inbox
+                        <span id="engagement-count" class="badge" style="font-size: 0.65rem; padding: 0.15rem 0.4rem; border-radius: 4px; font-weight: bold; background: rgba(124, 58, 237, 0.2); color: var(--primary-color);">0</span>
+                    </h2>
+                    <button id="engagement-refresh-btn" class="secondary-btn" style="font-size: 0.7rem; padding: 0.35rem 0.75rem;">Check for New Mentions</button>
+                </div>
+                <p style="font-size: 0.75rem; color: var(--text-secondary); margin-bottom: 1rem;">AI-drafted replies to Twitter/X mentions of your account, written in your brand voice. Nothing sends automatically — review, edit if needed, then Send or Dismiss. LinkedIn mentions aren't available via its standard API.</p>
+                <div id="engagement-list" style="display: flex; flex-direction: column; gap: 0.75rem;">
+                    <p style="font-size: 0.75rem; color: var(--text-secondary); text-align: center; margin: 0.5rem 0;">No new mentions to review.</p>
+                </div>
+            </div>
+
+            <!-- SYSTEM CAPABILITIES LIST (HIGHLIGHTS FOR USER INSTANT UNDERSTANDING) -->
+            <div class="glass-card" style="padding: 1.5rem; margin-bottom: 2rem; border: 1px solid var(--border-color); background: rgba(255,255,255,0.03); border-radius: var(--radius-md);">
+                <h3 style="font-family: 'Outfit', sans-serif; font-size: 1rem; color: var(--text-primary); margin-bottom: 1rem;">6Frame Studio Capabilities Guide</h3>
+                <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 1.5rem;">
+                    <div style="background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.05); padding: 1rem; border-radius: 8px;">
+                        <h4 style="font-size: 0.85rem; color: var(--primary-color); margin-bottom: 0.35rem; font-weight: 600;">1. Social Trend Scan</h4>
+                        <p style="font-size: 0.75rem; color: var(--text-secondary); line-height: 1.4; margin: 0;">
+                            Uses Google Search Grounding to extract daily high-performing AI video ideas from platforms like Reddit, Twitter, and LinkedIn.
+                        </p>
+                    </div>
+                    <div style="background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.05); padding: 1rem; border-radius: 8px;">
+                        <h4 style="font-size: 0.85rem; color: var(--primary-color); margin-bottom: 0.35rem; font-weight: 600;">2. Cinematic Video Rendering</h4>
+                        <p style="font-size: 0.75rem; color: var(--text-secondary); line-height: 1.4; margin: 0;">
+                            Connects to Google Veo 3.1 (8s) and Runway Gen-3 (10s and 30s stitched cinematic scenes) to dynamically render media. No 5-second previews.
+                        </p>
+                    </div>
+                    <div style="background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.05); padding: 1rem; border-radius: 8px;">
+                        <h4 style="font-size: 0.85rem; color: var(--primary-color); margin-bottom: 0.35rem; font-weight: 600;">3. Social Autoposter</h4>
+                        <p style="font-size: 0.75rem; color: var(--text-secondary); line-height: 1.4; margin: 0;">
+                            Automates live API posting to LinkedIn and Twitter/X, featuring a queue system to release posts immediately or at scheduled times.
+                        </p>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Growth OS Command Center -->
+        <div id="growth-view" class="view-content" style="width:100%;">
+            <div class="growth-toolbar glass-card">
+                <div>
+                    <p class="growth-kicker">Agency-grade social automation</p>
+                    <h2>Growth OS Command Center</h2>
+                </div>
+                <div class="growth-actions">
+                    <button id="growth-refresh-btn" class="secondary-btn">Refresh</button>
+                    <button id="growth-report-btn" class="primary-btn">Build Report</button>
+                </div>
+            </div>
+
+            <div class="growth-metrics">
+                <div class="growth-stat"><span>Inbox</span><strong id="growth-stat-inbox">0</strong></div>
+                <div class="growth-stat"><span>Calendar</span><strong id="growth-stat-calendar">0</strong></div>
+                <div class="growth-stat"><span>Assets</span><strong id="growth-stat-assets">0</strong></div>
+                <div class="growth-stat"><span>Best Time</span><strong id="growth-stat-besttime">--</strong></div>
+            </div>
+
+            <div class="growth-grid">
+                <section class="growth-panel growth-panel-wide">
+                    <div class="growth-panel-header"><h3>AI Campaign Planner</h3><span>30-day strategy</span></div>
+                    <div class="growth-inline-form">
+                        <input id="growth-plan-url" type="url" placeholder="Business URL">
+                        <input id="growth-plan-goals" type="text" placeholder="Goals">
+                        <input id="growth-plan-audience" type="text" placeholder="Audience">
+                        <button id="growth-plan-btn" class="primary-btn">Generate</button>
+                    </div>
+                    <div id="growth-campaign-plan" class="growth-list compact"></div>
+                </section>
+
+                <section class="growth-panel">
+                    <div class="growth-panel-header"><h3>Unified Inbox</h3><span>AI replies</span></div>
+                    <div id="growth-inbox-list" class="growth-list"></div>
+                </section>
+
+                <section class="growth-panel">
+                    <div class="growth-panel-header"><h3>Visual Calendar</h3><span>Approvals + schedule</span></div>
+                    <div id="growth-calendar-list" class="growth-list"></div>
+                </section>
+
+                <section class="growth-panel">
+                    <div class="growth-panel-header"><h3>Asset Library</h3><span>Generated media</span></div>
+                    <div id="growth-asset-list" class="growth-list asset-list"></div>
+                </section>
+
+                <section class="growth-panel">
+                    <div class="growth-panel-header"><h3>Social Listening</h3><span>Topics + signals</span></div>
+                    <div class="growth-inline-form two">
+                        <input id="growth-topic-input" type="text" placeholder="Keyword, hashtag, creator">
+                        <button id="growth-add-topic-btn" class="secondary-btn">Add</button>
+                    </div>
+                    <div id="growth-listening-list" class="growth-list"></div>
+                </section>
+
+                <section class="growth-panel">
+                    <div class="growth-panel-header"><h3>Competitors</h3><span>Velocity patterns</span></div>
+                    <div class="growth-inline-form two">
+                        <input id="growth-competitor-input" type="text" placeholder="Competitor name or handle">
+                        <button id="growth-add-competitor-btn" class="secondary-btn">Track</button>
+                    </div>
+                    <div id="growth-competitor-list" class="growth-list"></div>
+                </section>
+
+                <section class="growth-panel">
+                    <div class="growth-panel-header"><h3>Evergreen Queues</h3><span>Content buckets</span></div>
+                    <div id="growth-evergreen-list" class="growth-list"></div>
+                </section>
+
+                <section class="growth-panel">
+                    <div class="growth-panel-header"><h3>Brand Kit + Rules</h3><span>Template matching</span></div>
+                    <div class="growth-inline-form">
+                        <input id="growth-brand-colors" type="text" placeholder="#8b5cf6, #f43f5e">
+                        <input id="growth-brand-logo" type="url" placeholder="Logo URL">
+                        <input id="growth-brand-tone" type="text" placeholder="Tone presets">
+                        <button id="growth-brand-save-btn" class="primary-btn">Save</button>
+                    </div>
+                    <div id="growth-brand-rules" class="growth-list compact"></div>
+                </section>
+
+                <section class="growth-panel">
+                    <div class="growth-panel-header"><h3>A/B Testing</h3><span>Hooks + thumbnails</span></div>
+                    <div class="growth-inline-form two">
+                        <input id="growth-abtest-input" type="text" placeholder="Test name">
+                        <button id="growth-add-abtest-btn" class="secondary-btn">Create</button>
+                    </div>
+                    <div id="growth-abtest-list" class="growth-list"></div>
+                </section>
+
+                <section class="growth-panel">
+                    <div class="growth-panel-header"><h3>AI Social CRM</h3><span>Lead follow-ups</span></div>
+                    <div class="growth-inline-form two">
+                        <input id="growth-crm-input" type="text" placeholder="@handle or contact">
+                        <button id="growth-add-crm-btn" class="secondary-btn">Add</button>
+                    </div>
+                    <div id="growth-crm-list" class="growth-list"></div>
+                </section>
+
+                <section class="growth-panel growth-panel-wide">
+                    <div class="growth-panel-header"><h3>Trend-to-Campaign Pipeline</h3><span>Multi-format outputs</span></div>
+                    <div id="growth-pipeline-list" class="growth-list compact"></div>
+                </section>
+
+                <section class="growth-panel growth-panel-wide">
+                    <div class="growth-panel-header"><h3>Longer Multi-Scene Video Builder</h3><span>3-9 generated clips</span></div>
+                    <div class="growth-inline-form">
+                        <input id="growth-video-prompt" type="text" placeholder="Campaign video prompt">
+                        <select id="growth-video-engine">
+                            <option value="fal_hailuo_02">FAL Hailuo 02</option>
+                            <option value="fal_hailuo_23">FAL Hailuo 2.3</option>
+                            <option value="fal_seedance_fast">FAL Seedance Fast</option>
+                            <option value="fal_ltx_fast">FAL LTX Fast</option>
+                            <option value="google_veo_lite">Gemini Veo Lite</option>
+                        </select>
+                        <select id="growth-video-scenes">
+                            <option value="3">3 scenes</option>
+                            <option value="5">5 scenes</option>
+                            <option value="7">7 scenes</option>
+                            <option value="9">9 scenes</option>
+                        </select>
+                        <select id="growth-video-duration">
+                            <option value="6">6s each</option>
+                            <option value="10">10s each</option>
+                            <option value="12">12s each</option>
+                            <option value="20">20s each</option>
+                        </select>
+                        <select id="growth-video-template">
+                            <option value="hook_burst">Hook Burst</option>
+                            <option value="trend_radar">Trend Radar</option>
+                            <option value="cinematic_stack">Cinematic Stack</option>
+                            <option value="documentary_interview">Documentary Interview</option>
+                            <option value="then_vs_now">Then vs Now</option>
+                        </select>
+                        <button id="growth-multiscene-btn" class="primary-btn">Render</button>
+                    </div>
+                    <div id="growth-multiscene-status" class="growth-status">Ready.</div>
+                    <div id="growth-multiscene-output"></div>
+                </section>
+
+                <section class="growth-panel">
+                    <div class="growth-panel-header"><h3>Link-in-Bio</h3><span>Tracked campaign hub</span></div>
+                    <div class="growth-inline-form">
+                        <input id="growth-bio-slug" type="text" placeholder="Slug">
+                        <input id="growth-bio-headline" type="text" placeholder="Headline">
+                        <input id="growth-bio-video" type="text" placeholder="Featured video path">
+                        <button id="growth-bio-save-btn" class="primary-btn">Save</button>
+                    </div>
+                    <a id="growth-bio-link" class="growth-link" href="/b/6frame" target="_blank" rel="noreferrer">Open public page</a>
+                </section>
+
+                <section class="growth-panel">
+                    <div class="growth-panel-header"><h3>UTM + Click Tracking</h3><span>Campaign links</span></div>
+                    <div class="growth-inline-form">
+                        <input id="growth-utm-url" type="url" placeholder="Destination URL">
+                        <input id="growth-utm-campaign" type="text" placeholder="Campaign">
+                        <input id="growth-utm-content" type="text" placeholder="Content">
+                        <button id="growth-utm-btn" class="secondary-btn">Build</button>
+                    </div>
+                    <div id="growth-utm-list" class="growth-list compact"></div>
+                </section>
+
+                <section class="growth-panel">
+                    <div class="growth-panel-header"><h3>Agency Mode</h3><span>Client workspaces</span></div>
+                    <div class="growth-inline-form two">
+                        <input id="growth-workspace-input" type="text" placeholder="Client workspace">
+                        <button id="growth-add-workspace-btn" class="secondary-btn">Add</button>
+                    </div>
+                    <div id="growth-workspace-list" class="growth-list"></div>
+                </section>
+
+                <section class="growth-panel">
+                    <div class="growth-panel-header"><h3>Automation Rules</h3><span>If-this-then-that</span></div>
+                    <div class="growth-inline-form">
+                        <input id="growth-rule-trigger" type="text" placeholder="Trigger">
+                        <input id="growth-rule-condition" type="text" placeholder="Condition">
+                        <input id="growth-rule-action" type="text" placeholder="Action">
+                        <button id="growth-add-rule-btn" class="secondary-btn">Add</button>
+                        <button id="growth-run-rules-btn" class="primary-btn">Run</button>
+                    </div>
+                    <div id="growth-rules-list" class="growth-list"></div>
+                    <div id="growth-events-list" class="growth-list compact"></div>
+                </section>
+
+                <section class="growth-panel">
+                    <div class="growth-panel-header"><h3>Plugin + Integrations</h3><span>Webhooks + connectors</span></div>
+                    <div id="growth-integrations-list" class="growth-list"></div>
+                </section>
+
+                <section class="growth-panel growth-panel-wide">
+                    <div class="growth-panel-header"><h3>Auto Reports + ROI</h3><span>Weekly summaries</span></div>
+                    <div id="growth-report-list" class="growth-list compact"></div>
+                </section>
+            </div>
+        </div>
+    </main>
+
+    <!-- SETTINGS MODAL -->
+    <div class="modal-overlay hidden" id="settings-modal">
+        <div class="modal-card glass-card">
+            <div class="modal-header">
+                <h2>API Settings & Brand Guidelines</h2>
+                <button id="close-settings-btn" class="close-btn">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-toggle-group">
+                    <label for="mock-mode">Enable Mock Publish Mode</label>
+                    <input type="checkbox" id="mock-mode">
+                    <span class="toggle-help">Bypasses live Twitter/LinkedIn postings for testing. Highly recommended for sandbox runs.</span>
+                </div>
+
+                <div class="input-group">
+                    <label for="gemini-key">Gemini API Key</label>
+                    <input type="password" id="gemini-key" placeholder="AIzaSy...">
+                </div>
+
+                <div class="input-group">
+                    <label for="runway-key">Runway API Key</label>
+                    <input type="password" id="runway-key" placeholder="key_...">
+                </div>
+
+                <div class="input-group">
+                    <label for="fal-key">FAL API Key</label>
+                    <input type="password" id="fal-key" placeholder="fal-...">
+                </div>
+
+                <div class="input-group">
+                    <label for="brand-voice-input">Brand Voice & Style Guide</label>
+                    <textarea id="brand-voice-input" rows="4"></textarea>
+                </div>
+
+                <details class="credentials-details">
+                    <summary>Social Media API Keys (For live publishing)</summary>
+                    
+                    <h4 class="credentials-sub">Twitter / X Developer Keys</h4>
+                    <div class="input-group">
+                        <label for="tw-consumer-key">Consumer Key</label>
+                        <input type="password" id="tw-consumer-key">
+                    </div>
+                    <div class="input-group">
+                        <label for="tw-consumer-secret">Consumer Secret</label>
+                        <input type="password" id="tw-consumer-secret">
+                    </div>
+                    <div class="input-group">
+                        <label for="tw-access-token">Access Token</label>
+                        <input type="password" id="tw-access-token">
+                    </div>
+                    <div class="input-group">
+                        <label for="tw-access-secret">Access Token Secret</label>
+                        <input type="password" id="tw-access-secret">
+                    </div>
+
+                    <h4 class="credentials-sub" style="margin-top: 1.5rem;">LinkedIn API Credentials</h4>
+                    <div class="input-group">
+                        <label for="li-access-token">Access Token</label>
+                        <input type="password" id="li-access-token">
+                    </div>
+                    <div class="input-group">
+                        <label for="li-person-urn">Person URN ID</label>
+                        <input type="text" id="li-person-urn" placeholder="e.g. 1234567">
+                    </div>
+                </details>
+
+                <details class="credentials-details" style="margin-top: 1rem;">
+                    <summary>Instagram, TikTok, YouTube, Facebook &amp; Threads (requires your own developer app credentials)</summary>
+                    <div class="input-group">
+                        <label for="public-base-url">Public Base URL (this app's own public domain)</label>
+                        <input type="text" id="public-base-url" placeholder="e.g. https://marketing-automation-production-dbd5.up.railway.app">
+                        <span class="toggle-help">Instagram/TikTok/Facebook/Threads fetch the video from this URL — required before publishing to those platforms.</span>
+                    </div>
+
+                    <h4 class="credentials-sub">Meta App (shared by Instagram + Facebook)</h4>
+                    <p style="font-size: 0.7rem; color: var(--text-secondary); margin-bottom: 0.5rem;">
+                        Run <code>python3 meta_auth.py</code> in the project folder to fill in everything below automatically via a one-time browser login.
+                    </p>
+                    <div class="input-group">
+                        <label for="meta-app-id">App ID</label>
+                        <input type="text" id="meta-app-id">
+                    </div>
+                    <div class="input-group">
+                        <label for="meta-app-secret">App Secret</label>
+                        <input type="password" id="meta-app-secret">
+                    </div>
+
+                    <h4 class="credentials-sub">Instagram (Meta Graph API — Business/Creator account)</h4>
+                    <div class="input-group">
+                        <label for="instagram-access-token">Access Token</label>
+                        <input type="password" id="instagram-access-token">
+                    </div>
+                    <div class="input-group">
+                        <label for="instagram-business-account-id">Business Account ID</label>
+                        <input type="text" id="instagram-business-account-id">
+                    </div>
+                    <div class="input-group">
+                        <label for="instagram-search-hashtags">Trend Scan Hashtags (Hashtag Search API, comma-separated)</label>
+                        <input type="text" id="instagram-search-hashtags" placeholder="aivideo, runwaygen3, soraai, ...">
+                        <span class="toggle-help">Used by the Live Trends Scanner to pull real, verified Instagram posts. Meta caps this at 30 unique hashtags per 7 days.</span>
+                    </div>
+
+                    <h4 class="credentials-sub" style="margin-top: 1.5rem;">Facebook (Page)</h4>
+                    <div class="input-group">
+                        <label for="facebook-page-access-token">Page Access Token</label>
+                        <input type="password" id="facebook-page-access-token">
+                    </div>
+                    <div class="input-group">
+                        <label for="facebook-page-id">Page ID</label>
+                        <input type="text" id="facebook-page-id">
+                    </div>
+
+                    <h4 class="credentials-sub" style="margin-top: 1.5rem;">TikTok (Content Posting API)</h4>
+                    <p style="font-size: 0.7rem; color: var(--text-secondary); margin-bottom: 0.5rem;">
+                        Run <code>python3 tiktok_auth.py</code> in the project folder to fill in everything below automatically via a one-time browser login.
+                    </p>
+                    <div class="input-group">
+                        <label for="tiktok-client-key">Client Key</label>
+                        <input type="text" id="tiktok-client-key">
+                    </div>
+                    <div class="input-group">
+                        <label for="tiktok-client-secret">Client Secret</label>
+                        <input type="password" id="tiktok-client-secret">
+                    </div>
+                    <div class="input-group">
+                        <label for="tiktok-access-token">Access Token</label>
+                        <input type="password" id="tiktok-access-token">
+                    </div>
+                    <div class="input-group">
+                        <label for="tiktok-refresh-token">Refresh Token</label>
+                        <input type="password" id="tiktok-refresh-token">
+                    </div>
+
+                    <h4 class="credentials-sub" style="margin-top: 1.5rem;">YouTube (Data API v3)</h4>
+                    <p style="font-size: 0.7rem; color: var(--text-secondary); margin-bottom: 0.5rem;">
+                        Run <code>python3 youtube_auth.py</code> in the project folder to fill in the refresh token below automatically via a one-time browser login (enter Client ID/Secret first).
+                    </p>
+                    <div class="input-group">
+                        <label for="youtube-client-id">OAuth Client ID</label>
+                        <input type="text" id="youtube-client-id">
+                    </div>
+                    <div class="input-group">
+                        <label for="youtube-client-secret">OAuth Client Secret</label>
+                        <input type="password" id="youtube-client-secret">
+                    </div>
+                    <div class="input-group">
+                        <label for="youtube-refresh-token">OAuth Refresh Token</label>
+                        <input type="password" id="youtube-refresh-token">
+                    </div>
+
+                    <h4 class="credentials-sub" style="margin-top: 1.5rem;">Threads (Meta)</h4>
+                    <div class="input-group">
+                        <label for="threads-access-token">Access Token</label>
+                        <input type="password" id="threads-access-token">
+                    </div>
+                    <div class="input-group">
+                        <label for="threads-user-id">User ID</label>
+                        <input type="text" id="threads-user-id">
+                    </div>
+                </details>
+
+                <details class="credentials-details" style="margin-top: 1rem;" open>
+                    <summary>PostProxy Unified Social Login</summary>
+                    <div class="form-toggle-group" style="margin-top: 0.5rem;">
+                        <label for="postproxy-enabled">Use PostProxy For Publishing</label>
+                        <input type="checkbox" id="postproxy-enabled">
+                        <span class="toggle-help">Routes scheduled/autopilot publishing through PostProxy's unified API when enabled.</span>
+                    </div>
+                    <div class="input-group">
+                        <label for="postproxy-api-key">PostProxy API Key</label>
+                        <input type="password" id="postproxy-api-key" placeholder="PostProxy API key">
+                    </div>
+                    <div class="input-group">
+                        <label for="postproxy-profile-group-id">Default Profile Group ID</label>
+                        <input type="text" id="postproxy-profile-group-id" placeholder="Auto-detects if blank">
+                    </div>
+                    <div class="input-group">
+                        <label for="postproxy-daily-publish-limit">Daily Safety Limit</label>
+                        <input type="number" id="postproxy-daily-publish-limit" min="1" max="25" step="1" value="2">
+                        <span class="toggle-help">Maximum automatic PostProxy publish records per day. Manual approval can override this cap.</span>
+                    </div>
+                    <div class="postproxy-actions">
+                        <button type="button" class="secondary-btn postproxy-connect-btn" data-platform="instagram">Connect Instagram</button>
+                        <button type="button" class="secondary-btn postproxy-connect-btn" data-platform="facebook">Connect Facebook</button>
+                        <button type="button" class="secondary-btn postproxy-connect-btn" data-platform="tiktok">Connect TikTok</button>
+                        <button type="button" class="secondary-btn postproxy-connect-btn" data-platform="youtube">Connect YouTube</button>
+                        <button type="button" class="secondary-btn postproxy-connect-btn" data-platform="linkedin">Connect LinkedIn</button>
+                        <button type="button" class="secondary-btn postproxy-connect-btn" data-platform="twitter">Connect X</button>
+                        <button type="button" class="secondary-btn postproxy-connect-btn" data-platform="threads">Connect Threads</button>
+                    </div>
+                    <button id="postproxy-refresh-profiles-btn" type="button" class="secondary-btn" style="width: 100%; margin-top: 0.75rem;">Refresh / Sync PostProxy</button>
+                    <div id="postproxy-profiles-output" class="growth-list" style="margin-top: 0.75rem;"></div>
+                </details>
+
+                <details class="credentials-details" style="margin-top: 1rem;">
+                    <summary>Report Email Delivery (SMTP)</summary>
+                    <div class="input-group">
+                        <label for="report-email-provider">Email Provider</label>
+                        <select id="report-email-provider">
+                            <option value="resend">Resend API</option>
+                            <option value="smtp">SMTP</option>
+                        </select>
+                    </div>
+                    <div class="input-group">
+                        <label for="report-email-to">Report Recipient Email</label>
+                        <input type="email" id="report-email-to" placeholder="you@example.com">
+                    </div>
+                    <h4 class="credentials-sub">Resend API</h4>
+                    <div class="input-group">
+                        <label for="resend-api-key">Resend API Key</label>
+                        <input type="password" id="resend-api-key" placeholder="re_...">
+                    </div>
+                    <div class="input-group">
+                        <label for="resend-from">Resend From Address</label>
+                        <input type="text" id="resend-from" placeholder="6Frame Studio <reports@yourdomain.com>">
+                        <span class="toggle-help">Use an address on a verified Resend domain. For initial testing, Resend may allow onboarding@resend.dev only for your account email.</span>
+                    </div>
+                    <h4 class="credentials-sub">SMTP Fallback</h4>
+                    <div class="input-group">
+                        <label for="smtp-host">SMTP Host</label>
+                        <input type="text" id="smtp-host" placeholder="smtp.gmail.com">
+                    </div>
+                    <div class="input-group">
+                        <label for="smtp-port">SMTP Port</label>
+                        <input type="number" id="smtp-port" value="587">
+                    </div>
+                    <div class="input-group">
+                        <label for="smtp-user">SMTP User</label>
+                        <input type="text" id="smtp-user" placeholder="sender@example.com">
+                    </div>
+                    <div class="input-group">
+                        <label for="smtp-password">SMTP Password / App Password</label>
+                        <input type="password" id="smtp-password">
+                    </div>
+                    <div class="input-group">
+                        <label for="smtp-from">From Address</label>
+                        <input type="email" id="smtp-from" placeholder="reports@example.com">
+                    </div>
+                    <div class="form-toggle-group">
+                        <label for="smtp-tls">Use TLS</label>
+                        <input type="checkbox" id="smtp-tls" checked>
+                        <span class="toggle-help">Most providers use port 587 with TLS enabled.</span>
+                    </div>
+                    <button id="provider-diagnostics-btn" type="button" class="secondary-btn" style="width: 100%; margin-top: 0.5rem;">Run Live Provider Diagnostics</button>
+                    <div id="provider-diagnostics-output" class="growth-list" style="margin-top: 0.75rem;"></div>
+                </details>
+
+                <details class="credentials-details" style="margin-top: 1rem;">
+                    <summary>Autonomous Autopilot Autoposting</summary>
+                    <div class="form-toggle-group" style="margin-top: 0.5rem;">
+                        <label for="autonomous-posting">Enable Autonomous Autoposting</label>
+                        <input type="checkbox" id="autonomous-posting">
+                        <span class="toggle-help">Automatically runs trend scanner, generates videos, and posts daily.</span>
+                    </div>
+                    <div class="input-group">
+                        <label for="autonomous-hour">Posting Hour (0-23)</label>
+                        <select id="autonomous-hour" style="background: rgba(0,0,0,0.4); border: 1px solid var(--border-color); color: var(--text-primary); border-radius: 4px; padding: 0.35rem 0.5rem; font-size: 0.75rem; width: 100%;">
+                            <option value="0">12:00 AM (Midnight)</option>
+                            <option value="1">1:00 AM</option>
+                            <option value="2">2:00 AM</option>
+                            <option value="3">3:00 AM</option>
+                            <option value="4">4:00 AM</option>
+                            <option value="5">5:00 AM</option>
+                            <option value="6">6:00 AM</option>
+                            <option value="7">7:00 AM</option>
+                            <option value="8">8:00 AM</option>
+                            <option value="9" selected>9:00 AM (Recommended)</option>
+                            <option value="10">10:00 AM</option>
+                            <option value="11">11:00 AM</option>
+                            <option value="12">12:00 PM (Noon)</option>
+                            <option value="13">1:00 PM</option>
+                            <option value="14">2:00 PM</option>
+                            <option value="15">3:00 PM</option>
+                            <option value="16">4:00 PM</option>
+                            <option value="17">5:00 PM</option>
+                            <option value="18">6:00 PM</option>
+                            <option value="19">7:00 PM</option>
+                            <option value="20">8:00 PM</option>
+                            <option value="21">9:00 PM</option>
+                            <option value="22">10:00 PM</option>
+                            <option value="23">11:00 PM</option>
+                        </select>
+                    </div>
+                    <div style="margin-top: 0.5rem; text-align: left;">
+                        <span style="font-size: 0.7rem; color: var(--text-secondary); display: block; margin-bottom: 0.25rem;">Autopilot Platforms</span>
+                        <div style="display: flex; gap: 0.8rem; align-items: center; flex-wrap: wrap;">
+                            <label style="font-size: 0.75rem; display: flex; align-items: center; gap: 0.25rem;">
+                                <input type="checkbox" id="auto-platform-twitter" checked> Twitter / X
+                            </label>
+                            <label style="font-size: 0.75rem; display: flex; align-items: center; gap: 0.25rem;">
+                                <input type="checkbox" id="auto-platform-linkedin" checked> LinkedIn
+                            </label>
+                            <label style="font-size: 0.75rem; display: flex; align-items: center; gap: 0.25rem;">
+                                <input type="checkbox" id="auto-platform-instagram"> Instagram
+                            </label>
+                            <label style="font-size: 0.75rem; display: flex; align-items: center; gap: 0.25rem;">
+                                <input type="checkbox" id="auto-platform-tiktok"> TikTok
+                            </label>
+                            <label style="font-size: 0.75rem; display: flex; align-items: center; gap: 0.25rem;">
+                                <input type="checkbox" id="auto-platform-youtube"> YouTube
+                            </label>
+                            <label style="font-size: 0.75rem; display: flex; align-items: center; gap: 0.25rem;">
+                                <input type="checkbox" id="auto-platform-facebook"> Facebook
+                            </label>
+                            <label style="font-size: 0.75rem; display: flex; align-items: center; gap: 0.25rem;">
+                                <input type="checkbox" id="auto-platform-threads"> Threads
+                            </label>
+                        </div>
+                    </div>
+                    <div class="form-toggle-group" style="margin-top: 0.75rem;">
+                        <label for="require-autopilot-approval">Require Approval Before Publishing</label>
+                        <input type="checkbox" id="require-autopilot-approval">
+                        <span class="toggle-help">Stages the daily pick for manual review instead of publishing it immediately.</span>
+                    </div>
+                    <div class="input-group" style="margin-top: 0.75rem;">
+                        <label for="autonomous-video-engine">Autopilot Video Render Engine</label>
+                        <select id="autonomous-video-engine" style="background: rgba(0,0,0,0.4); border: 1px solid var(--border-color); color: var(--text-primary); border-radius: 4px; padding: 0.35rem 0.5rem; font-size: 0.75rem; width: 100%;">
+                            <option value="google_veo">Google Veo 3.1 (Cinematic)</option>
+                            <option value="google_veo_lite">Google Veo 3.1 Lite (Lower Cost)</option>
+                            <option value="google_veo_fast">Google Veo 3.1 Fast</option>
+                            <option value="fal_hailuo_23">FAL Hailuo 2.3 Standard (Budget)</option>
+                            <option value="fal_hailuo_02">FAL Hailuo 02 Standard (Lowest Cost)</option>
+                            <option value="fal_seedance_fast">FAL Seedance Fast (Social)</option>
+                            <option value="fal_ltx_fast">FAL LTX Video 2.0 Fast</option>
+                            <option value="runway_gen3">Runway Gen-3 (Alpha Turbo / Gen-4.5)</option>
+                        </select>
+                    </div>
+                    <div class="input-group" style="margin-top: 0.5rem;">
+                        <label for="autonomous-video-duration">Autopilot Video Duration</label>
+                        <select id="autonomous-video-duration" style="background: rgba(0,0,0,0.4); border: 1px solid var(--border-color); color: var(--text-primary); border-radius: 4px; padding: 0.35rem 0.5rem; font-size: 0.75rem; width: 100%;">
+                            <option value="5" disabled>5 seconds (retired)</option>
+                            <option value="6">6 seconds (FAL Standard)</option>
+                            <option value="8">8 seconds</option>
+                            <option value="10" selected>10 seconds</option>
+                            <option value="12">12 seconds (Seedance / LTX)</option>
+                            <option value="15">15 seconds</option>
+                                              <option value="14">14 seconds (FAL LTX)</option>
+                            <option value="16">16 seconds (FAL LTX)</option>
+                            <option value="18">18 seconds (FAL LTX)</option>
+                            <option value="20">20 seconds (FAL LTX Max)</option>
+                            <option value="30">30 seconds (Cinematic Cut - Runway Only)</option>
+                        </select>
+                    </div>
+                    <div class="form-toggle-group" style="margin-top: 0.75rem;">
+                        <label for="viral-template-enabled">Viral Template Packaging</label>
+                        <input type="checkbox" id="viral-template-enabled">
+                        <span class="toggle-help">Applies a reusable 9:16 social template to Autopilot videos.</span>
+                    </div>
+                    <div style="display:grid; grid-template-columns: 1fr 1fr; gap:0.6rem; margin-top:0.5rem;">
+                        <div class="input-group">
+                            <label for="viral-template-style">Template</label>
+                            <select id="viral-template-style" style="background: rgba(0,0,0,0.4); border: 1px solid var(--border-color); color: var(--text-primary); border-radius: 4px; padding: 0.35rem 0.5rem; font-size: 0.75rem; width: 100%;">
+                                <option value="hook_burst">Hook Burst</option>
+                                <option value="cinematic_stack">Cinematic Stack</option>
+                                <option value="trend_radar">Trend Radar</option>
+                                <option value="documentary_interview">Documentary Interview</option>
+                                <option value="then_vs_now">Then vs. Now</option>
+                                <option value="movie_star_entrance">Movie Star Entrance</option>
+                                <option value="meme_master_reaction">Meme Master Reaction</option>
+                                <option value="summer_schedule_loop">Summer Schedule Loop</option>
+                            </select>
+                        </div>
+                        <div class="input-group">
+                            <label for="viral-template-quality">Quality</label>
+                            <select id="viral-template-quality" style="background: rgba(0,0,0,0.4); border: 1px solid var(--border-color); color: var(--text-primary); border-radius: 4px; padding: 0.35rem 0.5rem; font-size: 0.75rem; width: 100%;">
+                                <option value="draft">Draft</option>
+                                <option value="standard">Standard</option>
+                                <option value="high">High</option>
+                            </select>
+                        </div>
+                    </div>
+                </details>
+            </div>
+            <div class="modal-footer">
+                <button id="save-settings-btn" class="primary-btn">Save Changes</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- TOAST NOTIFICATION -->
+    <div id="toast" class="toast hidden">Post copied successfully!</div>
+    
+    <!-- Scripts -->
+    <script src="/static/index.js?v=2.2"></script>
+</body>
+</html>

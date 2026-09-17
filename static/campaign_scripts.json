@@ -1,0 +1,47 @@
+[
+    {
+        "id": "neural_director",
+        "title": "Neural Director (Cyberpunk Editing Room)",
+        "concept": "A high-end visual showing a neural editing workflow, perfect for illustrating the B2B tech side of 6Frame Studio's AI rendering capabilities.",
+        "image": "/static/assets/neural_director.png",
+        "video_prompt": "Slow push-in shot. The neon holograms of timelines and film frames float and pulse slightly in the air. The editor's gloved hand gently gestures, causing one of the digital screens to rotate in a 3D space. Cinematic anamorphic lens flare flares subtly. Warm accent lighting in the background glows. Hyperrealistic, 30fps.",
+        "linkedin_post": "AI isn't replacing the director; it's elevating the editing bay. 🎬\n\nAt 6Frame Studio, we are engineering neural production pipelines that combine Runway Gen-3 camera controls with custom diffusion models. The result? 30% faster pre-visualizations and visual effects that feel natively cinematic rather than synthesized.\n\nHere is a sneak peek at our visual editor interface workspace concept. By using multimodal agents, we can orchestrate scripts directly into raw frame buffers, allowing artists to 'direct' instead of manual frame-by-frame painting.\n\nHow is your studio adapting to neural pipelines? Let's discuss in the comments below.\n\n#AIFilmmaking #6FrameStudio #Cinematography #RunwayML #GenerativeAI",
+        "twitter_thread": [
+            "1/ AI isn't killing filmmaking—it's rebuilding the editing room from scratch. At 6Frame Studio, we are designing neural production pipelines that allow real-time direction. Here is a look at our editor workspace concept. 👇",
+            "2/ In this pipeline, the director uses gesture-based neural nodes to adjust camera sweeps, volumetric lighting, and character consistency in a unified 3D holographic environment. No more waiting for overnight rendering checks.",
+            "3/ By combining Runway Gen-3 with custom SDXL style guides, we achieve a 30% speedup in previs, keeping human artistic direction at the absolute center. Read the full studio breakdown: https://6framestudio.com/"
+        ],
+        "instagram_caption": "Volumetric timelines and neural editing nodes. 🌌 Shaping the next era of cinema from a blank canvas. Engineered at 6Frame Studio.\n\n#6FrameStudio #AICinema #RunwayGen3 #Cyberpunk #VisualEffects #Filmmaking #MidjourneyArtwork #MotionGraphics",
+        "hashtags": ["#6FrameStudio", "#AICinema", "#RunwayGen3", "#Cyberpunk", "#Filmmaking"]
+    },
+    {
+        "id": "infinity_stairs",
+        "title": "Stairway to Infinity (Surreal Sci-Fi)",
+        "concept": "An abstract, visually-stunning dreamscape that acts as an immediate visual hook. Ideal for Twitter threads to drive high engagement.",
+        "image": "/static/assets/infinity_stairs.png",
+        "video_prompt": "Continuous slow orbit camera movement (15 degrees) around the stone spiral staircase. Cosmic nebulae dust spirals and floats lazily around the columns. Tiny stars twinkle inside the dark purple space. The lighting shifts dynamically as the camera rotates. Cinematic realism, high fidelity.",
+        "linkedin_post": "Surrealism is the ultimate test of generative AI physics. 🌌\n\nCreating hyperrealistic physics-defying scenes requires models that understand both texture and spatial gravity. In our 'Stairway to Infinity' concept, we combined Luma's physics engine with custom upscalers to prevent details from turning mushy.\n\nBy feeding high-resolution keyframes into image-to-video pipelines, we maintain architectural consistency even while animating cosmic dust clouds.\n\nSee how we engineer cinematic assets: https://6framestudio.com/\n\n#AIArt #Surrealism #VisualEffects #3DDesign #6FrameStudio",
+        "twitter_thread": [
+            "1/ Generative AI is best when it defies physics. For our latest concept 'Stairway to Infinity,' we wanted to test Luma and Kling's ability to maintain stone textures while orbiting a celestial spiral. Here is the result: 👇",
+            "2/ The secret to avoiding 'AI mush' is an Image-to-Video workflow. We render a hyper-detailed 4K keyframe first, then guide the motion model with explicit camera directives: 'Slow 15° orbit, volumetric space dust, stable arches.'",
+            "3/ This workflow gives us absolute consistency. Perfect for sci-fi storyboarding and cinematic visual hooks. See more creations at https://6framestudio.com/"
+        ],
+        "instagram_caption": "Step into the infinite. 🪐 A cosmic staircase orbiting through purple stardust. Visualizing the impossible at 6Frame Studio.\n\n#Surrealism #SciFiArt #Cinema4D #KlingAI #LumaDreamMachine #CosmicArt #MotionDesign #AIFilmmaker",
+        "hashtags": ["#Surrealism", "#SciFiArt", "#KlingAI", "#LumaDreamMachine", "#6FrameStudio"]
+    },
+    {
+        "id": "whispering_glasshouse",
+        "title": "The Whispering Glasshouse (Cozy Realism)",
+        "concept": "Warm, nostalgic Ghibli-esque realism. Highly shareable on Instagram and Pinterest to appeal to broader aesthetic audiences.",
+        "image": "/static/assets/whispering_glasshouse.png",
+        "video_prompt": "Slow tracking shot from left to right, matching the speed of the floating glasshouse. Water ripples gently around the structure. The tiny hanging lamps inside the glasshouse flicker warmly. Leaves on the trees rustle softly in the wind. Golden hour sunset light beams pierce through the forest. Photorealistic, 35mm film look.",
+        "linkedin_post": "Bringing cozy, nostalgic worlds to life through computational rendering. 🍂\n\nAI isn't just about cyberpunk and sci-fi. For this concept, 'The Whispering Glasshouse,' we explored lighting simulation—specifically, warm interior lamps refracting through glass panes while drifting down a mountain river.\n\nUsing Kling AI's temporal consistency, the water reflections and refractions remain stable, demonstrating that AI can handle soft, naturalistic aesthetics just as well as heavy VFX.\n\nExplore our portfolio: https://6framestudio.com/\n\n#DesignAesthetics #VisualFX #LightingDesign #KlingAI #CozyAesthetic #6FrameStudio",
+        "twitter_thread": [
+            "1/ AI video isn't just cyberpunk neon. We wanted to test Kling AI's handling of complex light refractions and water reflections in a cozy Ghibli-style render: 'The Whispering Glasshouse' 🌿👇",
+            "2/ In this shot, a moss-covered glasshouse drifts down a forest stream. Notice how the water ripples adapt around the floating wood dock, and how the internal lights refract realistically through the glass panels.",
+            "3/ Reaching this level of aesthetic cozy-realism shows how far neural simulation has come. Discover how we build visual worlds: https://6framestudio.com/"
+        ],
+        "instagram_caption": "A moss-draped glasshouse drifting down a mountain stream, lit by the last rays of sunset. 🌿 Cozy, nostalgic, and quiet. Engineered at 6Frame Studio.\n\n#CozyAesthetics #Nostalgia #GhibliVibes #MagicalRealism #AIAnimation #KlingAI #Cinematography #NatureLovers",
+        "hashtags": ["#CozyAesthetics", "#GhibliVibes", "#KlingAI", "#MagicalRealism", "#6FrameStudio"]
+    }
+]

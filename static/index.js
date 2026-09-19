@@ -142,7 +142,10 @@ document.addEventListener("DOMContentLoaded", () => {
                 hideAuth();
                 fetchSettings();
             })
-            .catch(() => showAuth("Could not check admin session."));
+            .catch(() => {
+                hideAuth();
+                fetchSettings();
+            });
     }
 
     if (authForm) {

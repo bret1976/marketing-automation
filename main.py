@@ -72,7 +72,13 @@ def write_json_file(path: str, data: Any):
             json.dump(data, f, indent=4)
         os.replace(tmp_path, path)
 
+def _truthy_env(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
 def auth_enabled() -> bool:
+    # Auth is opt-in. Having ADMIN_PASSWORD set no longer locks the dashboard.
+    if not _truthy_env("REQUIRE_ADMIN_AUTH"):
+        return False
     return bool(os.environ.get("ADMIN_PASSWORD"))
 
 def session_signature() -> str:
@@ -110,7 +116,7 @@ def request_is_authenticated(request: Request) -> bool:
 def is_public_path(path: str) -> bool:
     return (
         path in PUBLIC_API_PATHS
-        or path in ("/privacy-policy", "/terms-of-service")
+        or path in ("/", "/index.html", "/favicon.ico", "/privacy-policy", "/terms-of-service")
         or path.startswith(PUBLIC_PREFIXES)
         or path.startswith("/tiktok")
         or path.startswith("/oauth/postproxy/")

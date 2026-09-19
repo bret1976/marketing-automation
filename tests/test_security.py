@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 os.environ["ADMIN_PASSWORD"] = "test-password"
 os.environ["ADMIN_USERNAME"] = "admin"
 os.environ["DISABLE_BACKGROUND_SCHEDULER"] = "true"
+os.environ.pop("REQUIRE_ADMIN_AUTH", None)
 
 main = importlib.import_module("main")
 client = TestClient(main.app)
@@ -18,21 +19,42 @@ def basic_headers(username="admin", password="test-password"):
     return {"Authorization": f"Basic {token}"}
 
 
-def test_admin_and_sensitive_api_require_authentication():
-    assert client.get("/").status_code == 401
-    assert client.get("/reports/example.pdf").status_code == 401
-    assert client.get("/api/settings").status_code == 401
-    assert client.post("/api/settings", json={}).status_code == 401
-    assert client.post("/api/trigger-autopilot").status_code == 401
-    assert client.post("/api/analyze", json={"video_path": "/etc/passwd", "website_url": "https://example.com"}).status_code == 401
-    assert client.post("/api/publish/twitter", json={"text": "blocked"}).status_code == 401
-    assert client.post("/api/publish/linkedin", json={"text": "blocked"}).status_code == 401
-
-
-def test_http_basic_auth_unlocks_admin():
-    response = client.get("/", headers=basic_headers())
+def test_dashboard_is_open_without_authentication_by_default():
+    response = client.get("/")
     assert response.status_code == 200
     assert "6Frame Studio" in response.text
+    assert client.get("/api/auth/status").json() == {"auth_required": False, "authenticated": True}
+    assert client.get("/api/settings").status_code == 200
+
+
+def test_opt_in_admin_auth_locks_sensitive_apis():
+    os.environ["REQUIRE_ADMIN_AUTH"] = "true"
+    try:
+        assert client.get("/api/settings").status_code == 401
+        assert client.post("/api/settings", json={}).status_code == 401
+        assert client.post("/api/trigger-autopilot").status_code == 401
+        assert client.post(
+            "/api/analyze",
+            json={"video_path": "/etc/passwd", "website_url": "https://example.com"},
+        ).status_code == 401
+        assert client.post("/api/publish/twitter", json={"text": "blocked"}).status_code == 401
+        assert client.post("/api/publish/linkedin", json={"text": "blocked"}).status_code == 401
+        # The dashboard HTML itself stays reachable so visitors are not blocked
+        # by a browser basic-auth prompt before they can use the platform.
+        home = client.get("/")
+        assert home.status_code == 200
+        assert "6Frame Studio" in home.text
+    finally:
+        os.environ.pop("REQUIRE_ADMIN_AUTH", None)
+
+
+def test_http_basic_auth_unlocks_admin_when_auth_is_required():
+    os.environ["REQUIRE_ADMIN_AUTH"] = "true"
+    try:
+        response = client.get("/api/settings", headers=basic_headers())
+        assert response.status_code == 200
+    finally:
+        os.environ.pop("REQUIRE_ADMIN_AUTH", None)
 
 
 def test_arbitrary_filesystem_paths_are_rejected_even_when_authenticated():

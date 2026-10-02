@@ -30,6 +30,7 @@ from orchestrator import (
     render_variant_with_fallback, get_font_path
 )
 from template_renderer import list_viral_templates, render_template_video
+import publish_guard
 
 # Setup logger
 logging.basicConfig(level=logging.INFO)
@@ -37,7 +38,14 @@ logger = logging.getLogger("main")
 
 app = FastAPI(title="6Frame Studio Marketing Automation Hub")
 
-PUBLIC_API_PATHS = {"/api/auth/login", "/api/auth/status", "/api/postproxy/callback"}
+PUBLIC_API_PATHS = {
+    "/api/auth/login",
+    "/api/auth/status",
+    "/api/postproxy/callback",
+    "/health",
+    "/api/publish-guard/summary",
+    "/api/publish-guard/check",
+}
 # These routes must remain reachable without credentials. Social networks fetch
 # generated media directly, while /r and /b are intentionally public campaign URLs.
 PUBLIC_PREFIXES = ("/static/", "/r/", "/b/", "/uploads/")
@@ -2543,6 +2551,25 @@ def resolve_platform_list(platform_field: str) -> List[str]:
 async def publish_post_to_platforms(post: dict, settings: dict, bypass_daily_limit: bool = False) -> dict:
     """Shared publisher used by the scheduler, autopilot approval, and manual publish endpoints.
     Returns {"successes": [...], "errors": [...], "tweet_id": str|None, "tweet_ids": [...]|None}."""
+    guard = publish_guard.check_publish(
+        post,
+        force=bool(post.get("publish_guard_force") or (settings or {}).get("publish_guard_force")),
+    )
+    if guard.get("blocked"):
+        logger.info(
+            "publish-guard blocked post %s reason=%s fingerprint=%s",
+            post.get("id"),
+            guard.get("reason"),
+            guard.get("fingerprint"),
+        )
+        return {
+            "successes": [],
+            "errors": [f"publish-guard: {guard.get('reason')}"],
+            "tweet_id": None,
+            "tweet_ids": None,
+            "publish_guard": guard,
+            "blocked_by_publish_guard": True,
+        }
     platforms = resolve_platform_list(post["platform"])
     successes = []
     errors = []
@@ -2701,6 +2728,11 @@ async def publish_post_to_platforms(post: dict, settings: dict, bypass_daily_lim
 
 def apply_publish_result_to_post(p: dict, result: dict):
     successes, errors = result["successes"], result["errors"]
+    if successes and not result.get("blocked_by_publish_guard"):
+        try:
+            publish_guard.record_publish(p)
+        except Exception as guard_err:
+            logger.warning(f"publish-guard ledger write failed: {guard_err}")
     if result.get("blocked_by_daily_limit"):
         p["status"] = "AWAITING_APPROVAL"
         p["error_message"] = "; ".join(errors)
@@ -3058,11 +3090,25 @@ def schedule_post(req: SchedulePostRequest):
         "error_message": None,
         "posted_at": None
     }
-    
+
     posts = load_scheduled_posts()
+    guard = publish_guard.check_schedule(post, posts, force=bool(getattr(req, "publish_guard_force", False)))
+    if guard.get("blocked"):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "publish-guard blocked duplicate schedule",
+                "publish_guard": guard,
+            },
+        )
     posts.append(post)
     save_scheduled_posts(posts)
-    return {"status": "SUCCESS", "message": "Post scheduled successfully.", "post_id": post["id"]}
+    return {
+        "status": "SUCCESS",
+        "message": "Post scheduled successfully.",
+        "post_id": post["id"],
+        "publish_guard": {"pack": publish_guard.PACK, "fingerprint": guard.get("fingerprint"), "reason": guard.get("reason")},
+    }
 
 @app.get("/api/scheduled-queue")
 def get_scheduled_queue():
@@ -4983,6 +5029,51 @@ def terms_of_service():
     <h2>Contact</h2>
     <p>Questions about these terms can be directed to {os.environ.get("CONTACT_EMAIL", "the account owner")}.</p>
     </body></html>"""
+
+# ==========================================================================
+# PUBLISH GUARD — scout pack publish-guard-v1 (backend-only; no UI)
+# ==========================================================================
+
+@app.get("/health")
+def health():
+    return {
+        "ok": True,
+        "service": "marketing-automation",
+        "packs": {"publish_guard": publish_guard.PACK},
+        "publish_guard": publish_guard.summary(),
+    }
+
+
+class PublishGuardCheckRequest(BaseModel):
+    platform: Optional[str] = None
+    text: Optional[str] = None
+    thread: Optional[List[str]] = None
+    video_path: Optional[str] = None
+    source_url: Optional[str] = None
+    id: Optional[str] = None
+    force: bool = False
+    mode: str = "publish"  # publish | schedule
+
+
+@app.get("/api/publish-guard/summary")
+def api_publish_guard_summary():
+    return publish_guard.summary()
+
+
+@app.post("/api/publish-guard/check")
+def api_publish_guard_check(req: PublishGuardCheckRequest):
+    post = {
+        "id": req.id,
+        "platform": req.platform or "",
+        "text": req.text or "",
+        "thread": req.thread,
+        "video_path": req.video_path or "",
+        "source_url": req.source_url or "",
+    }
+    if (req.mode or "publish").lower() == "schedule":
+        return publish_guard.check_schedule(post, load_scheduled_posts(), force=req.force)
+    return publish_guard.check_publish(post, force=req.force)
+
 
 # Mount durable generated assets before the broader static folder so legacy
 # /static/assets/generated/... URLs resolve to the Railway volume.

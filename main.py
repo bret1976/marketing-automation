@@ -31,10 +31,12 @@ from orchestrator import (
 )
 from template_renderer import list_viral_templates, render_template_video
 import publish_guard
+import autopilot_watch
 
 # Setup logger
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("main")
+autopilot_watch.install()  # passive log tap; AUTOPILOT_WATCH=0 disables
 
 app = FastAPI(title="6Frame Studio Marketing Automation Hub")
 
@@ -5039,9 +5041,37 @@ def health():
     return {
         "ok": True,
         "service": "marketing-automation",
-        "packs": {"publish_guard": publish_guard.PACK},
+        "packs": {"publish_guard": publish_guard.PACK, "autopilot_watch": autopilot_watch.PACK},
         "publish_guard": publish_guard.summary(),
+        "autopilot_watch": _autopilot_watch_compact(),
     }
+
+
+# ==========================================================================
+# AUTOPILOT WATCH — scout pack autopilot-watch-v1 (backend-only; read-only)
+# ==========================================================================
+
+def _autopilot_watch_settings() -> dict:
+    try:
+        return load_settings()
+    except Exception:
+        return {}
+
+
+def _autopilot_watch_compact() -> dict:
+    try:
+        return autopilot_watch.compact(_autopilot_watch_settings())
+    except Exception as exc:
+        return {"status": "unknown", "error": str(exc)[:120]}
+
+
+@app.get("/api/autopilot-watch/summary")
+def api_autopilot_watch_summary():
+    try:
+        posts = load_scheduled_posts()
+    except Exception:
+        posts = []
+    return autopilot_watch.report(settings=_autopilot_watch_settings(), posts=posts)
 
 
 class PublishGuardCheckRequest(BaseModel):

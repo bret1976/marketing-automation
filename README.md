@@ -54,3 +54,19 @@ Navigate to your web browser:
    - Navigate through the LinkedIn, Twitter, and Instagram tabs to read the staged posts.
    - Edit the copy directly in the textboxes. The Twitter Thread view features active character counters for each tweet (highlighting red if you exceed X's 280-character limit).
    - Click **Publish to LinkedIn** or **Publish Thread to X** to execute the posting, or copy them to your clipboard.
+
+## Autopilot Watch (autopilot-watch-v1, backend-only)
+
+Read-only dead-man's switch for the scheduled Autopilot slots (`AUTONOMOUS_HOURS`, UTC).
+It compares expected slots against the slot ledger the live overlay writes
+(`STATE_DIR/autonomous_slot.json`) and reports `ok` / `late` (1 missed) / `down` (2+ missed in a row),
+plus classified upstream issues (Gemini prepaid credits empty, YouTube bot wall, TikTok discovery empty,
+Facebook page_id missing, ...) from a passive log tap and the scheduled-posts log.
+
+- `GET /health` → `packs.autopilot_watch` + compact `autopilot_watch` block
+- `GET /api/autopilot-watch/summary` → full slot table, issues with hints, next slot (UTC + PT)
+- Env: `AUTOPILOT_WATCH=0` (kill switch), `AUTOPILOT_WATCH_GRACE_MIN` (default 75), `AUTOPILOT_WATCH_LOOKBACK_HOURS` (default 72)
+- Never posts, schedules, retries, or calls outside services.
+
+Pattern credit (no code copied): healthchecks/healthchecks (BSD-3-Clause) OK/LATE/DOWN + grace;
+jjdoor/deadcron (MIT) period + grace overdue and consecutive misses.

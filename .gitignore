@@ -18,3 +18,4 @@ uploads/
 *.log
 .playwright-cli/
 .DS_Store
+autopilot_watch.json

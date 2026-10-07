@@ -398,6 +398,148 @@ def resolve_trend_mock_url(title: str, platform: str = "") -> str:
         logger.error(f"Failed resolving mock URL for trend: {title}. Error: {e}")
     return "unknown"
 
+
+# --- Grounded source URL recovery -------------------------------------------------
+# Gemini Google Search grounding never prints the real post links in its answer text;
+# the real links live in response.candidates[0].grounding_metadata as
+# vertexaisearch.cloud.google.com/grounding-api-redirect/... URIs. Without recovering
+# them every trend came back as url="unknown" and the scan FAILED with
+# "none had verified direct original post URLs".
+GROUNDING_REDIRECT_HOST = "vertexaisearch.cloud.google.com"
+
+def _resolve_grounding_redirect(uri: str, timeout: float = 8.0) -> str:
+    """Follow a grounding-api-redirect URI one hop and return the real destination URL."""
+    if not uri or GROUNDING_REDIRECT_HOST not in uri:
+        return uri or ""
+    for method in (requests.head, requests.get):
+        try:
+            res = method(uri, allow_redirects=False, timeout=timeout)
+            location = res.headers.get("location") or res.headers.get("Location") or ""
+            if location.startswith("http") and GROUNDING_REDIRECT_HOST not in location:
+                return location
+        except Exception as exc:
+            logger.warning(f"Could not resolve grounding redirect: {exc}")
+    return ""
+
+def _platform_for_url(url: str) -> str:
+    host = (urllib.parse.urlparse(url).netloc or "").lower()
+    if host.startswith("www."):
+        host = host[4:]
+    names = {
+        "youtube": "YouTube", "reddit": "Reddit", "twitter": "Twitter/X",
+        "instagram": "Instagram", "linkedin": "LinkedIn", "tiktok": "TikTok",
+    }
+    for key, domains in PLATFORM_DOMAINS.items():
+        if any(host == d or host.endswith("." + d) for d in domains):
+            return names.get(key, key)
+    return ""
+
+def _is_post_url(url: str) -> bool:
+    """True for a direct post/video permalink on a social platform (not a search/profile page)."""
+    if not url or not url.startswith("http"):
+        return False
+    if any(p in url for p in MOCK_URL_PATTERNS):
+        return False
+    parsed = urllib.parse.urlparse(url)
+    path = parsed.path or ""
+    platform = _platform_for_url(url)
+    if platform == "YouTube":
+        return bool(_youtube_video_id(url)) or "/shorts/" in path
+    if platform == "Reddit":
+        return "/comments/" in path
+    if platform == "Twitter/X":
+        return "/status/" in path
+    if platform == "Instagram":
+        return any(seg in path for seg in ("/p/", "/reel/", "/reels/", "/tv/"))
+    if platform == "TikTok":
+        return "/video/" in path
+    if platform == "LinkedIn":
+        return any(seg in path for seg in ("/posts/", "/feed/update/", "/pulse/"))
+    return False
+
+def extract_grounded_sources(response: Any) -> List[Dict[str, Any]]:
+    """Return [{url, platform, title, segments}] for the real social post links cited by grounding."""
+    try:
+        candidate = (response.candidates or [None])[0]
+        metadata = getattr(candidate, "grounding_metadata", None) if candidate else None
+        chunks = list(getattr(metadata, "grounding_chunks", None) or []) if metadata else []
+        supports = list(getattr(metadata, "grounding_supports", None) or []) if metadata else []
+    except Exception as exc:
+        logger.warning(f"No grounding metadata on trend scan response: {exc}")
+        return []
+    if not chunks:
+        return []
+    uris = []
+    for chunk in chunks:
+        web = getattr(chunk, "web", None)
+        uris.append((getattr(web, "uri", "") or "") if web else "")
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        resolved = list(pool.map(_resolve_grounding_redirect, uris))
+    segments_by_chunk: Dict[int, List[str]] = {}
+    for support in supports:
+        seg = getattr(getattr(support, "segment", None), "text", "") or ""
+        for idx in (getattr(support, "grounding_chunk_indices", None) or []):
+            if seg:
+                segments_by_chunk.setdefault(int(idx), []).append(seg)
+    sources: List[Dict[str, Any]] = []
+    seen = set()
+    for idx, url in enumerate(resolved):
+        if not _is_post_url(url) or url in seen:
+            continue
+        seen.add(url)
+        web = getattr(chunks[idx], "web", None)
+        sources.append({
+            "url": url,
+            "platform": _platform_for_url(url),
+            "title": (getattr(web, "title", "") or "") if web else "",
+            "segments": segments_by_chunk.get(idx, []),
+        })
+    logger.info(f"Recovered {len(sources)} real social post URL(s) from {len(chunks)} grounding chunk(s).")
+    return sources
+
+def _tokens(text: str) -> set:
+    import re as _re
+    stop = {"the", "and", "for", "with", "how", "to", "a", "an", "of", "in", "on", "ai", "video", "videos", "is", "your", "you", "this", "that", "new"}
+    return {t for t in _re.findall(r"[a-z0-9]+", (text or "").lower()) if len(t) > 1 and t not in stop}
+
+def match_grounded_source(trend: Any, sources: List[Dict[str, Any]], used: set) -> str:
+    """Pick the grounded real URL whose cited text best matches this trend (same platform only)."""
+    want_platform = (getattr(trend, "platform", "") or "").lower()
+    trend_tokens = _tokens(f"{getattr(trend, 'title', '')} {getattr(trend, 'author', '')}")
+    if not trend_tokens:
+        return ""
+    best_url, best_score = "", 0.0
+    for src in sources:
+        if src["url"] in used:
+            continue
+        plat = src["platform"].lower()
+        if want_platform and plat:
+            same = plat.split("/")[0] in want_platform or ("twitter" in plat and ("x" == want_platform or "twitter" in want_platform))
+            if not same:
+                continue
+        src_tokens = _tokens(" ".join(src["segments"]))
+        if not src_tokens:
+            continue
+        score = len(trend_tokens & src_tokens) / max(1, len(trend_tokens))
+        if score > best_score:
+            best_url, best_score = src["url"], score
+    return best_url if best_score >= 0.5 else ""
+
+def grounded_sources_prompt_block(sources: List[Dict[str, Any]]) -> str:
+    if not sources:
+        return ""
+    lines = []
+    for src in sources[:30]:
+        cited = " / ".join(s.strip().replace("\n", " ")[:200] for s in src["segments"][:2])
+        lines.append(f"- [{src['platform']}] {src['url']} — cited for: {cited or src['title']}")
+    return (
+        "VERIFIED SOURCE LINKS (real post URLs resolved from the Google Search results behind the research "
+        "notes above). When a trend in the notes was cited from one of these links, use that EXACT URL as the "
+        "trend's url instead of \"unknown\". Never pair a trend with a link it was not cited for:\n"
+        + "\n".join(lines)
+    )
+
 def fetch_realtime_news_context() -> str:
     import xml.etree.ElementTree as ET
     import requests
@@ -594,15 +736,36 @@ def run_live_trend_scanner(
             http_options=types.HttpOptions(timeout=360000) # Prevents indefinite hangs (360s safe limit)
         )
 
+        # Grounded search model order. gemini-3.6-flash returns grounding_metadata (the real
+        # source links) and answers in ~20-30s; gemini-3.1-pro-preview takes ~90s and, via this
+        # SDK, returns no grounding_metadata at all, so its trends could never carry real URLs.
+        grounded_models = [
+            m.strip() for m in (os.environ.get("TREND_SCAN_GROUNDED_MODELS") or "gemini-3.6-flash,gemini-3.1-pro-preview").split(",")
+            if m.strip() and not m.strip().startswith(("gemini-2.", "gemini-1.", "gemini-2-"))
+        ] or ["gemini-3.6-flash", "gemini-3.1-pro-preview"]
         try:
-            response = client.models.generate_content(
-                model='gemini-3.1-pro-preview',
-                contents=search_prompt,
-                config=types.GenerateContentConfig(
-                    tools=[types.Tool(google_search=types.GoogleSearch())],
-                    system_instruction="You are a real-time social media trend researcher specialized in finding trending cinematic AI contents across Reddit, YouTube, Twitter/X, LinkedIn, and Instagram."
-                )
-            )
+            response = None
+            last_grounding_err = None
+            for grounded_model in grounded_models:
+                try:
+                    response = client.models.generate_content(
+                        model=grounded_model,
+                        contents=search_prompt,
+                        config=types.GenerateContentConfig(
+                            tools=[types.Tool(google_search=types.GoogleSearch())],
+                            system_instruction="You are a real-time social media trend researcher specialized in finding trending cinematic AI contents across Reddit, YouTube, Twitter/X, LinkedIn, and Instagram."
+                        )
+                    )
+                    if response is not None and (response.text or "").strip():
+                        logger.info(f"Trend scan grounded search answered by {grounded_model}.")
+                        break
+                    response = None
+                except Exception as model_err:
+                    last_grounding_err = model_err
+                    logger.warning(f"Grounded trend search failed on {grounded_model}: {model_err}")
+                    response = None
+            if response is None:
+                raise last_grounding_err or RuntimeError("grounded search returned no text")
         except Exception as grounding_err:
             logger.warning(f"Google Search grounding failed inside trend scanner: {grounding_err}. Falling back to news-context-only generation.")
             update_job_status(job_id, "PROCESSING", 30, "Search grounding unavailable, falling back to AI news context...")
@@ -614,6 +777,9 @@ def run_live_trend_scanner(
                 )
             )
         search_text = response.text
+        grounded_sources = extract_grounded_sources(response)
+        grounded_urls = {src["url"] for src in grounded_sources}
+        grounded_block = grounded_sources_prompt_block(grounded_sources)
 
         update_job_status(job_id, "PROCESSING", 60, "Recreating viral posts in 6Frame Studio's voice (generating structured copies)...")
 
@@ -622,6 +788,8 @@ def run_live_trend_scanner(
         We have researched viral AI video trend candidates from the last 24 hours:
 
         {search_text}
+
+        {grounded_block}
 
         For each of these trending concepts, your goal is a LITERAL recreation, not a loosely-inspired new idea:
         1. Keep the EXACT platform name (Reddit, YouTube, Twitter/X, LinkedIn, or Instagram), author, title, and viral metrics. NEVER replace the platform name with "public news", "news", or any generic label. Keep the URL EXACTLY as reported in the research notes — the original post's link on its source platform. If the research notes say the URL is "unknown", output "unknown" as the URL. Never invent, alter, or substitute URLs.
@@ -640,7 +808,7 @@ def run_live_trend_scanner(
         Return the results matching the required JSON schema structure.
         """
 
-        # Step 2: Structure as JSON using Gemini 2.5 Flash
+        # Step 2: Structure as JSON using Gemini 3.6 Flash
         copy_response = client.models.generate_content(
             model='gemini-3.6-flash',
             contents=adaptation_prompt,
@@ -661,7 +829,33 @@ def run_live_trend_scanner(
 
         verified_trends = []
         unresolved_count = 0
+        used_grounded = set()
+
+        def _grounded_ok(url: str, platform: str) -> bool:
+            # Real permalinks recovered from Google Search grounding are verified sources even when
+            # Railway cannot yt-dlp-probe them (bot walls / text posts). Platform must still agree.
+            if url not in grounded_urls:
+                return False
+            src_platform = _platform_for_url(url).lower().split("/")[0]
+            return not platform or src_platform in (platform or "").lower() or (src_platform == "twitter" and "x" in (platform or "").lower())
+
         for trend in results.trends:
+            if not (check_url_valid(trend.url, trend.platform) or _grounded_ok(trend.url, trend.platform)):
+                matched = match_grounded_source(trend, grounded_sources, used_grounded)
+                if matched:
+                    logger.info(f"Matched trend '{trend.title}' to grounded source URL: {matched}")
+                    trend.url = matched
+            if trend.url in used_grounded:
+                # Same grounded link already attached to an earlier trend: try another cited link.
+                rematch = match_grounded_source(trend, grounded_sources, used_grounded)
+                if not rematch:
+                    unresolved_count += 1
+                    continue
+                trend.url = rematch
+            if _grounded_ok(trend.url, trend.platform):
+                used_grounded.add(trend.url)
+                verified_trends.append(trend)
+                continue
             if not check_url_valid(trend.url, trend.platform):
                 logger.info(f"Invalid or mock URL detected: {trend.url}. Resolving dynamically for: {trend.title}")
                 trend.url = resolve_trend_mock_url(trend.title, trend.platform)

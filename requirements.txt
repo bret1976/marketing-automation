@@ -5,5 +5,5 @@ tweepy==4.15.0
 requests==2.32.3
 python-multipart==0.0.20
 pydantic==2.10.6
-yt-dlp
+yt-dlp[default,curl-cffi]
 reportlab==4.2.5

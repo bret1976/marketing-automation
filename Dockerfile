@@ -51,6 +51,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy rest of the application code
 COPY . .
+RUN chmod a+rx /app/bin/ytdlp-shim/yt-dlp
 
 # Expose FastAPI default port
 EXPOSE 8000

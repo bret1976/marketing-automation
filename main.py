@@ -32,6 +32,15 @@ from orchestrator import (
 from template_renderer import list_viral_templates, render_template_video
 import publish_guard
 import autopilot_watch
+import yt_proxy
+
+# Route bot-walled source downloads (YouTube first, Reddit/X/IG/TikTok on failure)
+# through the Mini yt-pull-proxy: put the yt-dlp shim first on PATH so main.py, the
+# cockpit overlay and V9/V10 patches all use it. Only when the proxy token is set.
+_YTDLP_SHIM_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bin", "ytdlp-shim")
+if yt_proxy.token() and os.path.exists(os.path.join(_YTDLP_SHIM_DIR, "yt-dlp")):
+    if _YTDLP_SHIM_DIR not in os.environ.get("PATH", "").split(os.pathsep):
+        os.environ["PATH"] = _YTDLP_SHIM_DIR + os.pathsep + os.environ.get("PATH", "")
 
 # Setup logger
 logging.basicConfig(level=logging.INFO)
@@ -47,6 +56,7 @@ PUBLIC_API_PATHS = {
     "/health",
     "/api/publish-guard/summary",
     "/api/publish-guard/check",
+    "/api/yt-proxy/register",  # own X-Proxy-Token auth (Mini watchdog)
 }
 # These routes must remain reachable without credentials. Social networks fetch
 # generated media directly, while /r and /b are intentionally public campaign URLs.
@@ -5044,7 +5054,34 @@ def health():
         "packs": {"publish_guard": publish_guard.PACK, "autopilot_watch": autopilot_watch.PACK},
         "publish_guard": publish_guard.summary(),
         "autopilot_watch": _autopilot_watch_compact(),
+        "yt_proxy": yt_proxy.summary(),
     }
+
+
+@app.post("/api/yt-proxy/register")
+async def yt_proxy_register(request: Request):
+    """The Mac Mini watchdog registers its current Cloudflare tunnel URL here.
+
+    Auth: X-Proxy-Token must equal YT_DOWNLOAD_PROXY_TOKEN. No secrets are returned.
+    """
+    if not yt_proxy.token_ok(request.headers.get("x-proxy-token")):
+        return JSONResponse({"ok": False, "error": "unauthorized"}, status_code=401)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    try:
+        record = yt_proxy.register(str((body or {}).get("url") or ""))
+    except ValueError as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+    return {"ok": True, "registered_at": record["registered_at"]}
+
+
+@app.get("/api/yt-proxy/status")
+def yt_proxy_status():
+    """Read-only: proxy config flags and the last Mini pulls (no secrets)."""
+    shim_active = os.environ.get("PATH", "").split(os.pathsep)[:1] == [_YTDLP_SHIM_DIR]
+    return {**yt_proxy.summary(), "shim_active": shim_active, "recent": yt_proxy.recent_pulls(10)}
 
 
 # ==========================================================================

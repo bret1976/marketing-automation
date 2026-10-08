@@ -1,0 +1,173 @@
+#!/usr/bin/env python3
+"""yt-dlp shim: route bot-walled source downloads through the Mini yt-pull-proxy.
+
+main.py prepends this directory to PATH (only when YT_DOWNLOAD_PROXY_TOKEN is set), so
+every caller that resolves "yt-dlp" - main.py, the cockpit overlay, V9/V10 patches -
+gets the same routing without touching their code:
+
+  * Not a download (probe/--simulate/--print/-j/list) or no Mini configured:
+    exec the real yt-dlp unchanged.
+  * YouTube: Mini first (residential IP, no bot wall); real yt-dlp if the Mini fails.
+  * Reddit / X / Instagram / TikTok / Vimeo: real yt-dlp first; Mini if it fails
+    (Reddit 403s, impersonation errors, login walls).
+
+Output lands at the caller's -o template with ext mp4, exactly where yt-dlp would
+put it, so the callers' "find file_id.*" logic keeps working. Never prints secrets.
+"""
+import hashlib
+import os
+import shutil
+import subprocess
+import sys
+import time
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+APP_DIR = os.path.dirname(os.path.dirname(HERE))
+sys.path.insert(0, APP_DIR)
+
+NON_DOWNLOAD_FLAGS = {
+    "--simulate", "-s", "--skip-download", "--flat-playlist", "-j", "--dump-json",
+    "-J", "--dump-single-json", "--print", "-O", "--get-url", "-g", "--get-title",
+    "--get-id", "--get-duration", "-F", "--list-formats", "--version", "-U", "--update",
+    "--print-json", "--list-subs", "--list-impersonate-targets",
+}
+FAIL_TTL_SECONDS = 600
+MAX_SECONDS = 90.0
+
+
+def real_ytdlp() -> str:
+    for d in os.environ.get("PATH", "").split(os.pathsep):
+        if not d or os.path.abspath(d) == HERE:
+            continue
+        cand = os.path.join(d, "yt-dlp")
+        if os.path.isfile(cand) and os.access(cand, os.X_OK):
+            return cand
+    for cand in ("/usr/local/bin/yt-dlp", "/usr/bin/yt-dlp"):
+        if os.path.exists(cand):
+            return cand
+    return "yt-dlp"
+
+
+def passthrough(argv):
+    real = real_ytdlp()
+    os.execv(real, [real, *argv])
+
+
+def opt_value(argv, *names):
+    for i, a in enumerate(argv):
+        for n in names:
+            if a == n and i + 1 < len(argv):
+                return argv[i + 1]
+            if n.startswith("--") and a.startswith(n + "="):
+                return a.split("=", 1)[1]
+    return None
+
+
+def parse_section(spec):
+    """'*A-B' -> (A, B-A); anything else -> (0, 60)."""
+    try:
+        spec = (spec or "").strip().lstrip("*")
+        a, b = spec.split("-", 1)
+        start = max(0.0, float(a or 0))
+        dur = float(b) - start if b and b != "inf" else 60.0
+        return start, max(3.0, min(dur, MAX_SECONDS))
+    except Exception:  # noqa: BLE001
+        return 0.0, 60.0
+
+
+def fail_marker(url):
+    return os.path.join("/tmp", "ytpp-fail-" + hashlib.sha1(url.encode()).hexdigest()[:16])
+
+
+def mini_failed_recently(url):
+    try:
+        return time.time() - os.path.getmtime(fail_marker(url)) < FAIL_TTL_SECONDS
+    except OSError:
+        return False
+
+
+def trim(path, start, duration):
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg or start <= 0:
+        return
+    tmp = path + ".trim.mp4"
+    res = subprocess.run(
+        [ffmpeg, "-y", "-ss", f"{start:.2f}", "-i", path, "-t", f"{duration:.2f}",
+         "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", tmp],
+        capture_output=True, text=True, timeout=180,
+    )
+    if res.returncode == 0 and os.path.exists(tmp) and os.path.getsize(tmp) > 1000:
+        os.replace(tmp, path)
+    elif os.path.exists(tmp):
+        os.remove(tmp)
+
+
+def try_mini(yt_proxy, url, dest, start, duration, reason, timeout):
+    began = time.time()
+    try:
+        sectioned = yt_proxy.pull(url, dest, start=start, duration=duration, timeout=timeout)
+        if not sectioned:
+            trim(dest, start, duration)
+        yt_proxy.log_pull({"via": "mini_proxy", "ok": True, "host": yt_proxy.host_of(url), "url": url,
+                           "reason": reason, "bytes": os.path.getsize(dest),
+                           "secs": round(time.time() - began, 1)})
+        print(f"[yt-pull-proxy] pulled via Mini ({reason}) -> {dest}", flush=True)
+        return True
+    except Exception as exc:  # noqa: BLE001
+        try:
+            open(fail_marker(url), "w").close()
+        except OSError:
+            pass
+        yt_proxy.log_pull({"via": "mini_proxy", "ok": False, "host": yt_proxy.host_of(url), "url": url,
+                           "reason": reason, "error": str(exc)[:300], "secs": round(time.time() - began, 1)})
+        sys.stderr.write(f"[yt-pull-proxy] Mini pull failed ({reason}): {str(exc)[:300]}\n")
+        return False
+
+
+def main(argv):
+    if not argv or any(a in NON_DOWNLOAD_FLAGS or a.startswith("--print=") for a in argv):
+        passthrough(argv)
+    template = opt_value(argv, "-o", "--output")
+    url = argv[-1]
+    if not template or not url.startswith(("http://", "https://")):
+        passthrough(argv)
+    try:
+        import yt_proxy
+    except Exception:  # noqa: BLE001
+        passthrough(argv)
+    if not yt_proxy.configured() or not yt_proxy.mini_supports(url):
+        passthrough(argv)
+    dest = template.replace("%(ext)s", "mp4")
+    if "%(" in dest:
+        passthrough(argv)
+    start, duration = parse_section(opt_value(argv, "--download-sections"))
+    os.makedirs(os.path.dirname(os.path.abspath(dest)) or ".", exist_ok=True)
+
+    if yt_proxy.is_youtube(url):
+        if not mini_failed_recently(url) and try_mini(yt_proxy, url, dest, start, duration, "youtube_first", 150):
+            return 0
+        passthrough(argv)
+
+    real = real_ytdlp()
+    res = subprocess.run([real, *argv], capture_output=True, text=True)
+    if res.returncode == 0:
+        sys.stdout.write(res.stdout)
+        sys.stderr.write(res.stderr)
+        return 0
+    if not mini_failed_recently(url):
+        # Clear partial files the failed local attempt may have left at our target.
+        for p in (dest, dest + ".part"):
+            try:
+                if os.path.exists(p):
+                    os.remove(p)
+            except OSError:
+                pass
+        if try_mini(yt_proxy, url, dest, start, duration, "local_failed", 120):
+            return 0
+    sys.stdout.write(res.stdout)
+    sys.stderr.write(res.stderr)
+    return res.returncode
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

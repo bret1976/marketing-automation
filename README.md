@@ -70,3 +70,30 @@ Facebook page_id missing, ...) from a passive log tap and the scheduled-posts lo
 
 Pattern credit (no code copied): healthchecks/healthchecks (BSD-3-Clause) OK/LATE/DOWN + grace;
 jjdoor/deadcron (MIT) period + grace overdue and consecutive misses.
+
+## Spend Guard (spend-guard-v1, backend-only)
+
+The hub runs without a login wall, so the routes that spend money or post publicly are capped
+("denial-of-wallet" backstop). Each guarded route class gets a per-client limit per hour and a
+global per-UTC-day ceiling (persisted in `STATE_DIR/spend_guard_ledger.json`). Requests are
+counted when they start and refunded if the route answers with an error, so only accepted work
+uses budget. Over the limit → HTTP 429 + `Retry-After`; the route never runs (no provider call,
+render, or post). Scheduled Autopilot slots run in-process and are never counted or blocked.
+
+| Class | Routes | Per client / hour | Global / UTC day |
+|-------|--------|-------------------|------------------|
+| `video_gen` | generate-video, generate-video-variants, growth-os/multiscene-video, apply-template | 6 | 40 |
+| `ai_call` | analyze, viral-search, virality-score, repurpose-video-link, load-original-video, growth-os campaign-plan/live-refresh/report, analytics/refresh, engagement-queue/refresh | 40 | 400 |
+| `autopilot` | trigger-autopilot | 4 | 16 |
+| `publish` | publish/twitter, publish/linkedin, postproxy/test-publish, approval-queue/{id}/approve, engagement-queue/{id}/send | 30 | 150 |
+| `upload` | upload | 30 | 200 |
+
+- `GET /health` → `packs.spend_guard` + compact usage; `GET /api/spend-guard/summary` → caps, usage, recent blocks (IPs masked)
+- Env: `SPEND_GUARD=0` (kill switch), `SPEND_GUARD_WINDOW_SEC` (3600), `SPEND_GUARD_<CLASS>_PER_CLIENT`,
+  `SPEND_GUARD_<CLASS>_DAILY` (0 = no cap), optional `SPEND_GUARD_BYPASS_TOKEN` (header `X-Spend-Guard-Bypass`)
+- Client key: `X-Real-IP` → first `X-Forwarded-For` hop → socket peer. Headers can be forged, so the
+  global daily ceiling is the hard backstop.
+
+Pattern credit (no code copied): laurentS/slowapi (MIT) per-route limits + 429/Retry-After;
+m24927605/agentic-spendguard (Apache-2.0) reserve-before-call / refund-after;
+jonahberg/the-blue-board PR #235 window + daily cap with 0 = kill switch; OWASP LLM10 Unbounded Consumption.

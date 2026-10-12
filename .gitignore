@@ -19,3 +19,5 @@ uploads/
 .playwright-cli/
 .DS_Store
 autopilot_watch.json
+spend_guard_ledger.json
+spend_guard_ledger.tmp

@@ -31,6 +31,7 @@ from orchestrator import (
 )
 from template_renderer import list_viral_templates, render_template_video
 import publish_guard
+import spend_guard
 import autopilot_watch
 import yt_proxy
 
@@ -56,6 +57,7 @@ PUBLIC_API_PATHS = {
     "/health",
     "/api/publish-guard/summary",
     "/api/publish-guard/check",
+    "/api/spend-guard/summary",
     "/api/yt-proxy/register",  # own X-Proxy-Token auth (Mini watchdog)
 }
 # These routes must remain reachable without credentials. Social networks fetch
@@ -141,6 +143,34 @@ def is_public_path(path: str) -> bool:
         or path.startswith("/tiktok")
         or path.startswith("/oauth/postproxy/")
     )
+
+# SPEND GUARD — scout pack spend-guard-v1 (backend-only; no UI). Registered
+# before the auth middleware so auth (when enabled) runs first. SPEND_GUARD=0 disables.
+@app.middleware("http")
+async def spend_guard_middleware(request: Request, call_next):
+    cls = spend_guard.classify(request.method, request.url.path) if spend_guard.enabled() else None
+    if not cls or spend_guard.bypass_ok(request.headers.get("x-spend-guard-bypass")):
+        return await call_next(request)
+    client = spend_guard.client_key(request.headers, request.client.host if request.client else None)
+    decision = spend_guard.reserve(cls, client)
+    if not decision["ok"]:
+        if decision["reason"] == "daily_cap":
+            detail = "Daily limit reached for this action. It resets at 00:00 UTC."
+        else:
+            detail = "Too many requests for this action. Please wait and try again."
+        return JSONResponse(
+            {"detail": detail, "spend_guard": {k: decision[k] for k in ("class", "reason", "retry_after")}},
+            status_code=429,
+            headers={"Retry-After": str(decision["retry_after"])},
+        )
+    try:
+        response = await call_next(request)
+    except Exception:
+        spend_guard.refund(cls, client, decision["ts"])
+        raise
+    if response.status_code >= 400:
+        spend_guard.refund(cls, client, decision["ts"])
+    return response
 
 @app.middleware("http")
 async def require_admin_session(request: Request, call_next):
@@ -5051,10 +5081,15 @@ def health():
     return {
         "ok": True,
         "service": "marketing-automation",
-        "packs": {"publish_guard": publish_guard.PACK, "autopilot_watch": autopilot_watch.PACK},
+        "packs": {
+            "publish_guard": publish_guard.PACK,
+            "autopilot_watch": autopilot_watch.PACK,
+            "spend_guard": spend_guard.PACK,
+        },
         "publish_guard": publish_guard.summary(),
         "autopilot_watch": _autopilot_watch_compact(),
         "yt_proxy": yt_proxy.summary(),
+        "spend_guard": spend_guard.compact(),
     }
 
 
@@ -5120,6 +5155,12 @@ class PublishGuardCheckRequest(BaseModel):
     id: Optional[str] = None
     force: bool = False
     mode: str = "publish"  # publish | schedule
+
+
+@app.get("/api/spend-guard/summary")
+def api_spend_guard_summary():
+    """Read-only: per-class caps, today's usage, recent blocks (client IPs masked)."""
+    return spend_guard.summary()
 
 
 @app.get("/api/publish-guard/summary")

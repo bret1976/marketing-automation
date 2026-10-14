@@ -19,42 +19,39 @@ def basic_headers(username="admin", password="test-password"):
     return {"Authorization": f"Basic {token}"}
 
 
-def test_dashboard_is_open_without_authentication_by_default():
-    response = client.get("/")
-    assert response.status_code == 200
-    assert "6Frame Studio" in response.text
-    assert client.get("/api/auth/status").json() == {"auth_required": False, "authenticated": True}
-    assert client.get("/api/settings").status_code == 200
+def test_auth_is_required_by_default_when_admin_password_is_set():
+    assert client.get("/api/auth/status").json()["auth_required"] is True
+    assert client.get("/api/settings").status_code == 401
+    assert client.post("/api/settings", json={}).status_code == 401
+    assert client.post("/api/trigger-autopilot").status_code == 401
+    assert client.post("/api/growth-v2/dry-run").status_code == 401
+    assert client.get("/api/analytics/summary").status_code == 401
+    assert client.get("/api/publish-guard/summary").status_code == 401
+    assert client.get("/api/spend-guard/summary").status_code == 401
+    assert client.post(
+        "/api/analyze",
+        json={"video_path": "/etc/passwd", "website_url": "https://example.com"},
+    ).status_code == 401
+    assert client.post("/api/publish/twitter", json={"text": "blocked"}).status_code == 401
+    # Login screen (HTML) and health stay reachable.
+    home = client.get("/")
+    assert home.status_code == 200
+    assert "6Frame Studio" in home.text
+    assert client.get("/health").status_code == 200
+    assert client.get("/api/health").status_code == 200
 
 
-def test_opt_in_admin_auth_locks_sensitive_apis():
-    os.environ["REQUIRE_ADMIN_AUTH"] = "true"
+def test_public_dashboard_opt_out():
+    os.environ["ALLOW_PUBLIC_DASHBOARD"] = "1"
     try:
-        assert client.get("/api/settings").status_code == 401
-        assert client.post("/api/settings", json={}).status_code == 401
-        assert client.post("/api/trigger-autopilot").status_code == 401
-        assert client.post(
-            "/api/analyze",
-            json={"video_path": "/etc/passwd", "website_url": "https://example.com"},
-        ).status_code == 401
-        assert client.post("/api/publish/twitter", json={"text": "blocked"}).status_code == 401
-        assert client.post("/api/publish/linkedin", json={"text": "blocked"}).status_code == 401
-        # The dashboard HTML itself stays reachable so visitors are not blocked
-        # by a browser basic-auth prompt before they can use the platform.
-        home = client.get("/")
-        assert home.status_code == 200
-        assert "6Frame Studio" in home.text
+        assert client.get("/api/settings").status_code == 200
     finally:
-        os.environ.pop("REQUIRE_ADMIN_AUTH", None)
+        os.environ.pop("ALLOW_PUBLIC_DASHBOARD", None)
 
 
-def test_http_basic_auth_unlocks_admin_when_auth_is_required():
-    os.environ["REQUIRE_ADMIN_AUTH"] = "true"
-    try:
-        response = client.get("/api/settings", headers=basic_headers())
-        assert response.status_code == 200
-    finally:
-        os.environ.pop("REQUIRE_ADMIN_AUTH", None)
+def test_http_basic_auth_unlocks_admin():
+    assert client.get("/api/settings", headers=basic_headers()).status_code == 200
+    assert client.get("/api/settings", headers=basic_headers(password="wrong")).status_code == 401
 
 
 def test_arbitrary_filesystem_paths_are_rejected_even_when_authenticated():

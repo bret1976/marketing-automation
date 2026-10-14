@@ -34,6 +34,11 @@ import publish_guard
 import spend_guard
 import autopilot_watch
 import yt_proxy
+import growth_v2
+
+# Growth V2: stop Railway's boot-time cockpit_* monkeypatches (repost-only Autopilot).
+# GROWTH_V2=0 or LEGACY_BOOT_PATCHES=1 lets them apply again.
+growth_v2.stub_legacy_boot_patches()
 
 # Route bot-walled source downloads (YouTube first, Reddit/X/IG/TikTok on failure)
 # through the Mini yt-pull-proxy: put the yt-dlp shim first on PATH so main.py, the
@@ -55,9 +60,7 @@ PUBLIC_API_PATHS = {
     "/api/auth/status",
     "/api/postproxy/callback",
     "/health",
-    "/api/publish-guard/summary",
-    "/api/publish-guard/check",
-    "/api/spend-guard/summary",
+    "/api/health",
     "/api/yt-proxy/register",  # own X-Proxy-Token auth (Mini watchdog)
 }
 # These routes must remain reachable without credentials. Social networks fetch
@@ -98,8 +101,10 @@ def _truthy_env(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
 def auth_enabled() -> bool:
-    # Auth is opt-in. Having ADMIN_PASSWORD set no longer locks the dashboard.
-    if not _truthy_env("REQUIRE_ADMIN_AUTH"):
+    # Login is required whenever ADMIN_PASSWORD is set (dashboard + every /api/*
+    # route except the public allow-list). ALLOW_PUBLIC_DASHBOARD=1 is the only
+    # opt-out. REQUIRE_ADMIN_AUTH is no longer needed.
+    if _truthy_env("ALLOW_PUBLIC_DASHBOARD"):
         return False
     return bool(os.environ.get("ADMIN_PASSWORD"))
 
@@ -1421,7 +1426,12 @@ def publish_via_postproxy(post: dict, settings: dict, platforms: List[str]) -> d
     if not mapped_platforms:
         return {"successes": [], "errors": ["PostProxy: no supported platforms selected."]}
     media_url = postproxy_media_url(post, settings, mapped_platforms)
-    twitter_parts = split_twitter_caption(post.get("text", ""), post.get("thread"))
+    platform_captions = post.get("platform_captions") or {}
+
+    def caption_for(platform: str) -> str:
+        return platform_captions.get(platform) or post.get("text", "")
+
+    twitter_parts = split_twitter_caption(caption_for("twitter"), None if platform_captions else post.get("thread"))
     platform_params = resolve_postproxy_platform_params(settings, mapped_platforms)
     skipped_errors: List[str] = []
     publishable: List[str] = []
@@ -1446,7 +1456,7 @@ def publish_via_postproxy(post: dict, settings: dict, platforms: List[str]) -> d
         if "youtube" in batch_platforms:
             params.setdefault("youtube", {})
             params["youtube"].update({
-                "title": (post.get("campaign_title") or (body or "6Frame Studio")[:80])[:100],
+                "title": growth_v2.youtube_title_for(post, body),
                 "privacy_status": "public",
                 "made_for_kids": False,
             })
@@ -1469,7 +1479,7 @@ def publish_via_postproxy(post: dict, settings: dict, platforms: List[str]) -> d
         return postproxy_post(settings, "/posts", payload, timeout=180)
 
     twitter_needs_own_batch = "twitter" in publishable and (
-        len(twitter_parts) > 1 or len((post.get("text") or "")) > TWITTER_CHAR_LIMIT
+        bool(platform_captions) or len(twitter_parts) > 1 or len((post.get("text") or "")) > TWITTER_CHAR_LIMIT
     )
     remaining = list(publishable)
     batches = []
@@ -1481,6 +1491,14 @@ def publish_via_postproxy(post: dict, settings: dict, platforms: List[str]) -> d
         if media_platforms:
             batches.append((media_platforms, True, post.get("text", ""), None))
         batches.append((["google_business"], False, post.get("text", ""), None))
+    elif remaining and platform_captions:
+        # One PostProxy post per distinct caption (short no-link caption for
+        # TikTok/YouTube/Instagram, longer one for LinkedIn).
+        groups: Dict[str, List[str]] = {}
+        for platform in remaining:
+            groups.setdefault(caption_for(platform), []).append(platform)
+        for body, group in groups.items():
+            batches.append((group, bool(media_url), body, None))
     elif remaining:
         batches.append((remaining, bool(media_url), post.get("text", ""), None))
 
@@ -2816,6 +2834,9 @@ async def execute_scheduled_post(post: dict):
     save_scheduled_posts(posts)
 
 async def execute_autonomous_autopost(settings: dict, forced_trend: Optional[dict] = None):
+    if growth_v2.enabled():
+        # Growth V2 never posts a downloaded clip as-is; a forced URL is ignored.
+        return await growth_v2.run_autopilot(settings)
     logger.info("Starting autonomous autopilot pipeline...")
     loop = asyncio.get_running_loop()
     top_trend = forced_trend if isinstance(forced_trend, dict) and forced_trend.get("url") else None
@@ -3111,7 +3132,10 @@ def startup_event():
     if os.environ.get("DISABLE_BACKGROUND_SCHEDULER", "").lower() == "true":
         logger.info("Background scheduler disabled by DISABLE_BACKGROUND_SCHEDULER=true.")
         return
-    asyncio.create_task(scheduler_loop())
+    if growth_v2.enabled():
+        asyncio.create_task(growth_v2.scheduler_loop())
+    else:
+        asyncio.create_task(scheduler_loop())
 
 @app.post("/api/schedule-post")
 def schedule_post(req: SchedulePostRequest):
@@ -3283,6 +3307,8 @@ def reject_post(post_id: str):
 
 @app.get("/api/analytics/summary")
 def get_analytics_summary():
+    if growth_v2.enabled():
+        return growth_v2.analytics_summary()
     posts = load_scheduled_posts()
     scored = []
     hour_buckets = {}
@@ -3342,7 +3368,7 @@ def get_analytics_summary():
 @app.post("/api/analytics/refresh")
 def refresh_analytics(background_tasks: BackgroundTasks):
     settings = load_settings()
-    background_tasks.add_task(refresh_post_metrics, settings)
+    background_tasks.add_task(growth_v2.refresh_metrics if growth_v2.enabled() else refresh_post_metrics, settings)
     return {"status": "SUCCESS", "message": "Metrics refresh triggered in background."}
 
 class ApplyBestHourRequest(BaseModel):
@@ -5090,7 +5116,50 @@ def health():
         "autopilot_watch": _autopilot_watch_compact(),
         "yt_proxy": yt_proxy.summary(),
         "spend_guard": spend_guard.compact(),
+        "growth_v2": growth_v2.health(),
     }
+
+
+@app.get("/api/health")
+def api_health():
+    return health()
+
+
+@app.get("/api/growth-v2/status")
+def growth_v2_status():
+    return growth_v2.status_payload()
+
+
+GROWTH_DRY_RUNS: Dict[str, dict] = {}
+
+
+@app.post("/api/growth-v2/dry-run")
+async def growth_v2_dry_run():
+    """Builds the next Autopilot post (concept, original video, captions, title)
+    WITHOUT publishing or writing to the post queue."""
+    job_id = uuid.uuid4().hex
+    GROWTH_DRY_RUNS[job_id] = {"status": "RUNNING", "started_at": datetime.now().isoformat()}
+
+    async def _run():
+        try:
+            result = await growth_v2.run_autopilot(load_settings(), dry_run=True)
+            GROWTH_DRY_RUNS[job_id] = {"status": "SUCCESS", **result}
+        except Exception as exc:
+            GROWTH_DRY_RUNS[job_id] = {"status": "FAILED", "error": str(exc)[-1500:]}
+
+    asyncio.create_task(_run())
+    return {"job_id": job_id, "status": "RUNNING"}
+
+
+@app.get("/api/growth-v2/dry-run/{job_id}")
+def growth_v2_dry_run_status(job_id: str):
+    return GROWTH_DRY_RUNS.get(job_id) or {"status": "NOT_FOUND"}
+
+
+@app.post("/api/growth-v2/refresh-metrics")
+def growth_v2_refresh_metrics(background_tasks: BackgroundTasks):
+    background_tasks.add_task(growth_v2.refresh_metrics, load_settings())
+    return {"status": "SUCCESS", "message": "Metrics refresh started."}
 
 
 @app.post("/api/yt-proxy/register")

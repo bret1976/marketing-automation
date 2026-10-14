@@ -131,6 +131,22 @@ document.addEventListener("DOMContentLoaded", () => {
         if (authError) authError.textContent = "";
     }
 
+    // Any /api call that returns 401 (session expired / not logged in) shows the login screen.
+    if (!window.__authFetchWrapped) {
+        window.__authFetchWrapped = true;
+        const nativeFetch = window.fetch.bind(window);
+        window.fetch = async (...args) => {
+            const res = await nativeFetch(...args);
+            try {
+                const url = typeof args[0] === "string" ? args[0] : (args[0] && args[0].url) || "";
+                if (res.status === 401 && url.includes("/api/") && !url.includes("/api/auth/")) {
+                    showAuth("Please sign in to continue.");
+                }
+            } catch (e) { /* ignore */ }
+            return res;
+        };
+    }
+
     function checkAuth() {
         fetch("/api/auth/status")
             .then(res => res.json())

@@ -652,22 +652,43 @@ def generate_original_clip(concept: dict, settings: dict) -> Tuple[str, dict]:
 _SOURCE_RE = re.compile(r"(tiktok\.com/@[\w.]+/video/\d+|reddit\.com/r/[^/]+/comments/|youtube\.com/(watch|shorts)|youtu\.be/)", re.I)
 
 
-def pick_transform_source(state: dict) -> Optional[dict]:
+def pick_transform_sources(state: dict, limit: int = 6) -> List[dict]:
+    """Ordered fallback candidates. Reddit now auth-walls many video posts for
+    yt-dlp (even via the Mini), so YouTube/TikTok sources are tried first and
+    URLs that recently failed to download are skipped."""
     cooldown = creators_on_cooldown(state)
     used = used_source_urls(state)
+    failed = set((state.get("failed_source_urls") or {}).keys())
     try:
         trends = _main().load_growth_os().get("last_trend_scan") or []
     except Exception:
         trends = []
+    out: List[dict] = []
+    seen = set()
     for trend in trends:
         url = (trend.get("url") or "").strip()
-        if not url or url in used or not _SOURCE_RE.search(url):
+        if not url or url in used or url in failed or url in seen or not _SOURCE_RE.search(url):
             continue
         creator = str(trend.get("author") or creator_from_url(url) or "").lower().lstrip("@")
         if creator and creator in cooldown:
             continue
-        return {"url": url, "title": trend.get("title") or "", "creator": creator}
-    return None
+        seen.add(url)
+        out.append({"url": url, "title": trend.get("title") or "", "creator": creator})
+    out.sort(key=lambda c: 1 if "reddit.com" in c["url"].lower() else 0)
+    return out[:max(1, limit)]
+
+
+def pick_transform_source(state: dict) -> Optional[dict]:
+    sources = pick_transform_sources(state, 1)
+    return sources[0] if sources else None
+
+
+def _remember_failed_source(state: dict, url: str, reason: str) -> None:
+    failed = state.setdefault("failed_source_urls", {})
+    failed[url] = {"at": _utcnow().isoformat(), "reason": str(reason)[:200]}
+    if len(failed) > 50:
+        for key in sorted(failed, key=lambda k: failed[k].get("at") or "")[:-50]:
+            failed.pop(key, None)
 
 
 TRANSFORM_PROMPT = """You write on-screen commentary for a 15-second vertical science/engineering short
@@ -683,10 +704,24 @@ def build_transformed_clip(settings: dict, state: dict) -> Optional[Tuple[str, d
     commentary lines and a credit burned in; without commentary it is refused."""
     if not transform_fallback_enabled():
         return None
-    source = pick_transform_source(state)
-    if not source:
+    sources = pick_transform_sources(state)
+    if not sources:
         return None
     m = _main()
+    downloaded = None
+    source: dict = {}
+    failures: List[str] = []
+    for cand in sources:
+        try:
+            downloaded = m.download_and_trim_original_video(cand["url"], cand["title"], 15, False, 180)
+            source = cand
+            break
+        except Exception as exc:
+            failures.append(f"{cand['url']}: {str(exc)[:120]}")
+            _remember_failed_source(state, cand["url"], str(exc))
+            logger.warning("%s fallback source failed, trying next: %s (%s)", MARKER, cand["url"], str(exc)[:160])
+    if not downloaded:
+        raise RuntimeError(f"All {len(sources)} fallback sources failed to download: " + " ; ".join(failures)[:900])
     raw: dict = {}
     try:
         result = m.call_gemini_json(settings, TRANSFORM_PROMPT.format(title=source["title"][:200]), {}, use_search=False)
@@ -697,7 +732,6 @@ def build_transformed_clip(settings: dict, state: dict) -> Optional[Tuple[str, d
     hook = clean_hook(raw.get("hook") or "")
     if not hook or len(commentary) < 2:
         raise RuntimeError("No usable commentary for the fallback clip; refusing to post a downloaded clip as-is.")
-    downloaded = m.download_and_trim_original_video(source["url"], source["title"], 15, False, 180)
     concept = {
         "topic": clamp_words(_clean_line(raw.get("topic") or hook), 80),
         "topic_key": str(raw.get("topic_key") or hook),
@@ -849,7 +883,12 @@ async def run_autopilot(settings: dict, dry_run: bool = False) -> dict:
     m = _main()
     state = load_state()
     platforms, notes = resolve_platforms(settings, state)
-    abs_video, concept, info = await produce(settings, state)
+    try:
+        abs_video, concept, info = await produce(settings, state)
+    except Exception:
+        if not dry_run and state.get("failed_source_urls"):
+            save_state(state)  # remember dead fallback sources so the next slot skips them
+        raise
     post = build_post(abs_video, concept, info, platforms)
     post["platform_notes"] = notes
     if dry_run:

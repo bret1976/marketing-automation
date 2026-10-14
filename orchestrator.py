@@ -1253,16 +1253,17 @@ def normalize_video_duration(engine: str, duration: int) -> int:
 
 
 
-def gemini_veo_config_kwargs() -> Dict[str, Any]:
-    """Gemini API Veo rejects duration_seconds. Keep only supported fields."""
+def gemini_veo_config_kwargs(aspect_ratio: str = "16:9") -> Dict[str, Any]:
+    """Gemini API Veo rejects duration_seconds. Keep only supported fields.
+    aspect_ratio: "16:9" (default, dashboard) or "9:16" (native vertical for Shorts/Reels/TikTok)."""
     return {
-        "aspect_ratio": "16:9",
+        "aspect_ratio": aspect_ratio if aspect_ratio in ("16:9", "9:16") else "16:9",
         "number_of_videos": 1,
     }
 
 
-def build_gemini_veo_videos_config():
-    return types.GenerateVideosConfig(**gemini_veo_config_kwargs())
+def build_gemini_veo_videos_config(aspect_ratio: str = "16:9"):
+    return types.GenerateVideosConfig(**gemini_veo_config_kwargs(aspect_ratio))
 
 
 def veo_prompt_with_duration_policy(prompt: str, duration: int) -> str:
@@ -1320,6 +1321,7 @@ def run_video_generation(
     engine: str = "google_veo",
     duration: int = 8,
     allow_fallback: bool = True,
+    aspect_ratio: str = "16:9",
 ):
     duration = normalize_video_duration(engine, duration)
     if engine == "runway_gen3":
@@ -1356,7 +1358,7 @@ def run_video_generation(
         update_job_status(job_id, "PROCESSING", 25, f"Submitting video generation request to {engine_label}...")
         
         # Gemini API Veo rejects duration_seconds; Lite is a fixed 8s clip.
-        config = build_gemini_veo_videos_config()
+        config = build_gemini_veo_videos_config(aspect_ratio)
 
         try:
             operation = client.models.generate_videos(
@@ -1370,7 +1372,7 @@ def run_video_generation(
                 operation = client.models.generate_videos(
                     model=model_name,
                     prompt=prompt,
-                    config=build_gemini_veo_videos_config(),
+                    config=build_gemini_veo_videos_config(aspect_ratio),
                 )
             else:
                 fallback = next_video_fallback_engine(engine, str(gen_err), fal_key_present(settings)) if allow_fallback else None

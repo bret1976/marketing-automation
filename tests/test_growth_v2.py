@@ -293,8 +293,8 @@ def test_plan_concept_rejects_recent_post_topic(monkeypatch):
     posts = [{"posted_at": now, "hook": "Snapping its tail destroys this bulletproof glass drop",
               "concept": {"topic": "Prince Rupert's Drop Explosion", "topic_key": "prince ruperts drop glass physics"}}]
     replies = iter([
-        {"topic": "Prince Rupert's Drop Shatter", "topic_key": "prince ruperts drop explosive shatter", "veo_prompt": "p", "hook": "Clipping this glass tail triggers an explosion"},
-        {"topic": "Nitinol Shape Memory Alloy", "topic_key": "nitinol shape memory wire", "veo_prompt": "p", "hook": "This bent wire snaps back with heat"},
+        {"topic": "Prince Rupert's Drop Shatter", "topic_key": "prince ruperts drop explosive shatter", "veo_prompt": "p", "hook": "Clipping this glass tail cracks it at 3,000 mph"},
+        {"topic": "Nitinol Shape Memory Alloy", "topic_key": "nitinol shape memory wire", "veo_prompt": "p", "hook": "This bent wire snaps back at 70 degrees C"},
     ])
     prompts = []
 
@@ -307,3 +307,92 @@ def test_plan_concept_rejects_recent_post_topic(monkeypatch):
     c = g.plan_concept({}, {"history": []})
     assert c["topic"] == "Nitinol Shape Memory Alloy"
     assert "Prince Rupert's Drop Explosion" in prompts[0]
+
+
+def test_veo_vertical_config():
+    import orchestrator
+    assert orchestrator.gemini_veo_config_kwargs("9:16") == {"aspect_ratio": "9:16", "number_of_videos": 1}
+    assert orchestrator.gemini_veo_config_kwargs("weird")["aspect_ratio"] == "16:9"
+
+
+def test_captions_have_series_and_question_but_not_on_reposts():
+    import growth_v2 as g
+    c = {"hook": "This drop cracks at 3,000 mph", "lines": ["Stress is locked in by fast cooling."], "hashtags": ["#Physics"],
+         "comment_question": "Would you hold one while it snaps", "episode": 4}
+    caps = g.build_captions(c)
+    assert caps["tiktok"].startswith("Engineering at the Extreme #4\nThis drop cracks at 3,000 mph")
+    assert "Would you hold one while it snaps?" in caps["tiktok"] and "Would you hold one" in caps["linkedin"]
+    assert len(caps["twitter"]) <= 280
+    rep = g.build_captions(c, {"creator": "someone", "url": "u"})
+    assert "Engineering at the Extreme" not in rep["tiktok"] and "?" not in rep["tiktok"].split("\n\n")[0][-1:]
+
+
+def test_number_required_in_on_screen_hook(monkeypatch):
+    import types
+    import growth_v2 as g
+    replies = iter([
+        {"topic": "Ferrofluid", "topic_key": "ferrofluid spikes", "veo_prompt": "p", "hook": "Liquid grows spikes", "on_screen_hook": "Liquid grows spikes"},
+        {"topic": "Tungsten", "topic_key": "tungsten melting point", "veo_prompt": "p", "hook": "Tungsten melts at 3,422C", "on_screen_hook": "Melts at 3,422°C"},
+    ])
+    fake = types.SimpleNamespace(load_scheduled_posts=lambda: [], load_growth_os=lambda: {}, call_gemini_json=lambda *a, **k: next(replies))
+    monkeypatch.setattr(g, "_main", lambda: fake)
+    c = g.plan_concept({}, {"history": []})
+    assert c["topic"] == "Tungsten" and g.has_number(c["on_screen_hook"])
+
+
+def test_origin_tags():
+    import growth_v2 as g
+    assert g.origin_of("ai_generated") == "original"
+    assert g.origin_of("original_download") == "repost" and g.origin_of("transformed_repost") == "repost"
+    assert g.origin_of(None) == "unknown"
+
+
+def _ffmpeg():
+    import shutil
+    return shutil.which("ffmpeg") and shutil.which("ffprobe")
+
+
+def test_render_native_vertical_no_blur_and_audio_fade(tmp_path):
+    import subprocess
+    import pytest
+    import growth_v2 as g
+    if not _ffmpeg():
+        pytest.skip("ffmpeg not installed")
+    src = str(tmp_path / "v.mp4")
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=size=720x1280:rate=24:duration=2",
+                    "-f", "lavfi", "-i", "sine=frequency=440:duration=2", "-shortest", "-c:v", "libx264", "-c:a", "aac", src], check=True)
+    out = str(tmp_path / "o.mp4")
+    info = g.render_vertical(src, out, "", None, "", 15.0, False)
+    assert (info["width"], info["height"]) == (1080, 1920) and info["native_vertical_source"] is True and info["has_audio"]
+    tail = subprocess.run(["ffmpeg", "-hide_banner", "-nostats", "-sseof", "-0.08", "-i", out, "-vn", "-af", "volumedetect", "-f", "null", "-"],
+                          capture_output=True, text=True).stderr
+    head = subprocess.run(["ffmpeg", "-hide_banner", "-nostats", "-t", "0.5", "-i", out, "-vn", "-af", "volumedetect", "-f", "null", "-"],
+                          capture_output=True, text=True).stderr
+    import re
+    mv = lambda t: float(re.search(r"mean_volume: (-?[\d.]+)", t).group(1))
+    assert mv(tail) < mv(head) - 6
+
+
+def test_followers_and_post_stats_parsing(monkeypatch):
+    import types
+    import growth_v2 as g
+    responses = {
+        "/profiles": {"data": [{"id": "yt", "platform": "youtube", "name": "Bret"}, {"id": "li", "platform": "linkedin", "name": "Bret"}]},
+        "/profiles/yt": {"latest_stats": [{"placement_id": None, "stats": {"subscriberCount": 75}, "recorded_at": "t"}]},
+        "/profiles/li": {"latest_stats": [{"placement_id": "112382931", "stats": {"followerCount": 42}, "recorded_at": "t"}]},
+    }
+
+    def get(settings, path, timeout=30):
+        if path.startswith("/posts/stats"):
+            return {"data": {"pp1": {"platforms": [{"platform": "tiktok", "records": [
+                {"stats": {"impressions": 100, "likes": 1}, "recorded_at": "a"}, {"stats": {"impressions": 306, "likes": 3, "comments": 1}, "recorded_at": "b"}]}]}}}
+        return responses[path]
+
+    monkeypatch.setattr(g, "_main", lambda: types.SimpleNamespace(postproxy_get=get))
+    state = {}
+    snap = g.snapshot_followers({}, state, force=True)
+    assert snap["by_platform"]["youtube"]["followers"] == 75 and snap["by_platform"]["linkedin:112382931"]["followers"] == 42
+    assert state["follower_history"][-1]["youtube"] == 75
+    assert g.snapshot_followers({}, state) is None  # throttled
+    st = g.fetch_post_stats({}, ["pp1"])
+    assert st["pp1"]["tiktok"]["impressions"] == 306 and st["pp1"]["tiktok"]["comments"] == 1

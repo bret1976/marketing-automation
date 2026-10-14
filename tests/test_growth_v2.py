@@ -274,3 +274,36 @@ def test_sanitize_concept_appends_shot_list_to_prompt():
                             "shot_list": [{"t": "0-2s", "shows": "pliers grip the thin tail"}, {"t": "2-5s", "shows": "tail snaps"},
                                           {"t": "5-8s", "shows": "whole drop bursts into powder"}]})
     assert len(c["shot_list"]) == 3 and "Shot list, in order: 0-2s: pliers grip the thin tail." in c["veo_prompt"]
+
+
+def test_topic_similarity_catches_rupert_variants():
+    import growth_v2 as g
+    recent = ["Prince Rupert's Drop Explosion", "prince ruperts drop glass physics"]
+    for variant in ["Prince Rupert's Drop Shatter", "prince ruperts drop explosive shatter", "Rupert drops: unbreakable glass"]:
+        assert g.is_recent_topic({"topic": variant, "topic_key": variant}, recent), variant
+    assert not g.is_recent_topic({"topic": "Nitinol Shape Memory Alloy", "topic_key": "nitinol shape memory wire"}, recent)
+    assert not g.topics_similar("Glass drop tail", "Mantis shrimp punch")
+
+
+def test_plan_concept_rejects_recent_post_topic(monkeypatch):
+    import types
+    from datetime import datetime, timezone
+    import growth_v2 as g
+    now = datetime.now(timezone.utc).isoformat()
+    posts = [{"posted_at": now, "hook": "Snapping its tail destroys this bulletproof glass drop",
+              "concept": {"topic": "Prince Rupert's Drop Explosion", "topic_key": "prince ruperts drop glass physics"}}]
+    replies = iter([
+        {"topic": "Prince Rupert's Drop Shatter", "topic_key": "prince ruperts drop explosive shatter", "veo_prompt": "p", "hook": "Clipping this glass tail triggers an explosion"},
+        {"topic": "Nitinol Shape Memory Alloy", "topic_key": "nitinol shape memory wire", "veo_prompt": "p", "hook": "This bent wire snaps back with heat"},
+    ])
+    prompts = []
+
+    def gem(settings, prompt, fallback, use_search=False):
+        prompts.append(prompt)
+        return next(replies)
+
+    fake = types.SimpleNamespace(load_scheduled_posts=lambda: posts, load_growth_os=lambda: {}, call_gemini_json=gem)
+    monkeypatch.setattr(g, "_main", lambda: fake)
+    c = g.plan_concept({}, {"history": []})
+    assert c["topic"] == "Nitinol Shape Memory Alloy"
+    assert "Prince Rupert's Drop Explosion" in prompts[0]

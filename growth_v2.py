@@ -82,7 +82,9 @@ def paused() -> bool:
 
 
 def transform_fallback_enabled() -> bool:
-    return not _falsy(os.environ.get("AUTOPILOT_TRANSFORM_FALLBACK", "1"))
+    """Off by default (Bret, 2026-10-14): no downloaded third-party clip is ever published
+    unless AUTOPILOT_TRANSFORM_FALLBACK=1 is set explicitly."""
+    return _truthy(os.environ.get("AUTOPILOT_TRANSFORM_FALLBACK", "0"))
 
 
 def max_slot_attempts() -> int:
@@ -457,11 +459,17 @@ It must be factually correct.
 Return ONLY JSON with these keys:
   topic: short name
   topic_key: 3-6 lowercase words identifying the subject
-  veo_prompt: 40-90 words, photoreal, describe camera + motion, centered subject
+  shot_list: array of exactly 3 beats covering the 8 seconds, each an object
+        {{"t": "0-2s" | "2-5s" | "5-8s", "shows": concrete visible action in plain words}}.
+        Each beat must be something a camera can literally see (no abstractions like "stress" or "tension").
+  veo_prompt: 50-110 words, photoreal, written as that same shot list in order (camera, subject,
+        exact action per beat, how the clip ends), vertical 9:16 framing, centered subject
   on_screen_hook: max 6 words, shown on screen in the first 2 seconds
   hook: the caption's first line, about 8-10 words, max 60 characters, curiosity or surprising fact,
         no hashtags, no emoji, no links, must NOT start with "At 6Frame Studio"
   lines: array of 1-2 short plain-language lines (each under 100 characters) explaining the fact
+  RULE: hook, on_screen_hook and lines may only describe things that appear in shot_list.
+        If the caption says something breaks, explodes, melts etc., a beat must show exactly that.
   hashtags: array of 3-5 topic hashtags (e.g. #Physics #Engineering), no brand hashtags
   linkedin_angle: one plain sentence on how the clip was made with AI
 
@@ -479,10 +487,19 @@ def sanitize_concept(concept: Any) -> dict:
     lines = concept.get("lines") or []
     if isinstance(lines, str):
         lines = [lines]
+    shots = []
+    for beat in (concept.get("shot_list") or [])[:4]:
+        if isinstance(beat, dict) and _clean_line(beat.get("shows") or ""):
+            shots.append({"t": str(beat.get("t") or "")[:10], "shows": clamp_words(_clean_line(beat.get("shows")), 160)})
+        elif isinstance(beat, str) and _clean_line(beat):
+            shots.append({"t": "", "shows": clamp_words(_clean_line(beat), 160)})
+    if shots and "shot list" not in prompt.lower():
+        prompt = prompt + " Shot list, in order: " + " ".join(f"{b['t'] or 'next'}: {b['shows']}." for b in shots)
     return {
         "topic": clamp_words(_clean_line(concept.get("topic") or hook), 80),
         "topic_key": str(concept.get("topic_key") or concept.get("topic") or hook),
-        "veo_prompt": prompt[:900],
+        "veo_prompt": prompt[:1100],
+        "shot_list": shots,
         "on_screen_hook": clamp_words(_clean_line(concept.get("on_screen_hook") or hook), 40),
         "hook": hook,
         "lines": [clamp_words(_clean_line(l), 110) for l in lines if _clean_line(l)][:2],
@@ -491,10 +508,12 @@ def sanitize_concept(concept: Any) -> dict:
     }
 
 
-def plan_concept(settings: dict, state: dict) -> dict:
+def plan_concept(settings: dict, state: dict, extra_avoid: Optional[List[dict]] = None) -> dict:
+    """extra_avoid: concepts already tried (and failed) in this run; never reuse their topic."""
     m = _main()
-    avoid_keys = used_keys(state)
+    avoid_keys = used_keys(state) | {concept_key(c) for c in (extra_avoid or []) if c}
     recent_topics = [h.get("topic") for h in _recent_history(state, REPEAT_WINDOW_DAYS) if h.get("topic")][-30:]
+    recent_topics += [c.get("topic") for c in (extra_avoid or []) if c and c.get("topic")]
     inspiration = ""
     try:
         titles = [t.get("title") for t in (m.load_growth_os().get("last_trend_scan") or []) if t.get("title")][:6]
@@ -620,33 +639,37 @@ def render_vertical(src: str, dst: str, hook: str, commentary: Optional[List[str
                 pass
 
 
-def generate_original_clip(concept: dict, settings: dict) -> Tuple[str, dict]:
-    """Veo first (run_video_generation already does labeled Veo->FAL fallback),
-    then FAL directly. Returns (abs_path, info)."""
+DEFAULT_ENGINE_LADDER = ("google_veo_lite", "google_veo_lite", "google_veo_lite", "google_veo_fast", "google_veo_fast")
+DEFAULT_BACKOFF_SECONDS = (0, 15, 30, 60, 90)
+
+
+def engine_ladder() -> List[str]:
+    """Cheap 8s Veo Lite first, Veo Fast only after Lite keeps failing. GROWTH_VIDEO_ENGINES=a,b,c overrides."""
+    raw = os.environ.get("GROWTH_VIDEO_ENGINES")
+    ladder = [e.strip() for e in raw.split(",") if e.strip()] if raw else list(DEFAULT_ENGINE_LADDER)
+    return ladder[:8] or list(DEFAULT_ENGINE_LADDER)
+
+
+def backoff_seconds(attempt_index: int) -> float:
+    raw = os.environ.get("GROWTH_RETRY_BACKOFF")
+    seq = [float(x) for x in raw.split(",") if x.strip()] if raw else list(DEFAULT_BACKOFF_SECONDS)
+    return seq[min(attempt_index, len(seq) - 1)] if seq else 0.0
+
+
+def generate_original_clip(concept: dict, settings: dict, engine: str = "google_veo_lite") -> Tuple[str, dict]:
+    """One Veo attempt on exactly `engine` (no hidden FAL / full-Veo fallback). Returns (abs_path, info)."""
     import orchestrator
 
-    preferred = os.environ.get("GROWTH_VIDEO_ENGINE") or settings.get("autonomous_video_engine") or "google_veo"
-    engines = [preferred]
-    if orchestrator.fal_key_present(settings) and "fal_hailuo_23" not in engines:
-        engines.append("fal_hailuo_23")
-    errors = []
-    for engine in engines:
-        job_id = f"g2_{uuid.uuid4().hex}"
-        try:
-            orchestrator.run_video_generation(job_id, concept["veo_prompt"], settings, engine, 8)
-        except Exception as exc:
-            errors.append(f"{engine}: {exc}")
-            continue
-        status = orchestrator.get_job_status(job_id)
-        if status.get("status") == "SUCCESS":
-            result = status.get("result") or {}
-            abs_path = _main().resolve_local_video_path(result.get("video_path") or "")
-            if abs_path and os.path.exists(abs_path):
-                return abs_path, {"engine": result.get("engine") or engine, "job_id": job_id}
-            errors.append(f"{engine}: rendered file missing")
-        else:
-            errors.append(f"{engine}: {status.get('message')}")
-    raise RuntimeError("Original video generation failed: " + " | ".join(errors)[-800:])
+    job_id = f"g2_{uuid.uuid4().hex}"
+    orchestrator.run_video_generation(job_id, concept["veo_prompt"], settings, engine, 8, allow_fallback=False)
+    status = orchestrator.get_job_status(job_id)
+    if status.get("status") == "SUCCESS":
+        result = status.get("result") or {}
+        abs_path = _main().resolve_local_video_path(result.get("video_path") or "")
+        if abs_path and os.path.exists(abs_path):
+            return abs_path, {"engine": result.get("engine") or engine, "job_id": job_id}
+        raise RuntimeError(f"{engine}: rendered file missing")
+    raise RuntimeError(f"{engine}: {status.get('message')}")
 
 
 _SOURCE_RE = re.compile(r"(tiktok\.com/@[\w.]+/video/\d+|reddit\.com/r/[^/]+/comments/|youtube\.com/(watch|shorts)|youtu\.be/)", re.I)
@@ -863,32 +886,114 @@ def resolve_platforms(settings: dict, state: Optional[dict] = None) -> Tuple[Lis
 # the Autopilot run
 # --------------------------------------------------------------------------
 
+MATCH_PROMPT = """These {n} frames are sampled in order from an 8-second AI-generated video.
+The post will be published with this on-screen hook and caption:
+  on_screen_hook: "{on_screen_hook}"
+  hook: "{hook}"
+  lines: {lines}
+Judge strictly from what is VISIBLE. A caption claim fails if the frames do not show it (e.g. caption says
+the object shatters but it stays intact; caption mentions a hammer that never appears).
+Return ONLY JSON:
+  visible_summary: one sentence describing what the frames actually show,
+  matches: true only if every visual claim in on_screen_hook, hook and lines is shown,
+  mismatches: array of short strings (claims not shown),
+  rewrite: if matches is false, a corrected caption that describes ONLY what is shown, still factual and
+           curiosity-driven: {{"on_screen_hook": max 6 words, "hook": 8-10 words max 60 chars no emoji/hashtags,
+           "lines": 1-2 lines under 100 chars}}; otherwise null."""
+
+
+def verify_clip_matches(raw_path: str, concept: dict, settings: dict) -> dict:
+    """Gemini looks at ~5 frames of the generated clip and checks the hook/caption.
+    Returns {"matches", "visible_summary", "mismatches", "rewrite", "frames"}. Raises if it cannot check."""
+    frames = extract_frames(raw_path, 5)
+    if not frames:
+        raise RuntimeError("caption check: could not extract frames")
+    prompt = MATCH_PROMPT.format(n=len(frames), on_screen_hook=concept.get("on_screen_hook", ""),
+                                 hook=concept.get("hook", ""), lines=json.dumps(concept.get("lines") or []))
+    result = call_gemini_vision_json(settings, prompt, frames)
+    if not isinstance(result, dict) or "matches" not in result:
+        raise RuntimeError("caption check: unusable verifier response")
+    result["matches"] = result.get("matches") is True
+    result["frames"] = len(frames)
+    return result
+
+
+def apply_caption_rewrite(concept: dict, rewrite: Any) -> Optional[dict]:
+    if not isinstance(rewrite, dict):
+        return None
+    hook = clean_hook(rewrite.get("hook") or "")
+    lines = rewrite.get("lines") or []
+    if isinstance(lines, str):
+        lines = [lines]
+    lines = [clamp_words(_clean_line(l), 110) for l in lines if _clean_line(l)][:2]
+    if not hook or not lines:
+        return None
+    fixed = dict(concept)
+    fixed.update({"hook": hook, "lines": lines,
+                  "on_screen_hook": clamp_words(_clean_line(rewrite.get("on_screen_hook") or hook), 40),
+                  "caption_rewritten_from_frames": True,
+                  "original_caption": {"hook": concept.get("hook"), "lines": concept.get("lines")}})
+    return fixed
+
+
+def ensure_caption_matches(raw_path: str, concept: dict, settings: dict) -> Tuple[dict, dict]:
+    """Never publish a mismatch: pass -> keep; fail -> rewrite from frames and re-check;
+    still failing (or unverifiable) -> raise so the retry loop makes a new original."""
+    first = verify_clip_matches(raw_path, concept, settings)
+    if first["matches"]:
+        return concept, {"caption_check": "match", "visible_summary": first.get("visible_summary")}
+    fixed = apply_caption_rewrite(concept, first.get("rewrite"))
+    if not fixed:
+        raise RuntimeError(f"caption mismatch, no usable rewrite: {first.get('mismatches')} | shown: {first.get('visible_summary')}")
+    second = verify_clip_matches(raw_path, fixed, settings)
+    if not second["matches"]:
+        raise RuntimeError(f"caption mismatch after rewrite: {second.get('mismatches')} | shown: {second.get('visible_summary')}")
+    return fixed, {"caption_check": "rewritten_from_frames", "visible_summary": second.get("visible_summary"),
+                   "mismatches_fixed": first.get("mismatches")}
+
+
 async def produce(settings: dict, state: dict) -> Tuple[str, dict, dict]:
+    """Originals only. Each failed Veo attempt gets a brand-new concept (new topic + prompt),
+    with backoff, walking the Lite->Fast ladder. The transform/repost fallback only runs if
+    AUTOPILOT_TRANSFORM_FALLBACK=1 is set explicitly (off by default)."""
     loop = asyncio.get_running_loop()
     errors: List[str] = []
-    try:
-        concept = await loop.run_in_executor(None, plan_concept, settings, state)
-        raw_path, gen_info = await loop.run_in_executor(None, generate_original_clip, concept, settings)
-        out = os.path.join(_main().GENERATED_DIR, f"g2_original_{uuid.uuid4().hex}.mp4")
-        info = await loop.run_in_executor(None, render_vertical, raw_path, out, concept["on_screen_hook"], None, "", 15.0, False)
-        info.update(gen_info)
-        info["media_source"] = "ai_generated"
-        return out, concept, info
-    except Exception as exc:
-        errors.append(str(exc))
-        logger.error("%s original render failed: %s", MARKER, exc)
-    try:
-        transformed = await loop.run_in_executor(None, build_transformed_clip, settings, state)
-    except Exception as exc:
-        transformed = None
-        errors.append(f"transform fallback: {exc}")
-    if transformed:
-        out, concept, info = transformed
-        info["media_source"] = "transformed_repost"
-        return out, concept, info
-    if not transform_fallback_enabled():
-        errors.append("transform fallback disabled (AUTOPILOT_TRANSFORM_FALLBACK=0)")
-    raise RuntimeError(" | ".join(errors) or "no video produced")
+    tried: List[dict] = []
+    for i, engine in enumerate(engine_ladder()):
+        wait = backoff_seconds(i)
+        if i and wait > 0:
+            await asyncio.sleep(wait)
+        concept: dict = {}
+        try:
+            concept = await loop.run_in_executor(None, plan_concept, settings, state, list(tried))
+            raw_path, gen_info = await loop.run_in_executor(None, generate_original_clip, concept, settings, engine)
+            concept, check = await loop.run_in_executor(None, ensure_caption_matches, raw_path, concept, settings)
+            gen_info.update(check)
+            out = os.path.join(_main().GENERATED_DIR, f"g2_original_{uuid.uuid4().hex}.mp4")
+            info = await loop.run_in_executor(None, render_vertical, raw_path, out, concept["on_screen_hook"], None, "", 15.0, False)
+            info.update(gen_info)
+            info["media_source"] = "ai_generated"
+            info["attempt"] = i + 1
+            info["failed_attempts"] = [{"topic": c.get("topic"), "error": e[:200]} for c, e in zip(tried, errors)]
+            return out, concept, info
+        except Exception as exc:
+            if concept:
+                tried.append(concept)
+            else:
+                tried.append({"topic": f"(no concept, attempt {i + 1})", "topic_key": f"none-{i}"})
+            errors.append(f"attempt {i + 1} {engine} [{concept.get('topic') if concept else '-'}]: {exc}")
+            logger.error("%s original attempt %s/%s on %s failed: %s", MARKER, i + 1, len(engine_ladder()), engine, exc)
+    if transform_fallback_enabled():
+        try:
+            transformed = await loop.run_in_executor(None, build_transformed_clip, settings, state)
+        except Exception as exc:
+            transformed = None
+            errors.append(f"transform fallback: {exc}")
+        if transformed:
+            out, concept, info = transformed
+            info["media_source"] = "transformed_repost"
+            return out, concept, info
+    raise RuntimeError(f"All {len(errors)} original video attempts failed: " + " | ".join(errors)[-1500:])
 
 
 def build_post(abs_video: str, concept: dict, info: dict, platforms: List[str]) -> dict:
@@ -914,7 +1019,7 @@ def build_post(abs_video: str, concept: dict, info: dict, platforms: List[str]) 
         "source_creator": source.get("creator") or "",
         "media_source": info.get("media_source"),
         "media_info": {k: v for k, v in info.items() if k != "source"},
-        "concept": {k: concept.get(k) for k in ("topic", "topic_key", "on_screen_hook", "hook", "lines", "hashtags", "concept_source", "commentary")},
+        "concept": {k: concept.get(k) for k in ("topic", "topic_key", "on_screen_hook", "hook", "lines", "hashtags", "concept_source", "commentary", "shot_list", "veo_prompt", "caption_rewritten_from_frames", "original_caption")},
         "growth_v2": VERSION,
         "status": "PUBLISHING",
         "error_message": None,

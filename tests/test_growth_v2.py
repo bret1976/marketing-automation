@@ -60,3 +60,11 @@ def test_performance_requires_real_data():
     perf = g.post_performance({"metrics": {"public": {"tiktok": {"views": 120, "likes": 3}},
                                            "postproxy": {"youtube": {"impressions": 40}}}})
     assert perf["views"] == 160 and perf["engagements"] == 3
+
+
+def test_youtube_bot_wall_is_not_reported_as_unavailable():
+    html = '"playabilityStatus":{"status":"LOGIN_REQUIRED","reason":"Sign in to confirm you\u2019re not a bot"}'
+    assert g.parse_youtube_html(html) is None
+    gone = g.parse_youtube_html('"playabilityStatus":{"status":"ERROR","reason":"Video unavailable"}')
+    assert gone["available"] is False
+    assert g.health()["media_tools"]["ffmpeg"] is True

@@ -156,3 +156,12 @@ def test_recent_blocks_mask_ip(monkeypatch):
     spend_guard.reserve("publish", "203.0.113.50", now=t + 1)
     blocks = spend_guard.summary(now=t + 2)["recent_blocks"]
     assert blocks and blocks[-1]["client"] == "203.0.x.x"
+
+
+import pytest as _pytest
+
+
+@_pytest.fixture(autouse=True)
+def _public_dashboard_for_this_module(monkeypatch):
+    # Auth is on by default when ADMIN_PASSWORD is set (other test modules set it).
+    monkeypatch.setenv("ALLOW_PUBLIC_DASHBOARD", "1")

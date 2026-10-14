@@ -156,3 +156,12 @@ def test_health_and_summary_endpoints(tmp_path, monkeypatch):
     s = client.get("/api/autopilot-watch/summary")
     assert s.status_code == 200
     assert s.json()["pack"] == aw.PACK
+
+
+import pytest as _pytest
+
+
+@_pytest.fixture(autouse=True)
+def _public_dashboard_for_this_module(monkeypatch):
+    # Auth is on by default when ADMIN_PASSWORD is set (other test modules set it).
+    monkeypatch.setenv("ALLOW_PUBLIC_DASHBOARD", "1")

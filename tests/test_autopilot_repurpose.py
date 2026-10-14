@@ -61,6 +61,7 @@ def test_resolve_autopilot_copy_falls_back_to_repurpose(monkeypatch):
 
 
 def test_execute_autonomous_autopost_downloads_original_not_generate(monkeypatch):
+    monkeypatch.setenv("GROWTH_V2", "0")  # exercises the legacy pipeline
     calls = {"gen": 0, "dl": 0, "scan": 0}
 
     def fake_scan(job_id, settings):
@@ -125,6 +126,7 @@ def test_execute_autonomous_autopost_downloads_original_not_generate(monkeypatch
 
 
 def test_execute_autonomous_autopost_stages_copy_when_download_fails(monkeypatch):
+    monkeypatch.setenv("GROWTH_V2", "0")  # exercises the legacy pipeline
     calls = {"gen": 0}
 
     def fake_download(*args, **kwargs):

@@ -71,6 +71,7 @@ def test_youtube_bot_wall_is_not_reported_as_unavailable():
 
 
 def test_transform_fallback_tries_next_source_and_prefers_non_reddit(monkeypatch):
+    monkeypatch.setenv("AUTOPILOT_TRANSFORM_FALLBACK", "1")
     import types
     import growth_v2 as g
     trends = [
@@ -102,6 +103,7 @@ def test_transform_fallback_tries_next_source_and_prefers_non_reddit(monkeypatch
 
 
 def test_transform_copy_uses_frames_when_available(monkeypatch):
+    monkeypatch.setenv("AUTOPILOT_TRANSFORM_FALLBACK", "1")
     import types
     import growth_v2 as g
     fake = types.SimpleNamespace(
@@ -130,6 +132,7 @@ def test_transform_copy_uses_frames_when_available(monkeypatch):
 
 
 def test_transform_copy_falls_back_to_title_when_no_frames(monkeypatch):
+    monkeypatch.setenv("AUTOPILOT_TRANSFORM_FALLBACK", "1")
     import types
     import growth_v2 as g
     fake = types.SimpleNamespace(
@@ -152,5 +155,122 @@ def test_x_quota_detection_matches_real_postproxy_text():
     assert g.is_x_quota_error(real)
     assert g.is_x_quota_error("Daily limit hit, 24 hour window", ["twitter"])
     assert not g.is_x_quota_error("linkedin: token expired")
-    state = {}
-    g.inspect_publish_errors(state, {"id": "p"}, ["twitter: " + real]) if False else None
+
+
+def test_transform_fallback_off_by_default(monkeypatch):
+    import growth_v2 as g
+    monkeypatch.delenv("AUTOPILOT_TRANSFORM_FALLBACK", raising=False)
+    assert g.transform_fallback_enabled() is False
+    assert g.build_transformed_clip({}, {}) is None
+
+
+def _fake_main(tmp_path):
+    import types
+    return types.SimpleNamespace(GENERATED_DIR=str(tmp_path))
+
+
+def test_failed_veo_retries_with_new_topic_then_succeeds(monkeypatch, tmp_path):
+    import asyncio
+    import growth_v2 as g
+    monkeypatch.delenv("AUTOPILOT_TRANSFORM_FALLBACK", raising=False)
+    monkeypatch.setenv("GROWTH_RETRY_BACKOFF", "0")
+    monkeypatch.setattr(g, "_main", lambda: _fake_main(tmp_path))
+    plans, engines = [], []
+
+    def plan(settings, state, extra_avoid=None):
+        n = len(plans)
+        plans.append([c["topic"] for c in (extra_avoid or [])])
+        return {"topic": f"topic{n}", "topic_key": f"k{n}", "veo_prompt": "p", "on_screen_hook": "h", "hook": "h"}
+
+    def gen(concept, settings, engine):
+        engines.append(engine)
+        if concept["topic"] in ("topic0", "topic1"):
+            raise RuntimeError("Veo 503")
+        return "/tmp/raw.mp4", {"engine": engine}
+
+    monkeypatch.setattr(g, "plan_concept", plan)
+    monkeypatch.setattr(g, "ensure_caption_matches", lambda raw, c, s: (c, {"caption_check": "match"}))
+    monkeypatch.setattr(g, "generate_original_clip", gen)
+    monkeypatch.setattr(g, "render_vertical", lambda *a, **k: {"width": 1080, "height": 1920})
+    monkeypatch.setattr(g, "build_transformed_clip", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no repost")))
+    out, concept, info = asyncio.run(g.produce({}, {}))
+    assert concept["topic"] == "topic2" and info["attempt"] == 3
+    assert plans == [[], ["topic0"], ["topic0", "topic1"]]
+    assert engines == ["google_veo_lite"] * 3
+    assert info["media_source"] == "ai_generated"
+
+
+def test_all_attempts_fail_walks_lite_then_fast_and_never_reposts(monkeypatch, tmp_path):
+    import asyncio
+    import pytest
+    import growth_v2 as g
+    monkeypatch.delenv("AUTOPILOT_TRANSFORM_FALLBACK", raising=False)
+    monkeypatch.setenv("GROWTH_RETRY_BACKOFF", "0")
+    monkeypatch.setattr(g, "_main", lambda: _fake_main(tmp_path))
+    engines = []
+    monkeypatch.setattr(g, "plan_concept", lambda s, st, extra_avoid=None: {"topic": f"t{len(extra_avoid or [])}", "topic_key": f"k{len(extra_avoid or [])}", "veo_prompt": "p", "on_screen_hook": "h", "hook": "h"})
+    monkeypatch.setattr(g, "generate_original_clip", lambda c, s, e: engines.append(e) or (_ for _ in ()).throw(RuntimeError("down")))
+    monkeypatch.setattr(g, "build_transformed_clip", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no repost")))
+    with pytest.raises(RuntimeError, match="All 5 original video attempts failed"):
+        asyncio.run(g.produce({}, {}))
+    assert engines == ["google_veo_lite"] * 3 + ["google_veo_fast"] * 2
+
+
+def _concept(topic="drop"):
+    return {"topic": topic, "topic_key": topic, "veo_prompt": "p", "on_screen_hook": "Glass explodes",
+            "hook": "Snapping its tail destroys this glass drop", "lines": ["The bulb survives a hammer."]}
+
+
+def test_caption_mismatch_is_rewritten_from_frames(monkeypatch):
+    import growth_v2 as g
+    calls = []
+
+    def verify(raw, concept, settings):
+        calls.append(concept["hook"])
+        if len(calls) == 1:
+            return {"matches": False, "mismatches": ["no hammer", "bulb stays intact"], "visible_summary": "pliers snap the tail; dust cloud",
+                    "rewrite": {"on_screen_hook": "Snap the tail, watch", "hook": "Pliers snap the tail of a glass drop",
+                                "lines": ["Fine glass dust bursts from the tail as stress releases."]}}
+        return {"matches": True, "visible_summary": "pliers snap the tail; dust cloud"}
+
+    monkeypatch.setattr(g, "verify_clip_matches", verify)
+    fixed, info = g.ensure_caption_matches("/tmp/x.mp4", _concept(), {})
+    assert fixed["hook"] == "Pliers snap the tail of a glass drop"
+    assert fixed["caption_rewritten_from_frames"] and fixed["original_caption"]["hook"].startswith("Snapping")
+    assert info["caption_check"] == "rewritten_from_frames" and len(calls) == 2
+
+
+def test_caption_still_mismatched_raises(monkeypatch):
+    import pytest
+    import growth_v2 as g
+    monkeypatch.setattr(g, "verify_clip_matches", lambda raw, c, s: {"matches": False, "mismatches": ["x"], "rewrite": {"hook": "Some new hook here", "lines": ["l"]}})
+    with pytest.raises(RuntimeError, match="mismatch after rewrite"):
+        g.ensure_caption_matches("/tmp/x.mp4", _concept(), {})
+
+
+def test_mismatch_counts_toward_retry_with_new_topic(monkeypatch, tmp_path):
+    import asyncio
+    import growth_v2 as g
+    monkeypatch.delenv("AUTOPILOT_TRANSFORM_FALLBACK", raising=False)
+    monkeypatch.setenv("GROWTH_RETRY_BACKOFF", "0")
+    monkeypatch.setattr(g, "_main", lambda: _fake_main(tmp_path))
+    monkeypatch.setattr(g, "plan_concept", lambda s, st, extra_avoid=None: _concept(f"t{len(extra_avoid or [])}"))
+    monkeypatch.setattr(g, "generate_original_clip", lambda c, s, e: ("/tmp/raw.mp4", {"engine": e}))
+
+    def ensure(raw, c, s):
+        if c["topic"] == "t0":
+            raise RuntimeError("caption mismatch after rewrite")
+        return c, {"caption_check": "match"}
+
+    monkeypatch.setattr(g, "ensure_caption_matches", ensure)
+    monkeypatch.setattr(g, "render_vertical", lambda *a, **k: {})
+    _, concept, info = asyncio.run(g.produce({}, {}))
+    assert concept["topic"] == "t1" and info["attempt"] == 2 and info["caption_check"] == "match"
+
+
+def test_sanitize_concept_appends_shot_list_to_prompt():
+    import growth_v2 as g
+    c = g.sanitize_concept({"veo_prompt": "Macro shot of a glass drop.", "hook": "Pliers snap a glass drop tail",
+                            "shot_list": [{"t": "0-2s", "shows": "pliers grip the thin tail"}, {"t": "2-5s", "shows": "tail snaps"},
+                                          {"t": "5-8s", "shows": "whole drop bursts into powder"}]})
+    assert len(c["shot_list"]) == 3 and "Shot list, in order: 0-2s: pliers grip the thin tail." in c["veo_prompt"]

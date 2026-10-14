@@ -1318,7 +1318,8 @@ def run_video_generation(
     prompt: str,
     settings: Dict[str, Any],
     engine: str = "google_veo",
-    duration: int = 8
+    duration: int = 8,
+    allow_fallback: bool = True,
 ):
     duration = normalize_video_duration(engine, duration)
     if engine == "runway_gen3":
@@ -1372,7 +1373,7 @@ def run_video_generation(
                     config=build_gemini_veo_videos_config(),
                 )
             else:
-                fallback = next_video_fallback_engine(engine, str(gen_err), fal_key_present(settings))
+                fallback = next_video_fallback_engine(engine, str(gen_err), fal_key_present(settings)) if allow_fallback else None
                 if fallback:
                     update_job_status(
                         job_id,
@@ -1470,7 +1471,7 @@ def run_video_generation(
 
     except Exception as e:
         logger.exception("Error in video generation")
-        fallback = next_video_fallback_engine(engine, str(e), fal_key_present(settings))
+        fallback = next_video_fallback_engine(engine, str(e), fal_key_present(settings)) if allow_fallback else None
         if fallback:
             update_job_status(
                 job_id,

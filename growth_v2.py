@@ -699,6 +699,62 @@ explanation the original lacks), lines (array of 1-2 caption lines under 100 cha
 no brand tags), topic (short), topic_key (3-6 lowercase words), linkedin_angle (one sentence)."""
 
 
+VISION_TRANSFORM_PROMPT = """You are looking at {n} frames sampled in order across a short source clip titled: "{title}".
+Write on-screen commentary for a 15-second vertical short by 6Frame Studio that reacts to WHAT IS ACTUALLY VISIBLE
+in these frames (subjects, actions, style, setting). Do not invent subjects that are not on screen; if the title and
+the frames disagree, trust the frames.
+Return ONLY JSON: hook (max 9 words, max 60 chars, no emoji, no hashtags, not starting with "At 6Frame Studio"),
+on_screen_hook (max 6 words), commentary (array of exactly 2 short factual lines, each under 70 chars, about what
+is shown and how it was likely made), lines (array of 1-2 caption lines under 100 chars), hashtags (3-5 topic hashtags,
+no brand tags), topic (short), topic_key (3-6 lowercase words), linkedin_angle (one sentence),
+visible_summary (one sentence describing what the frames show)."""
+
+
+def extract_frames(path: str, count: int = 5, width: int = 512) -> List[bytes]:
+    """Grab `count` JPEG frames spread evenly across the clip (skipping the very ends)."""
+    import subprocess
+    import tempfile
+    try:
+        dur = float(subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", path],
+                                   capture_output=True, text=True, timeout=30).stdout.strip() or 0)
+    except Exception:
+        dur = 0.0
+    if dur <= 0:
+        return []
+    frames: List[bytes] = []
+    with tempfile.TemporaryDirectory() as tmp:
+        for i in range(count):
+            ts = dur * (i + 0.5) / count
+            dst = os.path.join(tmp, f"f{i}.jpg")
+            try:
+                subprocess.run(["ffmpeg", "-v", "error", "-y", "-ss", f"{ts:.2f}", "-i", path, "-frames:v", "1",
+                                "-vf", f"scale={width}:-2", "-q:v", "4", dst], capture_output=True, timeout=30)
+                if os.path.exists(dst) and os.path.getsize(dst) > 0:
+                    with open(dst, "rb") as fh:
+                        frames.append(fh.read())
+            except Exception as exc:
+                logger.warning("%s frame %s extract failed: %s", MARKER, i, exc)
+    return frames
+
+
+def call_gemini_vision_json(settings: dict, prompt: str, frames: List[bytes]) -> Any:
+    """Same cheap model/key as main.call_gemini_json, but with sampled frames attached."""
+    m = _main()
+    api_key = settings.get("gemini_api_key") or os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        raise ValueError("Missing Gemini API key.")
+    from google import genai
+    from google.genai import types
+    client = genai.Client(api_key=api_key, http_options=types.HttpOptions(timeout=120000))
+    parts = [types.Part.from_bytes(data=f, mime_type="image/jpeg") for f in frames] + [prompt]
+    response = client.models.generate_content(
+        model=getattr(m, "GEMINI_TEXT_MODEL", None) or "gemini-3.6-flash",
+        contents=parts,
+        config=types.GenerateContentConfig(response_mime_type="application/json"),
+    )
+    return m.extract_json_object(response.text)
+
+
 def build_transformed_clip(settings: dict, state: dict) -> Optional[Tuple[str, dict, dict]]:
     """Fallback only. A downloaded clip is cut to <=15s and gets a hook, two
     commentary lines and a credit burned in; without commentary it is refused."""
@@ -723,11 +779,21 @@ def build_transformed_clip(settings: dict, state: dict) -> Optional[Tuple[str, d
     if not downloaded:
         raise RuntimeError(f"All {len(sources)} fallback sources failed to download: " + " ; ".join(failures)[:900])
     raw: dict = {}
-    try:
-        result = m.call_gemini_json(settings, TRANSFORM_PROMPT.format(title=source["title"][:200]), {}, use_search=False)
-        raw = result if isinstance(result, dict) else {}
-    except Exception as exc:
-        logger.warning("%s transform copy failed: %s", MARKER, exc)
+    frames = extract_frames(downloaded, 5)
+    if frames:
+        try:
+            result = call_gemini_vision_json(settings, VISION_TRANSFORM_PROMPT.format(title=source["title"][:200], n=len(frames)), frames)
+            raw = result if isinstance(result, dict) else {}
+        except Exception as exc:
+            logger.warning("%s vision transform copy failed, falling back to title-only: %s", MARKER, exc)
+    if not raw:
+        try:
+            result = m.call_gemini_json(settings, TRANSFORM_PROMPT.format(title=source["title"][:200]), {}, use_search=False)
+            raw = result if isinstance(result, dict) else {}
+            raw["_copy_mode"] = "title_only"
+        except Exception as exc:
+            logger.warning("%s transform copy failed: %s", MARKER, exc)
+    copy_mode = raw.get("_copy_mode") or ("vision" if raw else "none")
     commentary = [clamp_words(_clean_line(c), 70) for c in (raw.get("commentary") or []) if _clean_line(c)][:2]
     hook = clean_hook(raw.get("hook") or "")
     if not hook or len(commentary) < 2:
@@ -748,6 +814,8 @@ def build_transformed_clip(settings: dict, state: dict) -> Optional[Tuple[str, d
     out = os.path.join(m.GENERATED_DIR, f"g2_transformed_{uuid.uuid4().hex}.mp4")
     info = render_vertical(downloaded, out, concept["on_screen_hook"], commentary, footer, 15.0, require_text=True)
     info["source"] = source
+    info["copy_mode"] = copy_mode
+    info["frames_sent"] = len(frames)
     return out, concept, info
 
 
@@ -867,10 +935,21 @@ def record_history(state: dict, post: dict) -> None:
     })
 
 
+X_QUOTA_TOKENS = ("quota", "top up", "wallet", "24 hour", "24-hour", "tweet limit", "daily tweet", "byok")
+
+
+def is_x_quota_error(text: Any, platforms: Optional[List[str]] = None) -> bool:
+    """PostProxy's real X error (seen 2026-09-21): "twitter: 24 hour Twitter quota exceeded.
+    Top up your wallet to keep posting or consider using BYOK." Shared with scripts/railway_boot_hotfix.py."""
+    low = str(text or "").lower()
+    xish = "twitter" in low or low.startswith("x:") or any(str(p).lower() in {"twitter", "x"} for p in (platforms or []))
+    return xish and any(tok in low for tok in X_QUOTA_TOKENS)
+
+
 def inspect_publish_errors(state: dict, post: dict, errors: List[str]) -> None:
     for err in errors or []:
         low = str(err).lower()
-        if ("twitter" in low or low.startswith("x:")) and ("quota" in low or "top up" in low or "wallet" in low):
+        if is_x_quota_error(err):
             state["x_quota_until"] = (_utcnow() + timedelta(hours=24)).isoformat()
             add_alert("x_quota_exhausted",
                       "PostProxy reports the 24-hour X/Twitter quota is used up (PostProxy wallet top-up needed). "

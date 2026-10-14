@@ -527,8 +527,12 @@ def apply(force: bool = False) -> None:
             return orig_publish(post, settings, platforms)
         except ValueError as exc:
             err = str(exc).lower()
-            quota = any(token in err for token in ("24-hour", "24 hour", "tweet limit", "daily tweet", "rate limit"))
             twitterish = any(str(p).lower() in {"twitter", "x"} for p in (platforms or []))
+            try:
+                from growth_v2 import is_x_quota_error
+                quota = is_x_quota_error(err, platforms)
+            except Exception:
+                quota = any(token in err for token in ("24-hour", "24 hour", "tweet limit", "daily tweet", "quota", "wallet"))
             if quota and twitterish:
                 remaining = [p for p in platforms if str(p).lower() not in {"twitter", "x"}]
                 if remaining:

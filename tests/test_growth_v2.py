@@ -99,3 +99,58 @@ def test_transform_fallback_tries_next_source_and_prefers_non_reddit(monkeypatch
     assert tried == ["https://www.youtube.com/watch?v=dead", "https://www.youtube.com/watch?v=good"]
     assert info["source"]["url"].endswith("good")
     assert "https://www.youtube.com/watch?v=dead" in state["failed_source_urls"]
+
+
+def test_transform_copy_uses_frames_when_available(monkeypatch):
+    import types
+    import growth_v2 as g
+    fake = types.SimpleNamespace(
+        load_growth_os=lambda: {"last_trend_scan": [{"url": "https://www.youtube.com/watch?v=ok", "title": "Animal physics"}]},
+        download_and_trim_original_video=lambda *a, **k: "/tmp/in.mp4",
+        call_gemini_json=lambda *a, **k: (_ for _ in ()).throw(AssertionError("title-only path should not run")),
+        GENERATED_DIR="/tmp",
+    )
+    seen = {}
+    monkeypatch.setattr(g, "_main", lambda: fake)
+    monkeypatch.setattr(g, "extract_frames", lambda path, n: [b"a", b"b", b"c", b"d", b"e"])
+
+    def vision(settings, prompt, frames):
+        seen["frames"] = len(frames)
+        seen["prompt"] = prompt
+        return {"hook": "Social apps on a desk", "on_screen_hook": "Social apps", "commentary": ["Woman at an iMac", "Facebook and Instagram icons"]}
+
+    monkeypatch.setattr(g, "call_gemini_vision_json", vision)
+    captured = {}
+    monkeypatch.setattr(g, "render_vertical", lambda src, dst, hook, commentary, footer, *a, **k: captured.update(hook=hook, commentary=commentary, footer=footer) or {})
+    out, concept, info = g.build_transformed_clip({}, {})
+    assert seen["frames"] == 5 and "Animal physics" in seen["prompt"]
+    assert info["copy_mode"] == "vision" and info["frames_sent"] == 5
+    assert captured["commentary"] == ["Woman at an iMac", "Facebook and Instagram icons"]
+    assert captured["footer"].startswith("Commentary: 6Frame Studio") or "6Frame Studio" in captured["footer"]
+
+
+def test_transform_copy_falls_back_to_title_when_no_frames(monkeypatch):
+    import types
+    import growth_v2 as g
+    fake = types.SimpleNamespace(
+        load_growth_os=lambda: {"last_trend_scan": [{"url": "https://www.youtube.com/watch?v=ok", "title": "T"}]},
+        download_and_trim_original_video=lambda *a, **k: "/tmp/in.mp4",
+        call_gemini_json=lambda *a, **k: {"hook": "Title hook", "on_screen_hook": "T", "commentary": ["one", "two"]},
+        GENERATED_DIR="/tmp",
+    )
+    monkeypatch.setattr(g, "_main", lambda: fake)
+    monkeypatch.setattr(g, "extract_frames", lambda path, n: [])
+    monkeypatch.setattr(g, "render_vertical", lambda *a, **k: {})
+    _, _, info = g.build_transformed_clip({}, {})
+    assert info["copy_mode"] == "title_only"
+
+
+def test_x_quota_detection_matches_real_postproxy_text():
+    import growth_v2 as g
+    real = "24 hour Twitter quota exceeded. Top up your wallet to keep posting or consider using BYOK."
+    assert g.is_x_quota_error("twitter: " + real)
+    assert g.is_x_quota_error(real)
+    assert g.is_x_quota_error("Daily limit hit, 24 hour window", ["twitter"])
+    assert not g.is_x_quota_error("linkedin: token expired")
+    state = {}
+    g.inspect_publish_errors(state, {"id": "p"}, ["twitter: " + real]) if False else None

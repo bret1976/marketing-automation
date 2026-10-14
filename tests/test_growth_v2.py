@@ -68,3 +68,34 @@ def test_youtube_bot_wall_is_not_reported_as_unavailable():
     gone = g.parse_youtube_html('"playabilityStatus":{"status":"ERROR","reason":"Video unavailable"}')
     assert gone["available"] is False
     assert g.health()["media_tools"]["ffmpeg"] is True
+
+
+def test_transform_fallback_tries_next_source_and_prefers_non_reddit(monkeypatch):
+    import types
+    import growth_v2 as g
+    trends = [
+        {"url": "https://www.reddit.com/r/aivideo/comments/aaa/x/", "title": "r1"},
+        {"url": "https://www.youtube.com/watch?v=dead", "title": "y1"},
+        {"url": "https://www.youtube.com/watch?v=good", "title": "y2"},
+    ]
+    tried = []
+
+    def dl(url, title, *a, **k):
+        tried.append(url)
+        if "good" not in url:
+            raise RuntimeError("blocked")
+        return "/tmp/in.mp4"
+
+    fake = types.SimpleNamespace(
+        load_growth_os=lambda: {"last_trend_scan": trends},
+        download_and_trim_original_video=dl,
+        call_gemini_json=lambda *a, **k: {"hook": "Why this works", "on_screen_hook": "Why", "commentary": ["Line one fact", "Line two fact"]},
+        GENERATED_DIR="/tmp",
+    )
+    monkeypatch.setattr(g, "_main", lambda: fake)
+    monkeypatch.setattr(g, "render_vertical", lambda *a, **k: {"width": 1080, "height": 1920})
+    state = {}
+    out, concept, info = g.build_transformed_clip({}, state)
+    assert tried == ["https://www.youtube.com/watch?v=dead", "https://www.youtube.com/watch?v=good"]
+    assert info["source"]["url"].endswith("good")
+    assert "https://www.youtube.com/watch?v=dead" in state["failed_source_urls"]

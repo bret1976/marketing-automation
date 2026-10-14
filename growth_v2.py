@@ -508,12 +508,73 @@ def sanitize_concept(concept: Any) -> dict:
     }
 
 
+TOPIC_DEDUPE_DAYS = 14
+_TOPIC_STOP = {"the", "a", "an", "of", "and", "or", "to", "in", "on", "at", "for", "with", "by", "from", "how", "why",
+               "what", "this", "that", "its", "it", "is", "are", "into", "vs", "versus", "explosion", "explosive",
+               "physics", "science", "engineering", "slow", "motion", "macro", "shot", "video", "ai", "test", "shatter",
+               "shattering", "destroy", "destroys", "breaking", "break", "experiment", "real", "extreme"}
+
+
+def topic_tokens(text: Any) -> set:
+    """Loose topic fingerprint: lowercase words, possessives/plurals folded, generic words dropped.
+    "Prince Rupert's Drop Shatter" -> {"prince", "rupert", "drop"}."""
+    words = re.findall(r"[a-z0-9]+", str(text or "").lower().replace("'s ", " ").replace("\u2019s ", " "))
+    out = set()
+    for w in words:
+        if w in _TOPIC_STOP or len(w) < 3:
+            continue
+        if len(w) > 4 and w.endswith("s") and not w.endswith("ss"):
+            w = w[:-1]
+        out.add(w)
+    return out
+
+
+def topics_similar(a: Any, b: Any) -> bool:
+    ta, tb = topic_tokens(a), topic_tokens(b)
+    if not ta or not tb:
+        return False
+    common = ta & tb
+    return len(common) >= 2 or (len(common) >= 1 and len(common) / min(len(ta), len(tb)) >= 0.67)
+
+
+def recent_post_topics(state: dict, days: int = TOPIC_DEDUPE_DAYS) -> List[str]:
+    """Topics from the last `days` of growth history AND scheduled/published posts (incl. manual ones)."""
+    out: List[str] = []
+    for h in _recent_history(state, days):
+        out += [h.get("topic") or "", h.get("topic_key") or ""]
+    try:
+        posts = _main().load_scheduled_posts()
+    except Exception:
+        posts = []
+    cutoff = _utcnow() - timedelta(days=days)
+    for p in posts or []:
+        when = _parse_dt(p.get("posted_at") or p.get("scheduled_time") or p.get("created_at"))
+        if not when or when < cutoff:
+            continue
+        c = p.get("concept") or {}
+        out += [c.get("topic") or "", c.get("topic_key") or "", p.get("hook") or "", c.get("on_screen_hook") or ""]
+    return [t for t in out if t and topic_tokens(t)]
+
+
+def is_recent_topic(concept: dict, recent: List[str]) -> Optional[str]:
+    for field in ("topic", "topic_key"):
+        val = concept.get(field)
+        for r in recent:
+            if topics_similar(val, r):
+                return r
+    return None
+
+
 def plan_concept(settings: dict, state: dict, extra_avoid: Optional[List[dict]] = None) -> dict:
     """extra_avoid: concepts already tried (and failed) in this run; never reuse their topic."""
     m = _main()
     avoid_keys = used_keys(state) | {concept_key(c) for c in (extra_avoid or []) if c}
     recent_topics = [h.get("topic") for h in _recent_history(state, REPEAT_WINDOW_DAYS) if h.get("topic")][-30:]
     recent_topics += [c.get("topic") for c in (extra_avoid or []) if c and c.get("topic")]
+    recent_fuzzy = recent_post_topics(state) + [c.get("topic") or "" for c in (extra_avoid or []) if c]
+    for t in recent_fuzzy:
+        if t and t not in recent_topics and len(recent_topics) < 60:
+            recent_topics.append(t)
     inspiration = ""
     try:
         titles = [t.get("title") for t in (m.load_growth_os().get("last_trend_scan") or []) if t.get("title")][:6]
@@ -522,7 +583,7 @@ def plan_concept(settings: dict, state: dict, extra_avoid: Optional[List[dict]] 
     except Exception:
         pass
     concept: dict = {}
-    for _ in range(2):
+    for _ in range(3):
         try:
             result = m.call_gemini_json(settings, CONCEPT_PROMPT.format(avoid=", ".join(recent_topics) or "none yet", inspiration=inspiration), {}, use_search=False)
             if isinstance(result, list) and result:
@@ -531,14 +592,17 @@ def plan_concept(settings: dict, state: dict, extra_avoid: Optional[List[dict]] 
         except Exception as exc:
             logger.warning("%s concept generation failed: %s", MARKER, exc)
             concept = {}
-        if concept and concept_key(concept) not in avoid_keys:
+        dup = is_recent_topic(concept, recent_fuzzy) if concept else None
+        if dup:
+            logger.info("%s concept %r rejected: too close to recent topic %r", MARKER, concept.get("topic"), dup)
+        if concept and concept_key(concept) not in avoid_keys and not dup:
             concept["concept_source"] = "gemini"
             return concept
         if concept:
             recent_topics.append(concept.get("topic") or "")
     for candidate in FALLBACK_CONCEPTS:
         c = sanitize_concept(dict(candidate))
-        if concept_key(c) not in avoid_keys:
+        if concept_key(c) not in avoid_keys and not is_recent_topic(c, recent_fuzzy):
             c["concept_source"] = "curated_fallback"
             return c
     raise RuntimeError("No unused concept available (all curated topics used in the last 90 days and Gemini unavailable).")

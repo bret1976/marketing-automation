@@ -47,7 +47,7 @@ from typing import Any, Dict, List, Optional, Tuple
 logger = logging.getLogger("growth_v2")
 
 MARKER = "GROWTH_V2"
-VERSION = "2026-10-14.1"
+VERSION = "2026-10-14.2"
 LEGACY_MODULES = {"cockpit_overlay", "cockpit_v9", "cockpit_v10", "cockpit_v10_isolate"}
 MAX_SLOT_ATTEMPTS_DEFAULT = 2
 SLOT_RETRY_SECONDS = 600
@@ -1096,6 +1096,10 @@ def parse_youtube_html(html: str) -> Optional[dict]:
     if not status and not views:
         return None
     st = status.group(1) if status else "OK"
+    reason = status.group(2) if status else ""
+    if st == "LOGIN_REQUIRED" or "not a bot" in (reason or "").lower():
+        # YouTube bot wall on the server IP: says nothing about the video.
+        return None
     return {"available": st == "OK", "status": st, "reason": status.group(2) if status else None,
             "views": int(views.group(1)) if views else None, "likes": int(likes.group(1)) if likes else None}
 
@@ -1323,6 +1327,24 @@ def status_payload(settings: Optional[dict] = None) -> dict:
     }
 
 
+def media_tools() -> dict:
+    import shutil as _sh
+    ff = _bin("ffmpeg")
+    info = {"ffmpeg": bool(_sh.which(ff) or os.path.exists(ff)), "font": bool(_font()), "drawtext": None}
+    try:
+        res = subprocess.run([ff, "-hide_banner", "-filters"], capture_output=True, text=True, timeout=10)
+        info["drawtext"] = " drawtext " in res.stdout
+    except Exception:
+        pass
+    return info
+
+
+_MEDIA_TOOLS: Optional[dict] = None
+
+
 def health() -> dict:
+    global _MEDIA_TOOLS
+    if _MEDIA_TOOLS is None:
+        _MEDIA_TOOLS = media_tools()
     return {"marker": MARKER, "version": VERSION, "enabled": enabled(), "paused": paused(),
-            "legacy_skipped": skipped_legacy_modules()}
+            "legacy_skipped": skipped_legacy_modules(), "media_tools": _MEDIA_TOOLS}

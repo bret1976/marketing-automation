@@ -697,6 +697,49 @@ def _textfile(text: str, width: int) -> str:
 AUDIO_FADE_SECONDS = 0.2
 
 
+OPENING_SOUND_MIN_DB = -38.0
+
+
+def mean_volume_db(path: str, start: float = 0.0, length: float = 1.0) -> Optional[float]:
+    try:
+        res = subprocess.run([_bin("ffmpeg"), "-hide_banner", "-nostats", "-ss", f"{start:.2f}", "-t", f"{length:.2f}", "-i", path,
+                              "-vn", "-af", "volumedetect", "-f", "null", "-"], capture_output=True, text=True, timeout=30)
+        found = re.search(r"mean_volume:\s*(-?[\d.]+|-inf)", res.stderr or "")
+        if not found:
+            return None
+        return -120.0 if found.group(1) == "-inf" else float(found.group(1))
+    except Exception:
+        return None
+
+
+def ensure_opening_sound(src: str) -> Tuple[str, dict]:
+    """Veo often opens near-silent even when asked for a sound effect. If the first second is quieter
+    than OPENING_SOUND_MIN_DB, mix in a short synthesized whoosh/impact (filtered noise, ~0.45s) at t=0.
+    Returns (path, info). No external assets."""
+    before = mean_volume_db(src, 0.0, 1.0)
+    info = {"opening_db_before": before, "sfx_added": False}
+    if before is not None and before >= OPENING_SOUND_MIN_DB:
+        info["opening_db_after"] = before
+        return src, info
+    dst = os.path.splitext(src)[0] + "_sfx.mp4"
+    sfx = ("anoisesrc=color=pink:amplitude=0.9:duration=0.45:sample_rate=48000,"
+           "highpass=f=180,lowpass=f=6000,afade=t=in:d=0.03,afade=t=out:st=0.12:d=0.33,volume=1.6,"
+           "aformat=channel_layouts=stereo[sfx]")
+    has_audio = bool(probe_video(src).get("has_audio"))
+    if has_audio:
+        filt = f"{sfx};[0:a]aformat=sample_rates=48000:channel_layouts=stereo[orig];[orig][sfx]amix=inputs=2:duration=first:normalize=0[a]"
+        cmd = [_bin("ffmpeg"), "-y", "-i", src, "-filter_complex", filt, "-map", "0:v", "-map", "[a]", "-c:v", "copy", "-c:a", "aac", "-b:a", "160k", dst]
+    else:
+        filt = f"{sfx};[sfx]apad[a]"
+        cmd = [_bin("ffmpeg"), "-y", "-i", src, "-filter_complex", filt, "-map", "0:v", "-map", "[a]", "-shortest", "-c:v", "copy", "-c:a", "aac", "-b:a", "160k", dst]
+    res = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    if res.returncode != 0 or not os.path.exists(dst):
+        logger.warning("%s opening sfx mix failed: %s", MARKER, (res.stderr or "")[-300:])
+        return src, info
+    info.update({"sfx_added": True, "opening_db_after": mean_volume_db(dst, 0.0, 1.0)})
+    return dst, info
+
+
 def render_vertical(src: str, dst: str, hook: str, commentary: Optional[List[str]] = None,
                     footer: str = "", max_seconds: float = 15.0, require_text: bool = False) -> dict:
     """1080x1920 blur-pad reframe + hook text for the first 2.8s, optional timed
@@ -1014,12 +1057,17 @@ The post will be published with this on-screen hook and caption:
   lines: {lines}
 Judge strictly from what is VISIBLE. A caption claim fails if the frames do not show it (e.g. caption says
 the object shatters but it stays intact; caption mentions a hammer that never appears).
+Numbers and measurements (temperatures, speeds, pressures) are factual context, not visual claims: do NOT list them
+as mismatches just because a camera cannot measure them. Only flag a number if the frames contradict the event it
+describes (e.g. "melts at 3,422°C" but nothing melts).
 Return ONLY JSON:
   visible_summary: one sentence describing what the frames actually show,
   matches: true only if every visual claim in on_screen_hook, hook and lines is shown,
   mismatches: array of short strings (claims not shown),
   rewrite: if matches is false, a corrected caption that describes ONLY what is shown, still factual and
-           curiosity-driven: {{"on_screen_hook": max 6 words, "hook": 8-10 words max 60 chars no emoji/hashtags,
+           curiosity-driven: {{"on_screen_hook": max 6 words AND must contain one factually correct number in digits
+           that fits what is shown (keep the original number if the frames don't contradict it),
+           "hook": 8-10 words max 60 chars no emoji/hashtags,
            "lines": 1-2 lines under 100 chars}}; otherwise null."""
 
 
@@ -1063,9 +1111,15 @@ def ensure_caption_matches(raw_path: str, concept: dict, settings: dict) -> Tupl
     first = verify_clip_matches(raw_path, concept, settings)
     if first["matches"]:
         return concept, {"caption_check": "match", "visible_summary": first.get("visible_summary")}
+    if isinstance(first.get("rewrite"), dict) and not has_number(first["rewrite"].get("on_screen_hook")) and has_number(concept.get("on_screen_hook")):
+        num = re.search(r"[\d][\d,.]*\s*(?:°\s*[CF]|%|[a-zA-Z/]+)?", concept["on_screen_hook"])
+        if num:
+            first["rewrite"]["on_screen_hook"] = clamp_words(f"{num.group(0).strip()}: {first['rewrite'].get('on_screen_hook') or ''}".strip(": "), 40)
     fixed = apply_caption_rewrite(concept, first.get("rewrite"))
     if not fixed:
         raise RuntimeError(f"caption mismatch, no usable rewrite: {first.get('mismatches')} | shown: {first.get('visible_summary')}")
+    if not has_number(fixed.get("on_screen_hook")):
+        raise RuntimeError("caption rewrite dropped the number from the on-screen hook")
     second = verify_clip_matches(raw_path, fixed, settings)
     if not second["matches"]:
         raise RuntimeError(f"caption mismatch after rewrite: {second.get('mismatches')} | shown: {second.get('visible_summary')}")
@@ -1090,6 +1144,8 @@ async def produce(settings: dict, state: dict) -> Tuple[str, dict, dict]:
             raw_path, gen_info = await loop.run_in_executor(None, generate_original_clip, concept, settings, engine)
             concept, check = await loop.run_in_executor(None, ensure_caption_matches, raw_path, concept, settings)
             gen_info.update(check)
+            raw_path, sound = await loop.run_in_executor(None, ensure_opening_sound, raw_path)
+            gen_info.update(sound)
             out = os.path.join(_main().GENERATED_DIR, f"g2_original_{uuid.uuid4().hex}.mp4")
             info = await loop.run_in_executor(None, render_vertical, raw_path, out, concept["on_screen_hook"], None, "", 15.0, False)
             info.update(gen_info)

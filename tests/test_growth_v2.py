@@ -217,7 +217,7 @@ def test_all_attempts_fail_walks_lite_then_fast_and_never_reposts(monkeypatch, t
 
 
 def _concept(topic="drop"):
-    return {"topic": topic, "topic_key": topic, "veo_prompt": "p", "on_screen_hook": "Glass explodes",
+    return {"topic": topic, "topic_key": topic, "veo_prompt": "p", "on_screen_hook": "3,000 mph glass crack",
             "hook": "Snapping its tail destroys this glass drop", "lines": ["The bulb survives a hammer."]}
 
 
@@ -396,3 +396,34 @@ def test_followers_and_post_stats_parsing(monkeypatch):
     assert g.snapshot_followers({}, state) is None  # throttled
     st = g.fetch_post_stats({}, ["pp1"])
     assert st["pp1"]["tiktok"]["impressions"] == 306 and st["pp1"]["tiktok"]["comments"] == 1
+
+
+def test_opening_sound_added_when_silent(tmp_path):
+    import subprocess
+    import pytest
+    import growth_v2 as g
+    if not _ffmpeg():
+        pytest.skip("ffmpeg not installed")
+    src = str(tmp_path / "quiet.mp4")
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=size=720x1280:rate=24:duration=3",
+                    "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo", "-t", "3", "-c:v", "libx264", "-c:a", "aac", src], check=True)
+    out, info = g.ensure_opening_sound(src)
+    assert info["sfx_added"] and out != src
+    assert info["opening_db_after"] >= g.OPENING_SOUND_MIN_DB
+    assert abs(g.probe_video(out)["duration"] - 3.0) < 0.1
+
+
+def test_rewrite_keeps_number(monkeypatch):
+    import growth_v2 as g
+    calls = []
+
+    def verify(raw, concept, settings):
+        calls.append(concept["on_screen_hook"])
+        if len(calls) == 1:
+            return {"matches": False, "mismatches": ["x"], "rewrite": {"on_screen_hook": "Heat without contact", "hook": "Watch metal glow without any flame", "lines": ["Coils heat it."]}}
+        return {"matches": True}
+
+    monkeypatch.setattr(g, "verify_clip_matches", verify)
+    c = dict(_concept(), on_screen_hook="2,000°C without contact")
+    fixed, info = g.ensure_caption_matches("/x.mp4", c, {})
+    assert g.has_number(fixed["on_screen_hook"]) and fixed["on_screen_hook"].startswith("2,000°C")

@@ -315,16 +315,45 @@ def test_veo_vertical_config():
     assert orchestrator.gemini_veo_config_kwargs("weird")["aspect_ratio"] == "16:9"
 
 
-def test_captions_have_series_and_question_but_not_on_reposts():
+def test_captions_title_line_and_question_no_series():
     import growth_v2 as g
     c = {"hook": "This drop cracks at 3,000 mph", "lines": ["Stress is locked in by fast cooling."], "hashtags": ["#Physics"],
-         "comment_question": "Would you hold one while it snaps", "episode": 4}
+         "comment_question": "Would you hold one while it snaps", "episode": 4, "title_line": "Glass That Explodes"}
     caps = g.build_captions(c)
-    assert caps["tiktok"].startswith("Engineering at the Extreme #4\nThis drop cracks at 3,000 mph")
+    assert set(caps) == {"tiktok", "youtube", "instagram", "linkedin", "twitter"}
+    for text in caps.values():
+        assert text.startswith("Glass That Explodes")  # one shared top line per run
+        assert "Engineering at the Extreme" not in text and "#4" not in text
+    assert caps["tiktok"].startswith("Glass That Explodes\nThis drop cracks at 3,000 mph")
     assert "Would you hold one while it snaps?" in caps["tiktok"] and "Would you hold one" in caps["linkedin"]
     assert len(caps["twitter"]) <= 280
     rep = g.build_captions(c, {"creator": "someone", "url": "u"})
-    assert "Engineering at the Extreme" not in rep["tiktok"] and "?" not in rep["tiktok"].split("\n\n")[0][-1:]
+    assert "Glass That Explodes" not in rep["tiktok"] and "?" not in rep["tiktok"].split("\n\n")[0][-1:]
+    assert not hasattr(g, "SERIES_NAME") and not hasattr(g, "next_episode")
+
+
+def test_title_clean_and_repeat_check():
+    import growth_v2 as g
+    assert g.clean_title("Episode 4: Molten Rail Magic #4") == "Molten Rail Magic"
+    assert g.clean_title("Engineering at the Extreme #7") == ""
+    assert g.title_repeats("Molten rail magic!", ["molten Rail Magic"])
+    assert g.title_repeats("The Molten Rail Magic", ["Molten Rail Magic"])  # 3/3 overlap
+    assert g.title_repeats("Glass That Fights Back", ["Molten Rail Magic"]) is None
+    assert g.title_repeats("", []) == "(empty)"
+
+
+def test_plan_concept_rejects_repeated_title(monkeypatch):
+    import types
+    import growth_v2 as g
+    replies = iter([
+        {"topic": "Liquid Metal Porcupine", "topic_key": "ferrofluid spikes", "veo_prompt": "p", "hook": "Spikes at 1 tesla", "on_screen_hook": "1 tesla spikes", "title_line": "Liquid Metal Porcupine"},
+        {"topic": "Tungsten", "topic_key": "tungsten melting point", "veo_prompt": "p", "hook": "Tungsten melts at 3,422C", "on_screen_hook": "Melts at 3,422°C", "title_line": "The Metal That Refuses"},
+    ])
+    fake = types.SimpleNamespace(load_scheduled_posts=lambda: [{"concept": {"title_line": "Liquid metal porcupine"}}],
+                                 load_growth_os=lambda: {}, call_gemini_json=lambda *a, **k: next(replies))
+    monkeypatch.setattr(g, "_main", lambda: fake)
+    c = g.plan_concept({}, {"history": []})
+    assert c["title_line"] == "The Metal That Refuses"
 
 
 def test_number_required_in_on_screen_hook(monkeypatch):

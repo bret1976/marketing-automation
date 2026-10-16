@@ -557,7 +557,7 @@ def image_data_uri(path: str) -> str:
 
 
 def seedance_generate(settings: dict, prompt: str, seconds: int, dest: str, image: Optional[str] = None,
-                      poll_s: float = 5.0, timeout_s: float = 600.0) -> dict:
+                      poll_s: float = 5.0, timeout_s: float = 1500.0) -> dict:
     """image: path to a start frame -> image-to-video (keeps the same subject); else text-to-video."""
     key = settings.get("fal_api_key") or os.environ.get("FAL_KEY") or os.environ.get("FAL_API_KEY")
     if not key:
@@ -574,6 +574,7 @@ def seedance_generate(settings: dict, prompt: str, seconds: int, dest: str, imag
         raise RuntimeError(f"Seedance submit HTTP {r.status_code}: {r.text[:300]}")
     sub = r.json()
     status_url, result_url = sub["status_url"], sub["response_url"]
+    logger.info("%s fal request %s submitted (%s)", MARKER, sub.get("request_id"), model)
     t0 = time.time()
     while True:
         st = requests.get(status_url, headers=hdr, timeout=30)
@@ -583,7 +584,8 @@ def seedance_generate(settings: dict, prompt: str, seconds: int, dest: str, imag
         if status in {"FAILED", "ERROR", "CANCELLED"}:
             raise RuntimeError(f"Seedance failed: {st.text[:300]}")
         if time.time() - t0 > timeout_s:
-            raise RuntimeError("Seedance timed out")
+            # The job keeps running (and is billed) on fal; keep the id so the result can be fetched later.
+            raise RuntimeError(f"Seedance timed out after {int(timeout_s)}s (fal request {sub.get('request_id')} may still complete and bill)")
         time.sleep(poll_s)
     res = requests.get(result_url, headers=hdr, timeout=60)
     if res.status_code != 200:
@@ -651,7 +653,8 @@ def generate_shot(shot: dict, settings: dict, workdir: str, ledger: CostLedger,
             raise
         except Exception as exc:
             # Failed/filtered generations are normally not billed; record $0 but keep the error.
-            ledger.charge(f"shot{shot['index']}:{engine}", 0.0, ok=False, attempt=attempt + 1, error=str(exc)[:200])
+            billed_anyway = est if "timed out" in str(exc) else 0.0  # timed-out jobs still finish and bill
+            ledger.charge(f"shot{shot['index']}:{engine}", billed_anyway, ok=False, attempt=attempt + 1, error=str(exc)[:200])
             errors.append(f"{engine} attempt {attempt + 1}: {exc}")
             logger.warning("%s shot %s %s attempt %s failed: %s", MARKER, shot["index"], engine, attempt + 1, exc)
             if attempt < retries:

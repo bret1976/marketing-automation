@@ -1258,7 +1258,9 @@ def produce_stitched(settings: dict, state: dict) -> Tuple[str, dict, dict]:
     Never falls back to a downloaded clip; per-shot retries and the cost cap live in the module."""
     recent = [t for t in recent_post_topics(state) if t][-30:]
     titles = past_titles(state)
-    out, plan, info = stitched_shorts.produce_short(settings, _main().GENERATED_DIR, recent, titles)
+    # run records live in STATE_DIR (not the public static dir); a stopped slot can be resumed by run_id
+    out, plan, info = stitched_shorts.produce_short(settings, _main().GENERATED_DIR, recent, titles,
+                                                    runs_dir=os.path.join(_state_dir(), "stitched_runs"))
     caps = info.get("platform_captions") or {}
     concept = {
         "topic": plan["topic"], "topic_key": plan.get("topic_key") or plan["topic"].lower(),

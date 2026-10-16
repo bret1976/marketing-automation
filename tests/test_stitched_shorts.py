@@ -274,3 +274,79 @@ def test_baked_in_letterbox_is_removed(tmp_path):
     ss.normalize_shot(src, dst, 2, False)
     assert ss.detect_letterbox(dst) is None
     assert (ss.probe(dst)["width"], ss.probe(dst)["height"]) == (1080, 1920)
+
+
+def _fake_video(sec, dest, src="testsrc2"):
+    subprocess.run(["ffmpeg", "-y", "-f", "lavfi", "-i", f"{src}=s=720x1280:r=24:d={sec}", "-c:v", "libx264", "-preset", "ultrafast", dest], check=True, capture_output=True)
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg missing")
+def test_plan_saved_immediately_and_resume_reuses_everything(tmp_path, monkeypatch):
+    import json as _json
+    monkeypatch.setenv("SHORTS_TEST_MODE", "1")
+    llm_calls, gen_calls = [], []
+
+    def llm(s, p):
+        llm_calls.append(1)
+        return _plan()
+
+    def gen_fail_on_3(settings, prompt, sec, dest, **kw):
+        gen_calls.append(("first", sec))
+        if len(gen_calls) == 3:
+            raise RuntimeError("provider down")
+        if kw.get("on_submit"):
+            kw["on_submit"](f"req-{len(gen_calls)}")
+        _fake_video(sec, dest)
+        return {"model": "m", "billed_seconds": sec, "request_id": f"req-{len(gen_calls)}"}
+    gens = {"veo_fast": gen_fail_on_3, "seedance_fast": gen_fail_on_3, "veo_lite": gen_fail_on_3}
+    st = {"shorts_forced_durations": [4, 5, 5, 5]}
+    runs = str(tmp_path / "runs")
+    with pytest.raises(RuntimeError):
+        ss.produce_short(st, str(tmp_path), llm=llm, generators=gens, sleep=lambda s: None, run_id="r1", runs_dir=runs)
+    saved = _json.load(open(tmp_path / "runs" / "r1" / "run.json"))
+    assert saved["plan"]["on_screen_hook"] and len(saved["plan"]["shots"]) == 4
+    assert set(saved["plan"]["draft_platform_captions"]) == {"youtube", "tiktok", "instagram", "linkedin"}
+    assert set(saved["shots"]) == {"1", "2"} and saved["shots"]["1"]["request_id"] == "req-1"
+    assert saved["status"] == "stopped"
+
+    resumed = []
+
+    def gen_ok(settings, prompt, sec, dest, **kw):
+        resumed.append(sec)
+        _fake_video(sec, dest)
+        return {"model": "m", "billed_seconds": sec, "request_id": f"new-{len(resumed)}"}
+    gens2 = {"veo_fast": gen_ok, "seedance_fast": gen_ok, "veo_lite": gen_ok}
+    out, plan, info = ss.produce_short(st, str(tmp_path), llm=llm, generators=gens2, sleep=lambda s: None, run_id="r1", runs_dir=runs)
+    assert len(llm_calls) == 1          # no second planning call
+    assert resumed == [5, 5]            # only shots 3 and 4 generated
+    final = _json.load(open(tmp_path / "runs" / "r1" / "run.json"))
+    assert final["status"] == "done" and final["resumed"] == 1 and os.path.exists(out)
+    assert info["cost_usd"] <= 0.75
+
+
+def test_timed_out_request_is_fetched_by_id_not_resubmitted(tmp_path, monkeypatch):
+    monkeypatch.setenv("SHORTS_TEST_MODE", "1")
+    state = ss.RunState(str(tmp_path), "r2")
+    calls = []
+
+    def timeout_gen(settings, prompt, sec, dest, **kw):
+        kw["on_submit"]("fal-123")
+        raise RuntimeError("Seedance timed out after 1500s")
+    shot = {"index": 2, "role": "broll", "seconds": 5, "prompt": "p"}
+    ledger = ss.CostLedger(0.75)
+    with pytest.raises(RuntimeError, match="rerun with run_id=r2"):
+        ss.generate_shot(shot, {}, state.dir, ledger, {"seedance_fast": timeout_gen}, sleep=lambda s: None, state=state)
+    assert state.pending(2)["request_id"] == "fal-123"
+    assert ledger.total == pytest.approx(ss.seedance_cost(5))  # counted as spent
+
+    def fetch(settings, prompt, sec, dest, **kw):
+        calls.append(kw.get("resume_id"))
+        open(dest, "wb").write(b"x")
+        return {"model": "m", "billed_seconds": sec, "request_id": kw.get("resume_id")}
+    state2 = ss.RunState(str(tmp_path), "r2")
+    ledger2 = ss.CostLedger(0.75)
+    ledger2.items = [dict(i) for i in state2.data["cost_items"]]
+    rec = ss.generate_shot(shot, {}, state2.dir, ledger2, {"seedance_fast": fetch}, sleep=lambda s: None, state=state2)
+    assert calls == ["fal-123"] and rec["resumed_from_request"]
+    assert ledger2.total == pytest.approx(ss.seedance_cost(5))  # not double counted
+    assert state2.done_shot(2) and not state2.pending(2)

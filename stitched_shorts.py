@@ -517,27 +517,34 @@ def _download(url: str, dest: str, headers: Optional[dict] = None) -> str:
 
 
 def veo_generate(settings: dict, prompt: str, seconds: int, dest: str, model: str = VEO_FAST_MODEL,
-                 poll_s: float = 8.0, timeout_s: float = 600.0) -> dict:
+                 poll_s: float = 8.0, timeout_s: float = 900.0, on_submit: Optional[Callable[[str], None]] = None,
+                 resume_id: Optional[str] = None, **_: Any) -> dict:
+    """resume_id: an operation name saved by an earlier run -> poll/download it instead of submitting again."""
     key = settings.get("gemini_api_key") or os.environ.get("GEMINI_API_KEY")
     if not key:
         raise RuntimeError("Missing Gemini API key")
     hdr = {"x-goog-api-key": key, "Content-Type": "application/json"}
     params = {"aspectRatio": "9:16", "resolution": "720p", "durationSeconds": int(seconds)}
     body = {"instances": [{"prompt": prompt}], "parameters": params}
-    r = requests.post(f"{GEMINI_BASE}/models/{model}:predictLongRunning", headers=hdr, json=body, timeout=60)
-    if r.status_code != 200 and "duration" in r.text.lower():
-        params.pop("durationSeconds")  # model refuses explicit duration -> 8s default, trimmed in the edit
+    if resume_id:
+        name = resume_id
+    else:
         r = requests.post(f"{GEMINI_BASE}/models/{model}:predictLongRunning", headers=hdr, json=body, timeout=60)
-    if r.status_code != 200:
-        raise RuntimeError(f"Veo submit HTTP {r.status_code}: {r.text[:300]}")
-    name = r.json()["name"]
+        if r.status_code != 200 and "duration" in r.text.lower():
+            params.pop("durationSeconds")  # model refuses explicit duration -> 8s default, trimmed in the edit
+            r = requests.post(f"{GEMINI_BASE}/models/{model}:predictLongRunning", headers=hdr, json=body, timeout=60)
+        if r.status_code != 200:
+            raise RuntimeError(f"Veo submit HTTP {r.status_code}: {r.text[:300]}")
+        name = r.json()["name"]
+        if on_submit:
+            on_submit(name)
     t0 = time.time()
     while True:
         op = requests.get(f"{GEMINI_BASE}/{name}", headers=hdr, timeout=60).json()
         if op.get("done"):
             break
         if time.time() - t0 > timeout_s:
-            raise RuntimeError("Veo timed out")
+            raise RuntimeError(f"Veo timed out (operation {name} may still complete and bill)")
         time.sleep(poll_s)
     if op.get("error"):
         raise RuntimeError(f"Veo error: {str(op['error'])[:300]}")
@@ -547,7 +554,7 @@ def veo_generate(settings: dict, prompt: str, seconds: int, dest: str, model: st
         raise RuntimeError(f"Veo returned no video (filtered?): {str(resp)[:300]}")
     uri = samples[0]["video"]["uri"]
     _download(uri, dest, headers={"x-goog-api-key": key})
-    return {"model": model, "billed_seconds": int(params.get("durationSeconds", 8))}
+    return {"model": model, "billed_seconds": int(params.get("durationSeconds", 8)), "request_id": name}
 
 
 def image_data_uri(path: str) -> str:
@@ -557,7 +564,8 @@ def image_data_uri(path: str) -> str:
 
 
 def seedance_generate(settings: dict, prompt: str, seconds: int, dest: str, image: Optional[str] = None,
-                      poll_s: float = 5.0, timeout_s: float = 1500.0) -> dict:
+                      poll_s: float = 5.0, timeout_s: float = 1500.0, on_submit: Optional[Callable[[str], None]] = None,
+                      resume_id: Optional[str] = None, **_: Any) -> dict:
     """image: path to a start frame -> image-to-video (keeps the same subject); else text-to-video."""
     key = settings.get("fal_api_key") or os.environ.get("FAL_KEY") or os.environ.get("FAL_API_KEY")
     if not key:
@@ -569,10 +577,17 @@ def seedance_generate(settings: dict, prompt: str, seconds: int, dest: str, imag
     if image:
         model = SEEDANCE_I2V_MODEL
         payload["image_url"] = image_data_uri(image)
-    r = requests.post(f"https://queue.fal.run/{model}", headers=hdr, json=payload, timeout=60)
-    if r.status_code not in (200, 201, 202):
-        raise RuntimeError(f"Seedance submit HTTP {r.status_code}: {r.text[:300]}")
-    sub = r.json()
+    if resume_id:
+        # fetch an earlier (possibly timed-out) request by id - never resubmit
+        base = f"https://queue.fal.run/fal-ai/bytedance/requests/{resume_id}"
+        sub = {"request_id": resume_id, "status_url": f"{base}/status", "response_url": base}
+    else:
+        r = requests.post(f"https://queue.fal.run/{model}", headers=hdr, json=payload, timeout=60)
+        if r.status_code not in (200, 201, 202):
+            raise RuntimeError(f"Seedance submit HTTP {r.status_code}: {r.text[:300]}")
+        sub = r.json()
+        if on_submit:
+            on_submit(sub.get("request_id"))
     status_url, result_url = sub["status_url"], sub["response_url"]
     logger.info("%s fal request %s submitted (%s)", MARKER, sub.get("request_id"), model)
     t0 = time.time()
@@ -591,12 +606,12 @@ def seedance_generate(settings: dict, prompt: str, seconds: int, dest: str, imag
     if res.status_code != 200:
         raise RuntimeError(f"Seedance result HTTP {res.status_code}: {res.text[:300]}")
     _download(res.json()["video"]["url"], dest)
-    return {"model": model, "billed_seconds": int(seconds)}
+    return {"model": model, "billed_seconds": int(seconds), "request_id": sub.get("request_id")}
 
 
 GENERATORS: Dict[str, Callable[..., dict]] = {
-    "veo_fast": lambda s, p, sec, d, **kw: veo_generate(s, p, sec, d, VEO_FAST_MODEL),
-    "veo_lite": lambda s, p, sec, d, **kw: veo_generate(s, p, sec, d, VEO_LITE_MODEL),
+    "veo_fast": lambda s, p, sec, d, **kw: veo_generate(s, p, sec, d, VEO_FAST_MODEL, **kw),
+    "veo_lite": lambda s, p, sec, d, **kw: veo_generate(s, p, sec, d, VEO_LITE_MODEL, **kw),
     "seedance_fast": seedance_generate,
 }
 
@@ -614,6 +629,66 @@ def veo_seconds_for(seconds: float) -> int:
     return 4 if seconds <= 4 else (6 if seconds <= 6 else 8)
 
 
+class RunState:
+    """Durable per-run record: <runs_dir>/<run_id>/run.json (+ shot files next to it).
+    Written right after planning and after every shot submit/finish, so a stopped run loses nothing
+    and a rerun with the same run_id resumes (no new planning call, no regenerated shots)."""
+
+    def __init__(self, runs_dir: str, run_id: Optional[str] = None):
+        self.run_id = run_id or datetime.now().strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:6]
+        self.dir = os.path.join(runs_dir, self.run_id)
+        os.makedirs(self.dir, exist_ok=True)
+        self.path = os.path.join(self.dir, "run.json")
+        self.data: Dict[str, Any] = {"run_id": self.run_id, "created": datetime.now().isoformat(timespec="seconds"),
+                                     "plan": None, "shots": {}, "pending": {}, "cost_items": [], "status": "started"}
+        if os.path.exists(self.path):
+            with open(self.path) as fh:
+                self.data.update(json.load(fh))
+            self.data["resumed"] = int(self.data.get("resumed", 0)) + 1
+
+    def save(self) -> None:
+        tmp = self.path + ".tmp"
+        with open(tmp, "w") as fh:
+            json.dump(self.data, fh, indent=2, default=str)
+        os.replace(tmp, self.path)
+
+    @property
+    def plan(self) -> Optional[dict]:
+        return self.data.get("plan")
+
+    def set_plan(self, plan: dict) -> None:
+        self.data["plan"] = plan
+        self.data["plan_saved_at"] = datetime.now().isoformat(timespec="seconds")
+        self.save()
+
+    def done_shot(self, index: int) -> Optional[dict]:
+        rec = self.data["shots"].get(str(index))
+        return rec if rec and rec.get("path") and os.path.exists(rec["path"]) else None
+
+    def mark_pending(self, index: int, engine: str, request_id: str, est: float) -> None:
+        self.data["pending"][str(index)] = {"engine": engine, "request_id": request_id, "est_usd": est,
+                                            "submitted": datetime.now().isoformat(timespec="seconds")}
+        self.save()
+
+    def pending(self, index: int) -> Optional[dict]:
+        return self.data["pending"].get(str(index))
+
+    def mark_done(self, rec: dict) -> None:
+        self.data["shots"][str(rec["index"])] = {k: rec.get(k) for k in (
+            "index", "role", "seconds", "engine", "model", "request_id", "cost_usd", "path", "caption", "prompt",
+            "attempts", "chained_from_previous_frame", "errors", "resumed_from_request")}
+        self.data["pending"].pop(str(rec["index"]), None)
+        self.save()
+
+    def add_cost(self, item: dict) -> None:
+        self.data["cost_items"].append(item)
+        self.save()
+
+    def finish(self, **fields: Any) -> None:
+        self.data.update(fields)
+        self.save()
+
+
 def last_frame(video: str, dest: str) -> str:
     """Final frame as JPEG (start image for the next shot's image-to-video)."""
     _run([_ff(), "-y", "-sseof", "-0.15", "-i", video, "-frames:v", "1", "-q:v", "3", "-update", "1", dest])
@@ -624,7 +699,7 @@ def last_frame(video: str, dest: str) -> str:
 
 def generate_shot(shot: dict, settings: dict, workdir: str, ledger: CostLedger,
                   generators: Optional[Dict[str, Callable[..., dict]]] = None, sleep: Callable[[float], None] = time.sleep,
-                  start_image: Optional[str] = None) -> dict:
+                  start_image: Optional[str] = None, state: Optional[RunState] = None) -> dict:
     """Up to 1 + MAX_SHOT_RETRIES attempts per shot. Hook: Veo Fast only.
     B-roll: Seedance, falling back to Veo Lite once Seedance has failed."""
     gens = generators or GENERATORS
@@ -636,25 +711,50 @@ def generate_shot(shot: dict, settings: dict, workdir: str, ledger: CostLedger,
     if test_mode(settings):
         chain = chain[:1]  # no fallback to another paid model in test mode
     for attempt in range(1 + retries):
-        engine = chain[min(attempt, len(chain) - 1)] if shot["role"] == "broll" else chain[0]
+        pend = state.pending(shot["index"]) if state else None
+        if pend and attempt == 0:
+            engine = pend["engine"]  # resume: same engine, fetch by saved request id
+        else:
+            engine = chain[min(attempt, len(chain) - 1)] if shot["role"] == "broll" else chain[0]
+            pend = None
         secs = shot["seconds"] if engine == "seedance_fast" else veo_seconds_for(shot["seconds"])
         est = shot_cost(engine, secs)
-        ledger.reserve(f"shot{shot['index']}:{engine}", est)  # raises CostCapExceeded
+        if not pend:  # a pending request was already reserved/charged by the run that submitted it
+            ledger.reserve(f"shot{shot['index']}:{engine}", est)  # raises CostCapExceeded
         dest = os.path.join(workdir, f"shot{shot['index']}_a{attempt + 1}_{engine}.mp4")
         try:
-            kw = {"image": start_image} if (start_image and engine == "seedance_fast") else {}
+            kw: Dict[str, Any] = {"image": start_image} if (start_image and engine == "seedance_fast") else {}
+            if state:
+                kw["on_submit"] = lambda rid, _e=engine, _est=est: state.mark_pending(shot["index"], _e, rid, _est)
+            if pend:
+                kw["resume_id"] = pend["request_id"]
             info = gens[engine](settings, shot["prompt"], secs, dest, **kw)
             billed = shot_cost(engine, info.get("billed_seconds", secs))
-            ledger.charge(f"shot{shot['index']}:{engine}", billed, ok=True, attempt=attempt + 1, seconds=info.get("billed_seconds", secs))
-            return {**shot, "path": dest, "engine": engine, "model": info.get("model"), "attempts": attempt + 1,
-                    "chained_from_previous_frame": bool(kw),
-                    "cost_usd": billed, "errors": errors}
+            if pend:
+                billed = 0.0 if any(c.get("label") == f"shot{shot['index']}:{engine}" and c.get("pending") for c in ledger.items) else billed
+            ledger.charge(f"shot{shot['index']}:{engine}", billed, ok=True, attempt=attempt + 1, seconds=info.get("billed_seconds", secs),
+                          request_id=info.get("request_id"))
+            if state:
+                state.add_cost(ledger.items[-1])
+            rec = {**shot, "path": dest, "engine": engine, "model": info.get("model"), "attempts": attempt + 1,
+                   "request_id": info.get("request_id") or (pend or {}).get("request_id"),
+                   "resumed_from_request": bool(pend),
+                   "chained_from_previous_frame": bool(start_image and engine == "seedance_fast"),
+                   "cost_usd": billed, "errors": errors}
+            if state:
+                state.mark_done(rec)
+            return rec
         except CostCapExceeded:
             raise
         except Exception as exc:
             # Failed/filtered generations are normally not billed; record $0 but keep the error.
             billed_anyway = est if "timed out" in str(exc) else 0.0  # timed-out jobs still finish and bill
-            ledger.charge(f"shot{shot['index']}:{engine}", billed_anyway, ok=False, attempt=attempt + 1, error=str(exc)[:200])
+            ledger.charge(f"shot{shot['index']}:{engine}", billed_anyway, ok=False, attempt=attempt + 1, error=str(exc)[:200],
+                          pending=bool(billed_anyway))
+            if state:
+                state.add_cost(ledger.items[-1])
+            if billed_anyway and state and state.pending(shot["index"]):
+                raise RuntimeError(f"shot {shot['index']} timed out; rerun with run_id={state.run_id} to fetch it by request id") from exc
             errors.append(f"{engine} attempt {attempt + 1}: {exc}")
             logger.warning("%s shot %s %s attempt %s failed: %s", MARKER, shot["index"], engine, attempt + 1, exc)
             if attempt < retries:
@@ -877,10 +977,21 @@ def assemble(shots: List[dict], hook_text: str, out_path: str, workdir: str) -> 
 def produce_short(settings: dict, out_dir: str, avoid_topics: Optional[List[str]] = None,
                   avoid_titles: Optional[List[str]] = None, llm: Optional[Callable] = None,
                   generators: Optional[Dict[str, Callable[..., dict]]] = None,
-                  sleep: Callable[[float], None] = time.sleep, n_shots: int = 4) -> Tuple[str, dict, dict]:
-    """Returns (mp4_path, plan, info). info carries cost ledger, shot list, captions, probe."""
+                  sleep: Callable[[float], None] = time.sleep, n_shots: int = 4,
+                  run_id: Optional[str] = None, runs_dir: Optional[str] = None) -> Tuple[str, dict, dict]:
+    """Returns (mp4_path, plan, info). info carries cost ledger, shot list, captions, probe.
+    Durable: plan + every finished/submitted shot are saved under runs_dir/run_id; pass the same run_id to resume."""
     ledger = CostLedger(cost_cap(settings))
-    plan = plan_short(settings, avoid_topics, avoid_titles, llm=llm, n_shots=n_shots, ledger=ledger)
+    state = RunState(runs_dir or os.path.join(out_dir, "runs"), run_id)
+    for item in state.data.get("cost_items", []):  # spend from earlier attempts of this run counts toward the cap
+        ledger.items.append(dict(item))
+    if state.plan:
+        plan = state.plan
+        logger.info("%s resuming run %s with saved plan (no planning call)", MARKER, state.run_id)
+    else:
+        plan = plan_short(settings, avoid_topics, avoid_titles, llm=llm, n_shots=n_shots, ledger=ledger)
+        for item in ledger.items:
+            state.data["cost_items"].append(dict(item))
     forced = settings.get("shorts_forced_durations") or os.environ.get("SHORTS_FORCED_DURATIONS")
     if forced:
         # Exact per-shot seconds from the run config (e.g. "4,5,5,5"); the planner cannot lengthen them.
@@ -897,36 +1008,54 @@ def produce_short(settings: dict, out_dir: str, avoid_topics: Optional[List[str]
         for s in plan["shots"][1:]:
             s["seconds"] = 6
         plan["broll_engine"] = "veo_lite (no fal key)"
-    # pre-flight: planned path must fit the cap
-    lite_only = plan.get("broll_engine", "").startswith("veo_lite")
+    if not state.plan:
+        # durable right after planning: story, prompts, hook text, overlays, LLM per-platform copy
+        plan["draft_platform_captions"] = build_platform_captions(plan)
+        state.set_plan(plan)
+    # pre-flight: remaining (not finished, not already submitted) shots must fit the cap
+    lite_only = str(plan.get("broll_engine", "")).startswith("veo_lite")
     est = sum(shot_cost("veo_fast", veo_billed_seconds(s["seconds"])) if s["role"] == "hook"
               else (shot_cost("veo_lite", veo_seconds_for(s["seconds"])) if lite_only else shot_cost("seedance_fast", s["seconds"]))
-              for s in plan["shots"])
+              for s in plan["shots"] if not state.done_shot(s["index"]) and not state.pending(s["index"]))
     ledger.reserve("preflight_estimate", est)
     os.makedirs(out_dir, exist_ok=True)
-    workdir = tempfile.mkdtemp(prefix="stitched_")
+    workdir = state.dir  # shot files live with run.json so they survive a stop
     done: List[dict] = []
     try:
         for shot in plan["shots"]:
+            saved = state.done_shot(shot["index"])
+            if saved:
+                logger.info("%s run %s: reusing finished shot %s (%s)", MARKER, state.run_id, shot["index"], saved.get("request_id"))
+                done.append({**shot, **saved})
+                continue
             start = None
             if done and shot["role"] == "broll":
                 start = last_frame(done[-1]["path"], os.path.join(workdir, f"start{shot['index']}.jpg"))
-            done.append(generate_shot(shot, settings, workdir, ledger, generators, sleep, start_image=start))
+            done.append(generate_shot(shot, settings, workdir, ledger, generators, sleep, start_image=start, state=state))
         captions = build_platform_captions(plan, {s.get("engine") for s in done})
         copy_audit = audit_and_fix_copy(plan, done, captions)
         out = os.path.join(out_dir, f"short_{uuid.uuid4().hex[:12]}.mp4")
-        info = assemble(done, plan["on_screen_hook"], out, workdir)
-    except Exception:
-        logger.error("%s Short failed; cost so far %s; shots kept in %s", MARKER, json.dumps(ledger.as_dict()), workdir)
+        edit_dir = tempfile.mkdtemp(prefix="stitched_edit_")
+        try:
+            info = assemble(done, plan["on_screen_hook"], out, edit_dir)
+        finally:
+            shutil.rmtree(edit_dir, ignore_errors=True)
+    except Exception as exc:
+        state.finish(status="stopped", error=str(exc)[:500])
+        logger.error("%s Short failed; cost so far %s; resume with run_id=%s (saved in %s)", MARKER,
+                     json.dumps(ledger.as_dict()), state.run_id, state.dir)
         raise
-    shutil.rmtree(workdir, ignore_errors=True)
     if not plan.get("forced_durations") and not (MIN_TOTAL - 0.5 <= info["duration"] <= MAX_TOTAL + 0.5):
         raise RuntimeError(f"final length {info['duration']}s outside {MIN_TOTAL}-{MAX_TOTAL}s")
     info.update({
         "format": "stitched_short", "version": VERSION, "media_source": "ai_generated",
         "cost": ledger.as_dict(), "cost_usd": ledger.total,
-        "shot_list": [{k: s.get(k) for k in ("index", "role", "seconds", "engine", "model", "attempts", "cost_usd", "caption", "prompt", "errors", "chained_from_previous_frame")} for s in done],
+        "shot_list": [{k: s.get(k) for k in ("index", "role", "seconds", "engine", "model", "attempts", "cost_usd", "caption", "prompt", "errors", "chained_from_previous_frame", "request_id", "resumed_from_request")} for s in done],
         "platform_captions": captions, "copy_audit": copy_audit,
+        "run_id": state.run_id, "run_dir": state.dir,
     })
+    state.finish(status="done", output=out, final_captions=captions, copy_audit=copy_audit,
+                 final_overlays={"hook": plan["on_screen_hook"], "shots": {s["index"]: s.get("caption") for s in done}},
+                 total_usd=ledger.total, probe={k: info.get(k) for k in ("width", "height", "duration", "integrated_lufs")})
     logger.info("%s Short ready %s length=%.1fs cost=$%.3f (cap $%.2f)", MARKER, out, info["duration"], ledger.total, ledger.cap)
     return out, plan, info

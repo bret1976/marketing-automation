@@ -44,6 +44,8 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
+import stitched_shorts
+
 logger = logging.getLogger("growth_v2")
 
 MARKER = "GROWTH_V2"
@@ -1208,6 +1210,8 @@ async def produce(settings: dict, state: dict) -> Tuple[str, dict, dict]:
     with backoff, walking the Lite->Fast ladder. The transform/repost fallback only runs if
     AUTOPILOT_TRANSFORM_FALLBACK=1 is set explicitly (off by default)."""
     loop = asyncio.get_running_loop()
+    if stitched_shorts.enabled(settings):
+        return await loop.run_in_executor(None, produce_stitched, settings, state)
     errors: List[str] = []
     tried: List[dict] = []
     for i, engine in enumerate(engine_ladder()):
@@ -1249,6 +1253,62 @@ async def produce(settings: dict, state: dict) -> Tuple[str, dict, dict]:
     raise RuntimeError(f"All {len(errors)} original video attempts failed: " + " | ".join(errors)[-1500:])
 
 
+def produce_stitched(settings: dict, state: dict) -> Tuple[str, dict, dict]:
+    """Stitched 20-30s Short (stitched_shorts.py): AI-filmmaking niche, originals only.
+    Never falls back to a downloaded clip; per-shot retries and the cost cap live in the module."""
+    recent = [t for t in recent_post_topics(state) if t][-30:]
+    titles = past_titles(state)
+    # run records live in STATE_DIR (not the public static dir); a stopped slot can be resumed by run_id
+    out, plan, info = stitched_shorts.produce_short(settings, _main().GENERATED_DIR, recent, titles,
+                                                    runs_dir=os.path.join(_state_dir(), "stitched_runs"))
+    caps = info.get("platform_captions") or {}
+    concept = {
+        "topic": plan["topic"], "topic_key": plan.get("topic_key") or plan["topic"].lower(),
+        "title_line": pick_title({"title_line": plan.get("title_line"), "on_screen_hook": plan["on_screen_hook"]}, titles) or plan.get("title_line"),
+        "on_screen_hook": plan["on_screen_hook"],
+        "hook": clean_hook((caps.get("youtube") or {}).get("title") or plan["on_screen_hook"]),
+        "lines": [], "hashtags": (caps.get("tiktok") or {}).get("hashtags") or [],
+        "comment_question": plan.get("comment_question"), "concept_source": plan.get("plan_source"),
+        "shot_list": info.get("shot_list"), "veo_prompt": (plan["shots"][0] or {}).get("prompt"),
+        "format": "stitched_short",
+    }
+    info["attempt"] = 1
+    return out, concept, info
+
+
+def stitched_platform_captions(info: dict, platforms: List[str]) -> Dict[str, str]:
+    caps = info.get("platform_captions") or {}
+    out = {p: (caps.get(p) or {}).get("caption") for p in platforms if (caps.get(p) or {}).get("caption")}
+    if "twitter" in platforms and "twitter" not in out:
+        tt = (caps.get("tiktok") or {}).get("caption") or ""
+        out["twitter"] = clamp_words(tt, 270)
+    return out
+
+
+def build_staggered_posts(post: dict, info: dict, platforms: List[str], start: Optional[datetime] = None) -> List[dict]:
+    """One post per platform with its own caption/title, scheduled at staggered times
+    (first platform now, others later) instead of identical simultaneous posts."""
+    caps = stitched_platform_captions(info, platforms)
+    sched = stitched_shorts.staggered_schedule(platforms, start)
+    group = post["id"]
+    out = []
+    for i, plat in enumerate(sorted(platforms, key=lambda p: sched[p])):
+        p = json.loads(json.dumps(post))
+        p["id"] = group if i == 0 else str(uuid.uuid4())
+        p["stagger_group"] = group
+        p["platform"] = plat
+        p["text"] = caps.get(plat) or post.get("text")
+        p["platform_captions"] = {plat: p["text"]}
+        if plat == "youtube":
+            yt = ((info.get("platform_captions") or {}).get("youtube") or {}).get("title")
+            if yt:
+                p["youtube_title"] = yt
+        p["scheduled_time"] = sched[plat]
+        p["status"] = "PUBLISHING" if i == 0 else "PENDING"
+        out.append(p)
+    return out
+
+
 def origin_of(media_source: Any) -> str:
     src = str(media_source or "").lower()
     if src == "ai_generated":
@@ -1264,6 +1324,8 @@ def build_post(abs_video: str, concept: dict, info: dict, platforms: List[str]) 
     source = info.get("source") or {}
     credit = {"creator": source.get("creator"), "url": source.get("url")} if info.get("media_source") == "transformed_repost" else None
     captions = build_captions(concept, credit)
+    if info.get("format") == "stitched_short":
+        captions.update(stitched_platform_captions(info, list(captions)))
     hook = clean_hook(concept["hook"])
     return {
         "id": str(uuid.uuid4()),
@@ -1347,15 +1409,30 @@ async def run_autopilot(settings: dict, dry_run: bool = False) -> dict:
     if not platforms:
         raise RuntimeError("No connected platforms to publish to.")
     posts = m.load_scheduled_posts()
-    if settings.get("require_autopilot_approval", False):
+    if info.get("format") == "stitched_short" and len(platforms) > 1:
+        staggered = build_staggered_posts(post, info, platforms)
+        if settings.get("require_autopilot_approval", False):
+            for p in staggered:
+                p["status"] = "AWAITING_APPROVAL"
+            posts.extend(staggered)
+            m.save_scheduled_posts(posts)
+            record_history(state, post)
+            save_state(state)
+            return {"ok": True, "awaiting_approval": True, "post_id": post["id"], "post_ids": [p["id"] for p in staggered]}
+        post = staggered[0]
+        posts.extend(staggered)
+        m.save_scheduled_posts(posts)
+        logger.info("%s stitched Short staggered: %s", MARKER, {p["platform"]: p["scheduled_time"] for p in staggered})
+    elif settings.get("require_autopilot_approval", False):
         post["status"] = "AWAITING_APPROVAL"
         posts.append(post)
         m.save_scheduled_posts(posts)
         record_history(state, post)
         save_state(state)
         return {"ok": True, "awaiting_approval": True, "post_id": post["id"]}
-    posts.append(post)
-    m.save_scheduled_posts(posts)
+    else:
+        posts.append(post)
+        m.save_scheduled_posts(posts)
     result = await m.publish_post_to_platforms(post, settings)
     posts = m.load_scheduled_posts()
     for p in posts:
@@ -1906,6 +1983,8 @@ def status_payload(settings: Optional[dict] = None) -> dict:
     slots = state.get("slots", {})
     return {
         "marker": MARKER, "version": VERSION, "enabled": enabled(), "paused": paused(),
+        "stitched_shorts": stitched_shorts.enabled(settings), "stitched_version": stitched_shorts.VERSION,
+        "shorts_cost_cap_usd": stitched_shorts.cost_cap(settings),
         "transform_fallback": transform_fallback_enabled(), "max_slot_attempts": max_slot_attempts(),
         "legacy_boot_patches_skipped": skipped_legacy_modules(), "legacy_patches_allowed": legacy_patches_allowed(),
         "slot_hours_server": slot_hours(settings), "platforms": platforms, "platform_notes": notes,

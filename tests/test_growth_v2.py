@@ -170,6 +170,7 @@ def _fake_main(tmp_path):
 
 
 def test_failed_veo_retries_with_new_topic_then_succeeds(monkeypatch, tmp_path):
+    monkeypatch.setenv("STITCHED_SHORTS", "0")  # these cover the legacy single-clip ladder
     import asyncio
     import growth_v2 as g
     monkeypatch.delenv("AUTOPILOT_TRANSFORM_FALLBACK", raising=False)
@@ -201,6 +202,7 @@ def test_failed_veo_retries_with_new_topic_then_succeeds(monkeypatch, tmp_path):
 
 
 def test_all_attempts_fail_walks_lite_then_fast_and_never_reposts(monkeypatch, tmp_path):
+    monkeypatch.setenv("STITCHED_SHORTS", "0")  # these cover the legacy single-clip ladder
     import asyncio
     import pytest
     import growth_v2 as g
@@ -249,6 +251,7 @@ def test_caption_still_mismatched_raises(monkeypatch):
 
 
 def test_mismatch_counts_toward_retry_with_new_topic(monkeypatch, tmp_path):
+    monkeypatch.setenv("STITCHED_SHORTS", "0")  # these cover the legacy single-clip ladder
     import asyncio
     import growth_v2 as g
     monkeypatch.delenv("AUTOPILOT_TRANSFORM_FALLBACK", raising=False)

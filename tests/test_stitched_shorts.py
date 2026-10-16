@@ -69,11 +69,11 @@ def test_plan_prompt_is_ai_filmmaking_niche_not_science():
 
 def test_platform_captions_distinct_and_3_to_5_hashtags():
     caps = ss.build_platform_captions(ss.sanitize_plan(_plan()))
-    assert set(caps) == {"youtube", "tiktok", "instagram", "linkedin"}
+    assert set(caps) == {"youtube", "tiktok", "instagram", "linkedin", "twitter"}
     texts = [c["caption"] for c in caps.values()]
-    assert len(set(texts)) == 4
+    assert len(set(texts)) == 5
     for name, c in caps.items():
-        assert 3 <= len(c["hashtags"]) <= 5, name
+        assert (1 if name == "twitter" else 3) <= len(c["hashtags"]) <= (2 if name == "twitter" else 5), name
         assert "#fyp" not in c["caption"].lower() and "#viral" not in c["caption"].lower()
         assert "http" not in c["caption"]
     assert len(caps["linkedin"]["hashtags"]) == 3
@@ -162,7 +162,7 @@ def test_produce_short_end_to_end_with_fake_generators(tmp_path):
     assert len(info["shot_list"]) == 4
     assert info["shot_list"][0]["engine"] == "veo_fast"
     assert all(s["engine"] == "seedance_fast" for s in info["shot_list"][1:])
-    assert set(info["platform_captions"]) == {"youtube", "tiktok", "instagram", "linkedin"}
+    assert set(info["platform_captions"]) == {"youtube", "tiktok", "instagram", "linkedin", "twitter"}
 
 
 def test_growth_v2_staggered_posts_per_platform():
@@ -305,7 +305,7 @@ def test_plan_saved_immediately_and_resume_reuses_everything(tmp_path, monkeypat
         ss.produce_short(st, str(tmp_path), llm=llm, generators=gens, sleep=lambda s: None, run_id="r1", runs_dir=runs)
     saved = _json.load(open(tmp_path / "runs" / "r1" / "run.json"))
     assert saved["plan"]["on_screen_hook"] and len(saved["plan"]["shots"]) == 4
-    assert set(saved["plan"]["draft_platform_captions"]) == {"youtube", "tiktok", "instagram", "linkedin"}
+    assert set(saved["plan"]["draft_platform_captions"]) == {"youtube", "tiktok", "instagram", "linkedin", "twitter"}
     assert set(saved["shots"]) == {"1", "2"} and saved["shots"]["1"]["request_id"] == "req-1"
     assert saved["status"] == "stopped"
 
@@ -362,3 +362,33 @@ def test_long_plan_is_shrunk_to_budget_not_failed(tmp_path):
     out, plan, info = ss.produce_short({}, str(tmp_path), llm=lambda s, p: long_plan, generators=gens, sleep=lambda s: None)
     assert [s["seconds"] for s in plan["shots"]] == [4, 5, 5, 5]
     assert info["cost_usd"] <= 0.75 and info["duration"] >= 20
+
+
+def test_viral_research_ranks_short_refs_and_feeds_prompt():
+    import viral_research as vr
+    fake = lambda q: [{"title": f"AI {q} #AIvideo", "views": len(q) * 100000, "seconds": 30, "url": "https://youtube.com/shorts/u" + q, "channel": "c", "query": q},
+                      {"title": "long film", "views": 10**9, "seconds": 900, "url": "https://youtube.com/watch/L" + q, "channel": "c", "query": q}]
+    res = vr.research(queries=("a", "bbb"), search=fake)
+    assert [r["url"] for r in res["refs"]] == ["https://youtube.com/shorts/ubbb", "https://youtube.com/shorts/ua"] and res["cost_usd"] == 0
+    assert "#aivideo" in res["hashtags"] and "#shorts" not in res["hashtags"]
+    seen = {}
+    def llm(settings, prompt):
+        seen["p"] = prompt
+        return dict(_plan(), viral_angle="number hook", viral_refs_used=["bbb #AIvideo"], pinned_comment="Part 2?")
+    plan = ss.plan_short({}, llm=llm, viral=res)
+    assert "CURRENTLY VIRAL" in seen["p"] and "AI bbb #AIvideo" in seen["p"]
+    assert plan["viral_angle"] == "number hook" and plan["pinned_comment"] == "Part 2?" and plan["viral_refs"]
+
+
+def test_research_never_raises():
+    import viral_research as vr
+    def boom(q):
+        raise RuntimeError("offline")
+    res = vr.research(queries=("x",), search=boom)
+    assert res["refs"] == [] and res["errors"]
+    assert "No live viral references" in vr.prompt_block(res)
+
+
+def test_twitter_caption_fits_280():
+    caps = ss.build_platform_captions(dict(_plan(), platforms={"twitter": {"caption": "x " * 300, "hashtags": ["#AIvideo"]}}), {"veo_fast"})
+    assert len(caps["twitter"]["caption"]) <= 280 and "#AIvideo" in caps["twitter"]["caption"]

@@ -1450,9 +1450,14 @@ def publish_via_postproxy(post: dict, settings: dict, platforms: List[str]) -> d
 
     def publish_batch(batch_platforms: List[str], include_media: bool, body: str, thread_parts: Optional[List[str]] = None) -> dict:
         params = {k: v for k, v in platform_params.items() if k in batch_platforms}
+        ai_video = bool(include_media and (post.get("media_source") in (None, "", "ai_generated") or post.get("stagger_group")))
         if "instagram" in batch_platforms and include_media:
             params.setdefault("instagram", {})
             params["instagram"]["format"] = "reel"
+            if ai_video:
+                params["instagram"]["made_with_ai"] = True  # JSON boolean (PostProxy rejects "true" strings)
+            if (post.get("pinned_comment") or "").strip():
+                params["instagram"]["first_comment"] = post["pinned_comment"].strip()[:2196]
         if "youtube" in batch_platforms:
             params.setdefault("youtube", {})
             params["youtube"].update({
@@ -1460,6 +1465,14 @@ def publish_via_postproxy(post: dict, settings: dict, platforms: List[str]) -> d
                 "privacy_status": "public",
                 "made_for_kids": False,
             })
+            if ai_video:
+                params["youtube"]["contains_synthetic_media"] = True
+        if "tiktok" in batch_platforms and include_media:
+            params.setdefault("tiktok", {})
+            # PostProxy defaults TikTok comments/duet/stitch to DISABLED; we want comments.
+            params["tiktok"].update({"disable_comment": False, "disable_duet": False, "disable_stitch": False})
+            if ai_video:
+                params["tiktok"]["made_with_ai"] = True
         payload = {
             "post": {
                 "body": body,

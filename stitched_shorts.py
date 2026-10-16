@@ -35,6 +35,8 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import requests
 
+import viral_research
+
 logger = logging.getLogger("stitched_shorts")
 MARKER = "STITCHED_SHORTS"
 VERSION = "2026-10-16.1"
@@ -169,10 +171,14 @@ Return ONLY JSON:
         caption for this shot (behind-the-scenes note, no hashtags)}} ... exactly {n_shots} items, hook first ],
   "comment_question": one short question ending with "?" (max 80 chars),
   "platforms": {{
-     "youtube":   {{"title": max 70 chars, contains the hook number, "description": 1-2 short lines, "hashtags": 3-5}},
-     "tiktok":    {{"caption": max 150 chars, casual, curiosity, "hashtags": 3-5}},
-     "instagram": {{"caption": 2-3 short lines incl. a save/share reason, "hashtags": 3-5}},
-     "linkedin":  {{"caption": 3-5 short lines, professional craft/process angle, what the workflow teaches, "hashtags": 3}}
+     "youtube":   {{"title": 40-70 chars, curiosity + keyword + the hook number, no clickbait the video can't pay off,
+                    "description": 3-5 lines: hook, how it was made, comment question, follow CTA, "hashtags": 3}},
+     "tiktok":    {{"caption": 120-300 chars: hook line, 1-line BTS story, comment question, follow-for-part-2, "hashtags": 3-5}},
+     "instagram": {{"caption": 5-8 short lines with line breaks: hook, story, how it was made, comment question,
+                    save/follow CTA, "hashtags": 3-5 (Instagram max is 5)}},
+     "linkedin":  {{"caption": 6-10 short lines: professional hook, the craft problem, the workflow, what it teaches,
+                    a genuine question for practitioners; no engagement bait, "hashtags": 3}},
+     "twitter":   {{"caption": max 240 chars incl. hashtags: punchy hook, one fact, a question, "hashtags": 1-2}}
   }}
 }}
 Consistency: text-to-video models cannot remember a face, so prefer a non-human hero (prop, robot, creature,
@@ -185,7 +191,21 @@ Never mention seeds, LoRAs, ControlNet, fine-tuning, upscaling, render/attempt c
 Truth: never invent stats or process numbers (render counts, % savings); the hook number must describe what
 is on screen or the real setup (e.g. shot count, seconds). Do not name tools other than Veo/Seedance.
 Hashtags: specific (e.g. #AIFilmmaking #Veo3 #Seedance #CinematicAI #BehindTheScenes), never generic (#fyp #viral).
-Do NOT reuse these recent topics: {avoid}"""
+Do NOT reuse these recent topics: {avoid}
+
+{viral_block}
+
+VIRAL COPY RULES (every platform; researched 2026 best practice):
+- First line = curiosity hook with the main keyword ("AI short film", "AI video") in the first words; open a loop
+  the viewer needs the video to close. No "check this out", no brand opener.
+- Then a 1-2 line behind-the-scenes story (what the subject does + how it was made, true facts only).
+- Then ONE specific comment prompt the viewer can answer in a few words (spot the cut / which shot / what should
+  happen next / would you watch part 2?). Never "comment YES", never ask for likes.
+- Then a CTA: follow for part 2 (TikTok/IG/YouTube), save it (IG), repost/bookmark (X).
+- Hashtags: 3-5 specific (mix 1-2 broad like #AIvideo #AIFilmmaking + niche like #Veo3 #Seedance), never #fyp/#viral.
+- on_screen_hook is readable in the first second and promises the payoff of the video.
+Also return "viral_angle" (the hook format you chose) and "viral_refs_used" (list of reference titles), plus
+"pinned_comment": a first comment that restarts the conversation (question or 'part 2?' prompt, max 150 chars)."""
 
 FALLBACK_PLANS: List[dict] = [{
     "topic": "Neon rain detective chase",
@@ -308,12 +328,14 @@ def fit_durations(shots: List[dict]) -> None:
 
 
 def plan_short(settings: dict, avoid_topics: Optional[List[str]] = None, avoid_titles: Optional[List[str]] = None,
-               llm: Optional[Callable[[dict, str], Any]] = None, n_shots: int = 4, ledger: Optional[CostLedger] = None) -> dict:
+               llm: Optional[Callable[[dict, str], Any]] = None, n_shots: int = 4, ledger: Optional[CostLedger] = None,
+               viral: Optional[dict] = None) -> dict:
     llm = llm or call_gemini_text_json
     prompt = PLAN_PROMPT.format(total_min=int(MIN_TOTAL), total_max=int(MAX_TOTAL), n_shots=n_shots,
                                 hook_min=HOOK_MIN, hook_max=HOOK_MAX, broll_min=BROLL_MIN, broll_max=BROLL_MAX,
                                 avoid=", ".join(avoid_topics or []) or "none yet",
-                                avoid_titles="; ".join((avoid_titles or [])[-40:]) or "none yet")
+                                avoid_titles="; ".join((avoid_titles or [])[-40:]) or "none yet",
+                                viral_block=viral_research.prompt_block(viral))
     last_err = None
     for _ in range(1 if test_mode(settings) else 3):
         try:
@@ -328,6 +350,11 @@ def plan_short(settings: dict, avoid_topics: Optional[List[str]] = None, avoid_t
             if plan["topic"].lower() in low_topics:
                 raise ValueError("topic repeats a recent topic")
             plan["plan_source"] = "gemini"
+            if isinstance(raw, dict):
+                plan["viral_angle"] = _clean(raw.get("viral_angle") or "", 200)
+                plan["viral_refs_used"] = [str(t)[:120] for t in (raw.get("viral_refs_used") or [])][:5]
+                plan["pinned_comment"] = _clean(raw.get("pinned_comment") or "", 150)
+            plan["viral_refs"] = (viral or {}).get("refs") or []
             return plan
         except Exception as exc:  # retry with a new plan
             last_err = exc
@@ -442,6 +469,14 @@ def audit_and_fix_copy(plan: dict, shots: List[dict], captions: Dict[str, dict])
     return log
 
 
+def clamp_text(text: str, n: int) -> str:
+    text = (text or "").strip()
+    if len(text) <= n:
+        return text
+    cut = text[:n - 1].rsplit(" ", 1)[0].rstrip(",;:-")
+    return cut + "…"
+
+
 def build_platform_captions(plan: dict, used_engines: Optional[set] = None) -> Dict[str, dict]:
     hook = plan.get("on_screen_hook") or ""
     title = plan.get("title_line") or hook
@@ -464,19 +499,27 @@ def build_platform_captions(plan: dict, used_engines: Optional[set] = None) -> D
     if not has_number(yt_title):
         yt_title = _clean(f"{hook} | {title}", 100)
     yt_tags = _tags(yt.get("hashtags"), base_tags)
-    yt_desc = _clean(yt.get("description") or f"How this AI short was made, shot by shot. {q}", 300)
+    yt_desc = "\n".join(_clean(l, 300) for l in str(yt.get("description") or f"How this AI short was made, shot by shot.\n{q}\nFollow for part 2.").splitlines() if _clean(l))
     tt = get("tiktok")
     tt_tags = _tags(tt.get("hashtags"), base_tags)
-    tt_cap = _clean(tt.get("caption") or f"{hook}. Watch it loop. {q}", 150)
+    tt_cap = "\n".join(_clean(l, 300) for l in str(tt.get("caption") or f"{hook}. Watch it loop.\n{q}\nFollow for part 2.").splitlines() if _clean(l))[:400]
     ig = get("instagram")
     ig_tags = _tags(ig.get("hashtags"), base_tags)
     ig_cap = str(ig.get("caption") or f"{hook}\nEvery frame AI-generated, cut like a real film.\nSave this for your next shot list.")
-    ig_cap = "\n".join(_clean(l, 200) for l in ig_cap.splitlines() if _clean(l))
+    ig_cap = "\n\n".join(_clean(l, 300) for l in ig_cap.splitlines() if _clean(l))
     li = get("linkedin")
     li_tags = _tags(li.get("hashtags"), base_tags, lo=3, hi=3)
     li_cap = str(li.get("caption") or f"{title}\n\n{hook}. One coherent shot list, two video models, one edit.\n\nThe workflow: plan the story first, lock the style, then generate shot by shot.")
     li_cap = "\n".join(_clean(l, 300) for l in li_cap.splitlines())
+    tw = get("twitter")
+    tw_tags = _tags(tw.get("hashtags"), base_tags[:2], lo=1, hi=2)
+    tw_body = _clean(tw.get("caption") or f"{hook}. {q}", 280)
+    for t in tw_tags:  # don't double-tag
+        tw_body = tw_body.replace(t, "").strip()
+    tw_room = 280 - len(" ".join(tw_tags)) - 2
+    tw_cap = f"{clamp_text(tw_body, tw_room)}\n\n{' '.join(tw_tags)}"
     out = {
+        "twitter": {"caption": tw_cap, "hashtags": tw_tags},
         "youtube": {"title": yt_title, "caption": f"{yt_title}\n{yt_desc}\n\n{' '.join(yt_tags)}", "hashtags": yt_tags},
         "tiktok": {"caption": f"{tt_cap}\n\n{' '.join(tt_tags)}", "hashtags": tt_tags},
         "instagram": {"caption": f"{ig_cap}\n\n{' '.join(ig_tags)}", "hashtags": ig_tags},
@@ -979,7 +1022,8 @@ def produce_short(settings: dict, out_dir: str, avoid_topics: Optional[List[str]
                   avoid_titles: Optional[List[str]] = None, llm: Optional[Callable] = None,
                   generators: Optional[Dict[str, Callable[..., dict]]] = None,
                   sleep: Callable[[float], None] = time.sleep, n_shots: int = 4,
-                  run_id: Optional[str] = None, runs_dir: Optional[str] = None) -> Tuple[str, dict, dict]:
+                  run_id: Optional[str] = None, runs_dir: Optional[str] = None,
+                  viral: Optional[dict] = None) -> Tuple[str, dict, dict]:
     """Returns (mp4_path, plan, info). info carries cost ledger, shot list, captions, probe.
     Durable: plan + every finished/submitted shot are saved under runs_dir/run_id; pass the same run_id to resume."""
     ledger = CostLedger(cost_cap(settings))
@@ -990,7 +1034,7 @@ def produce_short(settings: dict, out_dir: str, avoid_topics: Optional[List[str]
         plan = state.plan
         logger.info("%s resuming run %s with saved plan (no planning call)", MARKER, state.run_id)
     else:
-        plan = plan_short(settings, avoid_topics, avoid_titles, llm=llm, n_shots=n_shots, ledger=ledger)
+        plan = plan_short(settings, avoid_topics, avoid_titles, llm=llm, n_shots=n_shots, ledger=ledger, viral=viral)
         for item in ledger.items:
             state.data["cost_items"].append(dict(item))
     forced = settings.get("shorts_forced_durations") or os.environ.get("SHORTS_FORCED_DURATIONS")
@@ -1047,6 +1091,10 @@ def produce_short(settings: dict, out_dir: str, avoid_topics: Optional[List[str]
             done.append(generate_shot(shot, settings, workdir, ledger, generators, sleep, start_image=start, state=state))
         captions = build_platform_captions(plan, {s.get("engine") for s in done})
         copy_audit = audit_and_fix_copy(plan, done, captions)
+        tw = captions.get("twitter")
+        if tw and len(tw["caption"]) > 280:
+            tags = " ".join(tw.get("hashtags") or [])
+            tw["caption"] = f"{clamp_text(tw['caption'].replace(tags, '').strip(), 278 - len(tags))}\n\n{tags}".strip()
         out = os.path.join(out_dir, f"short_{uuid.uuid4().hex[:12]}.mp4")
         edit_dir = tempfile.mkdtemp(prefix="stitched_edit_")
         try:
@@ -1065,6 +1113,9 @@ def produce_short(settings: dict, out_dir: str, avoid_topics: Optional[List[str]
         "cost": ledger.as_dict(), "cost_usd": ledger.total,
         "shot_list": [{k: s.get(k) for k in ("index", "role", "seconds", "engine", "model", "attempts", "cost_usd", "caption", "prompt", "errors", "chained_from_previous_frame", "request_id", "resumed_from_request")} for s in done],
         "platform_captions": captions, "copy_audit": copy_audit,
+        "pinned_comment": plan.get("pinned_comment") or plan.get("comment_question") or "",
+        "viral_research": {"angle": plan.get("viral_angle"), "refs_used": plan.get("viral_refs_used"),
+                           "refs": [{k: r.get(k) for k in ("title", "views", "url")} for r in (plan.get("viral_refs") or [])]},
         "run_id": state.run_id, "run_dir": state.dir,
     })
     state.finish(status="done", output=out, final_captions=captions, copy_audit=copy_audit,

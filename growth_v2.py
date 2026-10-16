@@ -45,6 +45,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 import stitched_shorts
+import viral_research
 
 logger = logging.getLogger("growth_v2")
 
@@ -1259,8 +1260,14 @@ def produce_stitched(settings: dict, state: dict) -> Tuple[str, dict, dict]:
     recent = [t for t in recent_post_topics(state) if t][-30:]
     titles = past_titles(state)
     # run records live in STATE_DIR (not the public static dir); a stopped slot can be resumed by run_id
+    viral = None
+    if not _falsy(os.environ.get("VIRAL_RESEARCH", "1")):
+        viral = viral_research.research()  # free (yt-dlp YouTube search), never raises
+        logger.info("%s viral references for this slot: %s", MARKER,
+                    [f'{r["views"]:,} views | {r["title"][:70]} | {r["url"]}' for r in viral["refs"][:5]] or viral["errors"])
     out, plan, info = stitched_shorts.produce_short(settings, _main().GENERATED_DIR, recent, titles,
-                                                    runs_dir=os.path.join(_state_dir(), "stitched_runs"))
+                                                    runs_dir=os.path.join(_state_dir(), "stitched_runs"), viral=viral)
+    logger.info("%s viral angle used: %s | based on: %s", MARKER, plan.get("viral_angle"), plan.get("viral_refs_used"))
     caps = info.get("platform_captions") or {}
     concept = {
         "topic": plan["topic"], "topic_key": plan.get("topic_key") or plan["topic"].lower(),
@@ -1271,8 +1278,10 @@ def produce_stitched(settings: dict, state: dict) -> Tuple[str, dict, dict]:
         "comment_question": plan.get("comment_question"), "concept_source": plan.get("plan_source"),
         "shot_list": info.get("shot_list"), "veo_prompt": (plan["shots"][0] or {}).get("prompt"),
         "format": "stitched_short",
+        "pinned_comment": info.get("pinned_comment"), "viral_research": info.get("viral_research"),
     }
     info["attempt"] = 1
+    info["media_source"] = "ai_generated"
     return out, concept, info
 
 
@@ -1296,6 +1305,7 @@ def build_staggered_posts(post: dict, info: dict, platforms: List[str], start: O
         p = json.loads(json.dumps(post))
         p["id"] = group if i == 0 else str(uuid.uuid4())
         p["stagger_group"] = group
+        p["pinned_comment"] = info.get("pinned_comment") or ""
         p["platform"] = plat
         p["text"] = caps.get(plat) or post.get("text")
         p["platform_captions"] = {plat: p["text"]}

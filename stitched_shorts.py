@@ -161,6 +161,10 @@ Return ONLY JSON:
      "linkedin":  {{"caption": 3-5 short lines, professional craft/process angle, what the workflow teaches, "hashtags": 3}}
   }}
 }}
+Consistency: text-to-video models cannot remember a face, so prefer a non-human hero (prop, robot, creature,
+vehicle, landscape) or describe any person with the SAME exact age, hair, clothing in every prompt.
+Truth: never invent stats or process numbers (render counts, % savings); the hook number must describe what
+is on screen or the real setup (e.g. shot count, seconds). Do not name tools other than Veo/Seedance.
 Hashtags: specific (e.g. #AIFilmmaking #Veo3 #Seedance #CinematicAI #BehindTheScenes), never generic (#fyp #viral).
 Do NOT reuse these recent topics: {avoid}"""
 
@@ -209,12 +213,16 @@ def has_number(text: Any) -> bool:
     return bool(re.search(r"\d", str(text or "")))
 
 
+BANNED_TAGS = {"#fyp", "#foryou", "#viral", "#trending", "#foryoupage", "#sora", "#soraai", "#runway", "#runwayml",
+               "#kling", "#klingai", "#pika", "#midjourney", "#luma"}  # generic, or tools we did not use
+
+
 def clean_hashtags(tags: Any, fallback: Optional[List[str]] = None, lo: int = 3, hi: int = 5) -> List[str]:
     raw = tags if isinstance(tags, list) else _HASHTAG_RE.findall(str(tags or ""))
     out: List[str] = []
     for t in list(raw) + list(fallback or ["#AIFilmmaking", "#CinematicAI", "#BehindTheScenes", "#AIVideo", "#Veo3"]):
         t = "#" + re.sub(r"[^\w]", "", str(t).lstrip("#"))
-        if len(t) < 3 or t.lower() in {"#fyp", "#foryou", "#viral", "#trending", "#foryoupage"}:
+        if len(t) < 3 or t.lower() in BANNED_TAGS:
             continue
         if t.lower() not in {x.lower() for x in out}:
             out.append(t)
@@ -473,6 +481,8 @@ def generate_shot(shot: dict, settings: dict, workdir: str, ledger: CostLedger,
     gens = generators or GENERATORS
     errors: List[str] = []
     chain = engines_for(shot["role"])
+    if shot["role"] == "broll" and generators is None and not (settings.get("fal_api_key") or os.environ.get("FAL_KEY") or os.environ.get("FAL_API_KEY")):
+        chain = ["veo_lite"]  # no fal key configured: go straight to the Veo Lite fallback
     for attempt in range(1 + MAX_SHOT_RETRIES):
         engine = chain[min(attempt, len(chain) - 1)] if shot["role"] == "broll" else chain[0]
         secs = shot["seconds"] if engine == "seedance_fast" else veo_seconds_for(shot["seconds"])
@@ -658,8 +668,16 @@ def produce_short(settings: dict, out_dir: str, avoid_topics: Optional[List[str]
     """Returns (mp4_path, plan, info). info carries cost ledger, shot list, captions, probe."""
     ledger = CostLedger(cost_cap(settings))
     plan = plan_short(settings, avoid_topics, avoid_titles, llm=llm, n_shots=n_shots, ledger=ledger)
-    # pre-flight: cheapest possible path must fit the cap
-    est = sum(shot_cost(engines_for(s["role"])[0], s["seconds"] if s["role"] == "broll" else veo_billed_seconds(s["seconds"]))
+    if generators is None and not (settings.get("fal_api_key") or os.environ.get("FAL_KEY") or os.environ.get("FAL_API_KEY")):
+        # Veo-Lite-only b-roll renders 4/6/8s; plan on 6s shots and a 4s hook so the Short fits the cap.
+        plan["shots"][0]["seconds"] = HOOK_MIN
+        for s in plan["shots"][1:]:
+            s["seconds"] = 6
+        plan["broll_engine"] = "veo_lite (no fal key)"
+    # pre-flight: planned path must fit the cap
+    lite_only = plan.get("broll_engine", "").startswith("veo_lite")
+    est = sum(shot_cost("veo_fast", veo_billed_seconds(s["seconds"])) if s["role"] == "hook"
+              else (shot_cost("veo_lite", veo_seconds_for(s["seconds"])) if lite_only else shot_cost("seedance_fast", s["seconds"]))
               for s in plan["shots"])
     ledger.reserve("preflight_estimate", est)
     os.makedirs(out_dir, exist_ok=True)
@@ -671,10 +689,9 @@ def produce_short(settings: dict, out_dir: str, avoid_topics: Optional[List[str]
         out = os.path.join(out_dir, f"short_{uuid.uuid4().hex[:12]}.mp4")
         info = assemble(done, plan["on_screen_hook"], out, workdir)
     except Exception:
-        logger.error("%s Short failed; cost so far %s", MARKER, json.dumps(ledger.as_dict()))
+        logger.error("%s Short failed; cost so far %s; shots kept in %s", MARKER, json.dumps(ledger.as_dict()), workdir)
         raise
-    finally:
-        shutil.rmtree(workdir, ignore_errors=True)
+    shutil.rmtree(workdir, ignore_errors=True)
     if not (MIN_TOTAL - 0.5 <= info["duration"] <= MAX_TOTAL + 0.5):
         raise RuntimeError(f"final length {info['duration']}s outside {MIN_TOTAL}-{MAX_TOTAL}s")
     info.update({

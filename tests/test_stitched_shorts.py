@@ -187,3 +187,8 @@ def test_growth_v2_produce_routes_to_stitched(monkeypatch):
     monkeypatch.setattr(g, "produce_stitched", lambda settings, state: ("/tmp/x.mp4", {"topic": "t"}, {"format": "stitched_short"}))
     out = asyncio.run(g.produce({}, {}))
     assert out[2]["format"] == "stitched_short"
+
+
+def test_hashtags_drop_tools_we_did_not_use():
+    tags = ss.clean_hashtags(["#SoraAI", "#AIFilmmaking", "#Kling", "#Veo3"])
+    assert "#SoraAI" not in tags and "#Kling" not in tags and "#Veo3" in tags

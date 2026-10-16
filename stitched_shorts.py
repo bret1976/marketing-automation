@@ -305,9 +305,10 @@ def plan_short(settings: dict, avoid_topics: Optional[List[str]] = None, avoid_t
                                 avoid=", ".join(avoid_topics or []) or "none yet",
                                 avoid_titles="; ".join((avoid_titles or [])[-40:]) or "none yet")
     last_err = None
-    for _ in range(3):
+    for _ in range(1 if test_mode(settings) else 3):
         try:
             if ledger:
+                ledger.reserve("plan_llm", LLM_CALL_USD)
                 ledger.charge("plan_llm", LLM_CALL_USD)
             raw = llm(settings, prompt)
             if isinstance(raw, list) and raw:
@@ -705,7 +706,17 @@ def produce_short(settings: dict, out_dir: str, avoid_topics: Optional[List[str]
     """Returns (mp4_path, plan, info). info carries cost ledger, shot list, captions, probe."""
     ledger = CostLedger(cost_cap(settings))
     plan = plan_short(settings, avoid_topics, avoid_titles, llm=llm, n_shots=n_shots, ledger=ledger)
-    if generators is None and not (settings.get("fal_api_key") or os.environ.get("FAL_KEY") or os.environ.get("FAL_API_KEY")):
+    forced = settings.get("shorts_forced_durations") or os.environ.get("SHORTS_FORCED_DURATIONS")
+    if forced:
+        # Exact per-shot seconds from the run config (e.g. "4,5,5,5"); the planner cannot lengthen them.
+        secs = [int(x) for x in (forced if isinstance(forced, list) else str(forced).split(","))]
+        plan["shots"] = plan["shots"][:len(secs)]
+        if len(plan["shots"]) != len(secs):
+            raise RuntimeError(f"plan has {len(plan['shots'])} shots, forced durations need {len(secs)}")
+        for shot, sec in zip(plan["shots"], secs):
+            shot["seconds"] = sec
+        plan["forced_durations"] = secs
+    elif generators is None and not (settings.get("fal_api_key") or os.environ.get("FAL_KEY") or os.environ.get("FAL_API_KEY")):
         # Veo-Lite-only b-roll renders 4/6/8s; plan on 6s shots and a 4s hook so the Short fits the cap.
         plan["shots"][0]["seconds"] = HOOK_MIN
         for s in plan["shots"][1:]:
@@ -729,7 +740,7 @@ def produce_short(settings: dict, out_dir: str, avoid_topics: Optional[List[str]
         logger.error("%s Short failed; cost so far %s; shots kept in %s", MARKER, json.dumps(ledger.as_dict()), workdir)
         raise
     shutil.rmtree(workdir, ignore_errors=True)
-    if not (MIN_TOTAL - 0.5 <= info["duration"] <= MAX_TOTAL + 0.5):
+    if not plan.get("forced_durations") and not (MIN_TOTAL - 0.5 <= info["duration"] <= MAX_TOTAL + 0.5):
         raise RuntimeError(f"final length {info['duration']}s outside {MIN_TOTAL}-{MAX_TOTAL}s")
     info.update({
         "format": "stitched_short", "version": VERSION, "media_source": "ai_generated",

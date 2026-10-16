@@ -213,3 +213,18 @@ def test_test_mode_zero_retries_no_fallback(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError):
         ss.generate_shot({"index": 2, "role": "broll", "seconds": 5, "prompt": "p"}, {}, str(tmp_path), ss.CostLedger(0.75), gens, sleep=lambda s: None)
     assert len(calls) == 1
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg missing")
+def test_forced_durations_are_exact(tmp_path, monkeypatch):
+    monkeypatch.setenv("SHORTS_TEST_MODE", "1")
+    seen = []
+
+    def fake(settings, prompt, sec, dest):
+        seen.append(sec)
+        subprocess.run(["ffmpeg", "-y", "-f", "lavfi", "-i", f"color=c=red:s=720x1280:r=24:d={sec}", "-c:v", "libx264", "-preset", "ultrafast", dest], check=True, capture_output=True)
+        return {"model": "f", "billed_seconds": sec}
+    gens = {"veo_fast": fake, "seedance_fast": fake, "veo_lite": fake}
+    out, plan, info = ss.produce_short({"shorts_forced_durations": [4, 5, 5, 5]}, str(tmp_path), llm=lambda s, p: _plan(), generators=gens, sleep=lambda s: None)
+    assert seen == [4, 5, 5, 5]
+    assert info["cost_usd"] <= 0.75

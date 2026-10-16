@@ -591,7 +591,8 @@ def _drawtext(textfile: str, font: str, size: int, y: str, start: float, end: fl
 
 def normalize_shot(src: str, dst: str, seconds: float, keep_audio: bool) -> None:
     """Scale/crop-or-pad to 1080x1920 @30fps, exact duration, stereo 48k audio (silence if none)."""
-    vf = (f"scale={W}:{H}:force_original_aspect_ratio=decrease,pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:black,"
+    # fill + center-crop (no black bars when a model returns a slightly non-9:16 frame)
+    vf = (f"scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},"
           f"setsar=1,fps={FPS},format=yuv420p")
     has_a = probe(src)["has_audio"] and keep_audio
     cmd = [_ff(), "-y", "-i", src]

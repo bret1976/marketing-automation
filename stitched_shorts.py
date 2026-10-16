@@ -46,6 +46,7 @@ BROLL_MIN, BROLL_MAX = 4, 8
 MAX_SHOT_RETRIES = 2
 DEFAULT_COST_CAP = 0.75  # hard cap per Short (Bret, 2026-10-16)
 LOOP_DISSOLVE = 0.5
+BUDGET_DURATIONS = [4, 5, 5, 5]
 
 VEO_FAST_MODEL = "veo-3.1-fast-generate-preview"
 VEO_LITE_MODEL = "veo-3.1-lite-generate-preview"
@@ -1008,6 +1009,18 @@ def produce_short(settings: dict, out_dir: str, avoid_topics: Optional[List[str]
         for s in plan["shots"][1:]:
             s["seconds"] = 6
         plan["broll_engine"] = "veo_lite (no fal key)"
+    # Budget fit: if the planner's lengths can't fit the cap, fall back to the verified 4,5,5,5 plan
+    # (Veo Fast 4s $0.40 + 3x Seedance 5s ~$0.108 = ~$0.73) instead of failing the slot.
+    def _est(p: dict) -> float:
+        lite = str(p.get("broll_engine", "")).startswith("veo_lite")
+        return sum(shot_cost("veo_fast", veo_billed_seconds(s["seconds"])) if s["role"] == "hook"
+                   else (shot_cost("veo_lite", veo_seconds_for(s["seconds"])) if lite else shot_cost("seedance_fast", s["seconds"]))
+                   for s in p["shots"])
+    if not state.plan and not plan.get("forced_durations") and ledger.total + _est(plan) > ledger.cap:
+        for shot, sec in zip(plan["shots"], BUDGET_DURATIONS):
+            shot["seconds"] = sec
+        plan["shots"] = plan["shots"][:len(BUDGET_DURATIONS)]
+        plan["budget_durations"] = BUDGET_DURATIONS
     if not state.plan:
         # durable right after planning: story, prompts, hook text, overlays, LLM per-platform copy
         plan["draft_platform_captions"] = build_platform_captions(plan)

@@ -350,3 +350,15 @@ def test_timed_out_request_is_fetched_by_id_not_resubmitted(tmp_path, monkeypatc
     assert calls == ["fal-123"] and rec["resumed_from_request"]
     assert ledger2.total == pytest.approx(ss.seedance_cost(5))  # not double counted
     assert state2.done_shot(2) and not state2.pending(2)
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg missing")
+def test_long_plan_is_shrunk_to_budget_not_failed(tmp_path):
+    def fake(settings, prompt, sec, dest, **kw):
+        _fake_video(sec, dest)
+        return {"model": "m", "billed_seconds": sec}
+    long_plan = _plan(shots=[dict(s, seconds=8) for s in _plan()["shots"]])
+    gens = {"veo_fast": fake, "seedance_fast": fake, "veo_lite": fake}
+    out, plan, info = ss.produce_short({}, str(tmp_path), llm=lambda s, p: long_plan, generators=gens, sleep=lambda s: None)
+    assert [s["seconds"] for s in plan["shots"]] == [4, 5, 5, 5]
+    assert info["cost_usd"] <= 0.75 and info["duration"] >= 20

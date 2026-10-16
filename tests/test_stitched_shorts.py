@@ -73,10 +73,10 @@ def test_platform_captions_distinct_and_3_to_5_hashtags():
     texts = [c["caption"] for c in caps.values()]
     assert len(set(texts)) == 5
     for name, c in caps.items():
-        assert (1 if name == "twitter" else 3) <= len(c["hashtags"]) <= (2 if name == "twitter" else 5), name
+        assert 3 <= len(c["hashtags"]) <= 8, name
         assert "#fyp" not in c["caption"].lower() and "#viral" not in c["caption"].lower()
         assert "http" not in c["caption"]
-    assert len(caps["linkedin"]["hashtags"]) == 3
+    assert len(caps["linkedin"]["hashtags"]) in (3, 4, 5)
     assert any(ch.isdigit() for ch in caps["youtube"]["title"])
 
 
@@ -392,3 +392,24 @@ def test_research_never_raises():
 def test_twitter_caption_fits_280():
     caps = ss.build_platform_captions(dict(_plan(), platforms={"twitter": {"caption": "x " * 300, "hashtags": ["#AIvideo"]}}), {"veo_fast"})
     assert len(caps["twitter"]["caption"]) <= 280 and "#AIvideo" in caps["twitter"]["caption"]
+
+
+def test_hashtag_counts_mix_and_tool_cap():
+    caps = ss.build_platform_captions(dict(ss.sanitize_plan(_plan()), viral_hashtags=["#aishortfilm", "#mango", "#shortsfeed"]),
+                                      {"veo_fast", "seedance_fast"})
+    n = {k: len(v["hashtags"]) for k, v in caps.items()}
+    assert 6 <= n["tiktok"] <= 8 and n["instagram"] == 5 and 3 <= n["twitter"] <= 4 and 3 <= n["linkedin"] <= 5
+    assert "#Shorts" in caps["youtube"]["hashtags"] and 4 <= n["youtube"] <= 6
+    for k, v in caps.items():
+        low = [t.lower() for t in v["hashtags"]]
+        assert sum(t in ("#veo3", "#seedance") for t in low) <= 2, k
+        assert "#mango" not in low and "#shortsfeed" not in low
+    assert "#aishortfilm" in [t.lower() for t in caps["tiktok"]["hashtags"]]
+    assert len(caps["twitter"]["caption"]) <= 280
+
+
+def test_viral_filter_drops_offtopic_cartoon():
+    import viral_research as vr
+    t = "Dadaji Ka Mango Tree #shorts #shortsfeed #shortvideo #short #shortsvideo #mango #ai #dadaji #cartoon"
+    assert not vr.NICHE_RE.search(t)
+    assert vr.NICHE_RE.search("POOF | AI Short Film") and vr.NICHE_RE.search("THE TITAN AWAKENS | Seedance 2.5 AI Short")

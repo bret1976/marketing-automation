@@ -178,7 +178,7 @@ Return ONLY JSON:
                     save/follow CTA, "hashtags": 3-5 (Instagram max is 5)}},
      "linkedin":  {{"caption": 6-10 short lines: professional hook, the craft problem, the workflow, what it teaches,
                     a genuine question for practitioners; no engagement bait, "hashtags": 3}},
-     "twitter":   {{"caption": max 240 chars incl. hashtags: punchy hook, one fact, a question, "hashtags": 1-2}}
+     "twitter":   {{"caption": max 220 chars WITHOUT hashtags: punchy hook, one fact, a question, "hashtags": 3-4}}
   }}
 }}
 Consistency: text-to-video models cannot remember a face, so prefer a non-human hero (prop, robot, creature,
@@ -202,7 +202,8 @@ VIRAL COPY RULES (every platform; researched 2026 best practice):
 - Then ONE specific comment prompt the viewer can answer in a few words (spot the cut / which shot / what should
   happen next / would you watch part 2?). Never "comment YES", never ask for likes.
 - Then a CTA: follow for part 2 (TikTok/IG/YouTube), save it (IG), repost/bookmark (X).
-- Hashtags: 3-5 specific (mix 1-2 broad like #AIvideo #AIFilmmaking + niche like #Veo3 #Seedance), never #fyp/#viral.
+- Hashtags: specific, mixing broad reach (#AIvideo), mid (#AIFilmmaking #AIshortfilm) and niche/topic tags about
+  THIS film's subject (e.g. #SciFi #Drone); tool tags (#Veo3 #Seedance) at most 1-2; never #fyp/#viral.
 - on_screen_hook is readable in the first second and promises the payoff of the video.
 Also return "viral_angle" (the hook format you chose) and "viral_refs_used" (list of reference titles), plus
 "pinned_comment": a first comment that restarts the conversation (question or 'part 2?' prompt, max 150 chars)."""
@@ -355,6 +356,7 @@ def plan_short(settings: dict, avoid_topics: Optional[List[str]] = None, avoid_t
                 plan["viral_refs_used"] = [str(t)[:120] for t in (raw.get("viral_refs_used") or [])][:5]
                 plan["pinned_comment"] = _clean(raw.get("pinned_comment") or "", 150)
             plan["viral_refs"] = (viral or {}).get("refs") or []
+            plan["viral_hashtags"] = (viral or {}).get("hashtags") or []
             return plan
         except Exception as exc:  # retry with a new plan
             last_err = exc
@@ -477,6 +479,58 @@ def clamp_text(text: str, n: int) -> str:
     return cut + "…"
 
 
+# --------------------------------------------------------------------------
+# hashtag strategy: broad reach + mid + niche, live viral tags, per-platform counts
+# --------------------------------------------------------------------------
+TAG_BROAD = ["#AIvideo", "#AI", "#AIart", "#GenerativeAI"]
+TAG_MID = ["#AIFilmmaking", "#AIshortfilm", "#AIanimation", "#CinematicAI", "#AIcinema"]
+TAG_NICHE = ["#BehindTheScenes", "#Filmmaking", "#VFX", "#ShortFilm"]
+TAG_TOOLS = ["#Veo3", "#Seedance"]
+TAG_LINKEDIN = ["#GenerativeAI", "#AIFilmmaking", "#VideoProduction", "#CreativeTechnology", "#Filmmaking"]
+# (count, broad, mid, tools_max) per platform. Count rules: Instagram caps posts at 5 tags (Dec 2025);
+# YouTube shows the first 3 description tags above the title and ignores all tags past 60;
+# TikTok guidance is 3-5 specific tags (we run 6 for wider test reach); LinkedIn "a handful".
+TAG_RECIPE = {"tiktok": (7, 2, 2, 2), "instagram": (5, 1, 2, 1), "youtube": (4, 1, 2, 1),
+              "twitter": (3, 1, 1, 1), "linkedin": (4, 0, 0, 0)}
+_VIRAL_TAG_OK = re.compile(r"ai|film|cinema|anim|vfx|veo|seedance|story|scifi|fantasy", re.I)
+
+
+def viral_tags(tags: Optional[List[str]]) -> List[str]:
+    out = []
+    for t in tags or []:
+        t = "#" + re.sub(r"[^\w]", "", str(t).lstrip("#"))
+        if len(t) > 3 and _VIRAL_TAG_OK.search(t) and t.lower() not in BANNED_TAGS and t.lower() not in ("#ai",):
+            canon = {x.lower(): x for x in TAG_BROAD + TAG_MID + TAG_NICHE}
+            out.append(canon.get(t.lower(), t))
+    return out
+
+
+def platform_hashtags(platform: str, planner_tags: Any = None, live_tags: Optional[List[str]] = None,
+                      used_engines: Optional[set] = None) -> List[str]:
+    n, n_broad, n_mid, tools_max = TAG_RECIPE.get(platform, (4, 1, 2, 1))
+    tools = filter_tool_tags(list(TAG_TOOLS), used_engines)
+    planner = [t for t in clean_hashtags(planner_tags, [], 0, 10)] if planner_tags else []
+    planner = filter_tool_tags(planner, used_engines)
+    if platform == "linkedin":
+        order = TAG_LINKEDIN[:3] + [t for t in planner if t.lower() not in {x.lower() for x in tools}][:1] + TAG_LINKEDIN
+    else:
+        order = (TAG_BROAD[:n_broad] + TAG_MID[:n_mid] + viral_tags(live_tags)[:2] + tools[:tools_max] +
+                 [t for t in planner if t.lower() not in {x.lower() for x in tools}] + TAG_NICHE + TAG_MID)
+    out, n_tools = [], 0
+    for t in order:
+        low = t.lower()
+        if low in {x.lower() for x in out}:
+            continue
+        if low in {x.lower() for x in tools} or low in TOOL_TAGS:
+            if n_tools >= tools_max:
+                continue
+            n_tools += 1
+        out.append(t)
+        if len(out) >= n:
+            break
+    return out
+
+
 def build_platform_captions(plan: dict, used_engines: Optional[set] = None) -> Dict[str, dict]:
     hook = plan.get("on_screen_hook") or ""
     title = plan.get("title_line") or hook
@@ -486,9 +540,10 @@ def build_platform_captions(plan: dict, used_engines: Optional[set] = None) -> D
 
     base_tags = filter_tool_tags(base_tags, used_engines)
 
-    def _tags(tags, fallback=None, lo=3, hi=5):  # tool-aware: never tag a model we did not use
-        raw = tags if isinstance(tags, list) else _HASHTAG_RE.findall(str(tags or ""))
-        return clean_hashtags(filter_tool_tags(list(raw), used_engines), fallback, lo, hi)
+    live = plan.get("viral_hashtags") or []
+
+    def _tags(tags, fallback=None, lo=3, hi=5, platform="tiktok"):  # researched per-platform mix, tool-aware
+        return platform_hashtags(platform, tags, live, used_engines)
 
     def get(name: str) -> dict:
         v = p.get(name)
@@ -498,21 +553,21 @@ def build_platform_captions(plan: dict, used_engines: Optional[set] = None) -> D
     yt_title = _clean(yt.get("title") or f"{title}: {hook}", 100)
     if not has_number(yt_title):
         yt_title = _clean(f"{hook} | {title}", 100)
-    yt_tags = _tags(yt.get("hashtags"), base_tags)
+    yt_tags = _tags(yt.get("hashtags"), base_tags, platform="youtube")
     yt_desc = "\n".join(_clean(l, 300) for l in str(yt.get("description") or f"How this AI short was made, shot by shot.\n{q}\nFollow for part 2.").splitlines() if _clean(l))
     tt = get("tiktok")
-    tt_tags = _tags(tt.get("hashtags"), base_tags)
+    tt_tags = _tags(tt.get("hashtags"), base_tags, platform="tiktok")
     tt_cap = "\n".join(_clean(l, 300) for l in str(tt.get("caption") or f"{hook}. Watch it loop.\n{q}\nFollow for part 2.").splitlines() if _clean(l))[:400]
     ig = get("instagram")
-    ig_tags = _tags(ig.get("hashtags"), base_tags)
+    ig_tags = _tags(ig.get("hashtags"), base_tags, platform="instagram")
     ig_cap = str(ig.get("caption") or f"{hook}\nEvery frame AI-generated, cut like a real film.\nSave this for your next shot list.")
     ig_cap = "\n\n".join(_clean(l, 300) for l in ig_cap.splitlines() if _clean(l))
     li = get("linkedin")
-    li_tags = _tags(li.get("hashtags"), base_tags, lo=3, hi=3)
+    li_tags = _tags(li.get("hashtags"), base_tags, platform="linkedin")
     li_cap = str(li.get("caption") or f"{title}\n\n{hook}. One coherent shot list, two video models, one edit.\n\nThe workflow: plan the story first, lock the style, then generate shot by shot.")
     li_cap = "\n".join(_clean(l, 300) for l in li_cap.splitlines())
     tw = get("twitter")
-    tw_tags = _tags(tw.get("hashtags"), base_tags[:2], lo=1, hi=2)
+    tw_tags = _tags(tw.get("hashtags"), base_tags, platform="twitter")
     tw_body = _clean(tw.get("caption") or f"{hook}. {q}", 280)
     for t in tw_tags:  # don't double-tag
         tw_body = tw_body.replace(t, "").strip()
@@ -520,7 +575,7 @@ def build_platform_captions(plan: dict, used_engines: Optional[set] = None) -> D
     tw_cap = f"{clamp_text(tw_body, tw_room)}\n\n{' '.join(tw_tags)}"
     out = {
         "twitter": {"caption": tw_cap, "hashtags": tw_tags},
-        "youtube": {"title": yt_title, "caption": f"{yt_title}\n{yt_desc}\n\n{' '.join(yt_tags)}", "hashtags": yt_tags},
+        "youtube": {"title": yt_title, "caption": f"{yt_title}\n{yt_desc}\n\n{' '.join(yt_tags + ['#Shorts'])}", "hashtags": yt_tags + ["#Shorts"]},
         "tiktok": {"caption": f"{tt_cap}\n\n{' '.join(tt_tags)}", "hashtags": tt_tags},
         "instagram": {"caption": f"{ig_cap}\n\n{' '.join(ig_tags)}", "hashtags": ig_tags},
         "linkedin": {"caption": f"{li_cap.strip()}\n\n{' '.join(li_tags)}", "hashtags": li_tags},

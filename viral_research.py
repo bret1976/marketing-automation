@@ -27,6 +27,8 @@ DEFAULT_QUERIES = (
 # YouTube relevance search (favours recent + popular); the "this month" filter returned low-view noise.
 SEARCH_FILTER = ""
 MIN_VIEWS = 10_000
+NICHE_RE = re.compile(r"\bai[ -]?(short ?film|film|movie|video|animation|generated|cinema|cinematic)|"
+                      r"\b(veo ?3|seedance|kling|sora|runway|hailuo|midjourney video)\b|#ai(film|video|shortfilm|animation|art)\b", re.I)
 MAX_SECONDS = 90
 _TAG_RE = re.compile(r"#\w+")
 
@@ -67,8 +69,8 @@ def research(queries=DEFAULT_QUERIES, top_n: int = 8, search=search_youtube) -> 
                     continue
                 if r["views"] < MIN_VIEWS or not re.search(r"/(watch|shorts)", r["url"]):
                     continue  # skip channels/playlists and low-view noise
-                if not re.search(r"\bai\b|veo|seedance|kling|sora|runway", r["title"], re.I):
-                    continue  # stay in the AI-video niche
+                if not NICHE_RE.search(r["title"]):
+                    continue  # stay in the AI-video niche (a bare "#ai" tag on a cartoon is not enough)
                 seen.add(r["url"])
                 refs.append(r)
         except Exception as exc:

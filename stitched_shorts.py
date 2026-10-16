@@ -50,6 +50,9 @@ LOOP_DISSOLVE = 0.5
 VEO_FAST_MODEL = "veo-3.1-fast-generate-preview"
 VEO_LITE_MODEL = "veo-3.1-lite-generate-preview"
 SEEDANCE_MODEL = "fal-ai/bytedance/seedance/v1/pro/fast/text-to-video"
+# Same price formula as text-to-video (fal model page, checked 2026-10-16).
+SEEDANCE_I2V_MODEL = "fal-ai/bytedance/seedance/v1/pro/fast/image-to-video"
+LOOP_TAIL_MAX = 1.0  # seconds of held loop frame allowed to reach the 20s minimum (no extra generation cost)
 GEMINI_TEXT_MODEL = "gemini-3.6-flash"
 GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta"
 
@@ -173,6 +176,11 @@ Return ONLY JSON:
 }}
 Consistency: text-to-video models cannot remember a face, so prefer a non-human hero (prop, robot, creature,
 vehicle, landscape) or describe any person with the SAME exact age, hair, clothing in every prompt.
+Shot captions: describe the craft of THAT shot (framing, light, motion); do NOT name any AI model in them
+(the edit adds correct model credits). Allowed technique claims ONLY: one locked style line repeated in every
+prompt; b-roll animated from the previous shot's last frame (image-to-video); loop ending matching shot 1.
+Never mention seeds, LoRAs, ControlNet, fine-tuning, upscaling, render/attempt counts, percentages,
+"identical" or "perfect" consistency.
 Truth: never invent stats or process numbers (render counts, % savings); the hook number must describe what
 is on screen or the real setup (e.g. shot count, seconds). Do not name tools other than Veo/Seedance.
 Hashtags: specific (e.g. #AIFilmmaking #Veo3 #Seedance #CinematicAI #BehindTheScenes), never generic (#fyp #viral).
@@ -262,6 +270,7 @@ def sanitize_plan(plan: Any) -> dict:
             prompt = f"{style} {prompt}"
         if "9:16" not in prompt:
             prompt += " Vertical 9:16 framing, subject centered."
+        prompt += " Full-frame image edge to edge, no letterbox or black bars."
         out_shots.append({"index": i + 1, "role": role, "seconds": max(lo, min(hi, secs)),
                           "prompt": prompt, "caption": _clean(s.get("caption"), 60)})
     if out_shots[0]["seconds"] % 2:  # Veo accepts 4/6/8
@@ -339,6 +348,97 @@ def filter_tool_tags(tags: List[str], used_engines: Optional[set]) -> List[str]:
     if used_engines is None:
         return tags
     return [t for t in tags if t.lower() not in TOOL_TAGS or TOOL_TAGS[t.lower()] & used_engines]
+
+
+ENGINE_LABELS = {"veo_fast": "Veo 3.1 Fast", "veo_lite": "Veo 3.1 Lite", "seedance_fast": "Seedance 1 Pro Fast"}
+TOOL_MENTIONS = [  # (regex, engines that make the mention true; empty = never used by this pipeline)
+    (r"\bveo\b|\bveo ?3(\.1)?\b|google veo", {"veo_fast", "veo_lite"}),
+    (r"\bseedance\b|bytedance", {"seedance_fast"}),
+    (r"\bsora\b|\brunway\b|\bkling\b|\bpika\b|midjourney|\bluma\b|\bflux\b|stable diffusion|\bhailuo\b|\bminimax\b|\bgen-?[34]\b", set()),
+]
+# Technique / result claims this pipeline never does or cannot prove.
+FALSE_TECHNIQUE_RE = re.compile(
+    r"\bseeds?\b|\blora\b|controlnet|fine-?tun|motion brush|inpaint|upscal|green ?screen|motion capture|mocap|"
+    r"\b\d+\s*(?:renders?|tries|attempts|takes|iterations|hours|days)\b|\d+\s*%|percent|"
+    r"\bidentical\b|\bperfect(?:ly)?\b|\bflawless\b|\bzero (?:drift|errors?)\b", re.I)
+
+
+def copy_problems(text: str, allowed_engines: set) -> List[str]:
+    probs = []
+    for rx, engines in TOOL_MENTIONS:
+        if re.search(rx, text or "", re.I) and not (engines & allowed_engines):
+            probs.append(f"mentions tool not used: /{rx}/")
+    m = FALSE_TECHNIQUE_RE.search(text or "")
+    if m:
+        probs.append(f"unverifiable technique/claim: {m.group(0)!r}")
+    return probs
+
+
+def scrub_copy(text: str, allowed_engines: set) -> Tuple[str, List[str]]:
+    """Drop every sentence/line that names an unused tool or an unused technique/claim."""
+    removed: List[str] = []
+    out_lines = []
+    for line in str(text or "").split("\n"):
+        if line.strip().startswith("#"):
+            out_lines.append(line)
+            continue
+        kept = []
+        for sent in re.split(r"(?<=[.!?])\s+", line):
+            if sent.strip() and copy_problems(sent, allowed_engines):
+                removed.append(sent.strip())
+            else:
+                kept.append(sent)
+        out_lines.append(" ".join(k for k in kept if k is not None).rstrip())
+    cleaned = re.sub(r"\n{3,}", "\n\n", "\n".join(out_lines)).strip()
+    return cleaned, removed
+
+
+def factual_summary(shots: List[dict]) -> str:
+    hook = next((s for s in shots if s.get("role") == "hook"), None)
+    broll = [s for s in shots if s.get("role") == "broll"]
+    parts = []
+    if hook:
+        parts.append(f"Hook shot: {ENGINE_LABELS.get(hook.get('engine'), 'AI video')}.")
+    if broll:
+        labels = sorted({ENGINE_LABELS.get(s.get("engine"), "AI video") for s in broll})
+        chained = any(s.get("chained_from_previous_frame") for s in broll)
+        parts.append(f"B-roll: {' + '.join(labels)}" + (", each shot started from the previous shot's last frame." if chained else "."))
+    return " ".join(parts)
+
+
+def audit_and_fix_copy(plan: dict, shots: List[dict], captions: Dict[str, dict]) -> dict:
+    """Post-generation check: on-screen text and captions may only credit the model that made a shot,
+    and may not claim techniques this pipeline did not use. Offending sentences are removed and replaced
+    with copy derived from the actual per-shot records. Mutates plan/shots/captions; returns an audit log."""
+    used = {s.get("engine") for s in shots if s.get("engine")}
+    log: Dict[str, Any] = {"used_engines": sorted(used), "removed": {}, "replaced": {}}
+    # hook text
+    if copy_problems(plan.get("on_screen_hook", ""), used):
+        log["replaced"]["on_screen_hook"] = plan["on_screen_hook"]
+        plan["on_screen_hook"] = f"{len(shots)} AI shots, 1 story"
+    # per-shot overlay captions: judged against THAT shot's engine only
+    for s in shots:
+        cap = s.get("caption") or ""
+        if cap and copy_problems(cap, {s.get("engine")}):
+            log["replaced"][f"shot{s['index']}_caption"] = cap
+            s["caption"] = f"Shot {s['index']}: {ENGINE_LABELS.get(s.get('engine'), 'AI video')}"
+    # platform captions + YouTube title
+    facts = factual_summary(shots)
+    for name, c in captions.items():
+        body, removed = scrub_copy(c["caption"], used)
+        if removed:
+            log["removed"][name] = removed
+            tags = " ".join(c.get("hashtags") or [])
+            core = body.replace(tags, "").strip()
+            body = f"{core}\n{facts}".strip() + (f"\n\n{tags}" if tags else "")
+        c["caption"] = body
+        if c.get("title") and copy_problems(c["title"], used):
+            log["replaced"][f"{name}_title"] = c["title"]
+            c["title"] = _clean(f"{plan.get('on_screen_hook')} | {plan.get('title_line') or 'AI short film'}", 100)
+            c["caption"] = c["caption"].replace(log["replaced"][f"{name}_title"], c["title"])
+    log["clean"] = all(not copy_problems(c["caption"], used) for c in captions.values()) and \
+        all(not copy_problems(s.get("caption") or "", {s.get("engine")}) for s in shots)
+    return log
 
 
 def build_platform_captions(plan: dict, used_engines: Optional[set] = None) -> Dict[str, dict]:
@@ -450,14 +550,26 @@ def veo_generate(settings: dict, prompt: str, seconds: int, dest: str, model: st
     return {"model": model, "billed_seconds": int(params.get("durationSeconds", 8))}
 
 
-def seedance_generate(settings: dict, prompt: str, seconds: int, dest: str, poll_s: float = 5.0, timeout_s: float = 600.0) -> dict:
+def image_data_uri(path: str) -> str:
+    import base64
+    with open(path, "rb") as fh:
+        return "data:image/jpeg;base64," + base64.b64encode(fh.read()).decode()
+
+
+def seedance_generate(settings: dict, prompt: str, seconds: int, dest: str, image: Optional[str] = None,
+                      poll_s: float = 5.0, timeout_s: float = 600.0) -> dict:
+    """image: path to a start frame -> image-to-video (keeps the same subject); else text-to-video."""
     key = settings.get("fal_api_key") or os.environ.get("FAL_KEY") or os.environ.get("FAL_API_KEY")
     if not key:
         raise RuntimeError("Missing FAL key")
     hdr = {"Authorization": f"Key {key}", "Content-Type": "application/json"}
     payload = {"prompt": prompt, "aspect_ratio": "9:16", "resolution": "720p", "duration": str(int(seconds)),
                "camera_fixed": False, "enable_safety_checker": True}
-    r = requests.post(f"https://queue.fal.run/{SEEDANCE_MODEL}", headers=hdr, json=payload, timeout=60)
+    model = SEEDANCE_MODEL
+    if image:
+        model = SEEDANCE_I2V_MODEL
+        payload["image_url"] = image_data_uri(image)
+    r = requests.post(f"https://queue.fal.run/{model}", headers=hdr, json=payload, timeout=60)
     if r.status_code not in (200, 201, 202):
         raise RuntimeError(f"Seedance submit HTTP {r.status_code}: {r.text[:300]}")
     sub = r.json()
@@ -477,12 +589,12 @@ def seedance_generate(settings: dict, prompt: str, seconds: int, dest: str, poll
     if res.status_code != 200:
         raise RuntimeError(f"Seedance result HTTP {res.status_code}: {res.text[:300]}")
     _download(res.json()["video"]["url"], dest)
-    return {"model": SEEDANCE_MODEL, "billed_seconds": int(seconds)}
+    return {"model": model, "billed_seconds": int(seconds)}
 
 
 GENERATORS: Dict[str, Callable[..., dict]] = {
-    "veo_fast": lambda s, p, sec, d: veo_generate(s, p, sec, d, VEO_FAST_MODEL),
-    "veo_lite": lambda s, p, sec, d: veo_generate(s, p, sec, d, VEO_LITE_MODEL),
+    "veo_fast": lambda s, p, sec, d, **kw: veo_generate(s, p, sec, d, VEO_FAST_MODEL),
+    "veo_lite": lambda s, p, sec, d, **kw: veo_generate(s, p, sec, d, VEO_LITE_MODEL),
     "seedance_fast": seedance_generate,
 }
 
@@ -500,8 +612,17 @@ def veo_seconds_for(seconds: float) -> int:
     return 4 if seconds <= 4 else (6 if seconds <= 6 else 8)
 
 
+def last_frame(video: str, dest: str) -> str:
+    """Final frame as JPEG (start image for the next shot's image-to-video)."""
+    _run([_ff(), "-y", "-sseof", "-0.15", "-i", video, "-frames:v", "1", "-q:v", "3", "-update", "1", dest])
+    if not os.path.exists(dest):
+        _run([_ff(), "-y", "-i", video, "-vf", "reverse", "-frames:v", "1", "-q:v", "3", dest])
+    return dest
+
+
 def generate_shot(shot: dict, settings: dict, workdir: str, ledger: CostLedger,
-                  generators: Optional[Dict[str, Callable[..., dict]]] = None, sleep: Callable[[float], None] = time.sleep) -> dict:
+                  generators: Optional[Dict[str, Callable[..., dict]]] = None, sleep: Callable[[float], None] = time.sleep,
+                  start_image: Optional[str] = None) -> dict:
     """Up to 1 + MAX_SHOT_RETRIES attempts per shot. Hook: Veo Fast only.
     B-roll: Seedance, falling back to Veo Lite once Seedance has failed."""
     gens = generators or GENERATORS
@@ -519,10 +640,12 @@ def generate_shot(shot: dict, settings: dict, workdir: str, ledger: CostLedger,
         ledger.reserve(f"shot{shot['index']}:{engine}", est)  # raises CostCapExceeded
         dest = os.path.join(workdir, f"shot{shot['index']}_a{attempt + 1}_{engine}.mp4")
         try:
-            info = gens[engine](settings, shot["prompt"], secs, dest)
+            kw = {"image": start_image} if (start_image and engine == "seedance_fast") else {}
+            info = gens[engine](settings, shot["prompt"], secs, dest, **kw)
             billed = shot_cost(engine, info.get("billed_seconds", secs))
             ledger.charge(f"shot{shot['index']}:{engine}", billed, ok=True, attempt=attempt + 1, seconds=info.get("billed_seconds", secs))
             return {**shot, "path": dest, "engine": engine, "model": info.get("model"), "attempts": attempt + 1,
+                    "chained_from_previous_frame": bool(kw),
                     "cost_usd": billed, "errors": errors}
         except CostCapExceeded:
             raise
@@ -589,10 +712,31 @@ def _drawtext(textfile: str, font: str, size: int, y: str, start: float, end: fl
     return ",".join(out)
 
 
+def detect_letterbox(src: str) -> Optional[str]:
+    """Models sometimes bake cinematic black bars INTO a 9:16 frame (e.g. 'anamorphic' prompts).
+    Returns an ffmpeg crop=w:h:x:y that removes them, or None when the frame is already full."""
+    res = subprocess.run([_ff(), "-hide_banner", "-i", src, "-vf", "fps=4,cropdetect=limit=24:round=2:reset=0", "-f", "null", "-"],
+                         capture_output=True, text=True, timeout=120)
+    crops = re.findall(r"crop=(\d+):(\d+):(\d+):(\d+)", res.stderr or "")
+    pr = subprocess.run([shutil.which("ffprobe") or "ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+                         "stream=width,height", "-of", "csv=p=0", src], capture_output=True, text=True, timeout=30)
+    try:
+        iw, ih = [int(x) for x in pr.stdout.strip().split(",")[:2]]
+    except ValueError:
+        return None
+    if not crops:
+        return None
+    w, h, x, y = [int(v) for v in crops[-1]]
+    if (h < ih * 0.96 or w < iw * 0.96) and h > ih * 0.4 and w > iw * 0.4:
+        return f"crop={w}:{h}:{x}:{y}"
+    return None
+
+
 def normalize_shot(src: str, dst: str, seconds: float, keep_audio: bool) -> None:
     """Scale/crop-or-pad to 1080x1920 @30fps, exact duration, stereo 48k audio (silence if none)."""
     # fill + center-crop (no black bars when a model returns a slightly non-9:16 frame)
-    vf = (f"scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},"
+    bars = detect_letterbox(src)
+    vf = ((bars + ",") if bars else "") + (f"scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},"
           f"setsar=1,fps={FPS},format=yuv420p")
     has_a = probe(src)["has_audio"] and keep_audio
     cmd = [_ff(), "-y", "-i", src]
@@ -629,6 +773,27 @@ def music_bed_filter(total: float, cut_times: List[float], hook_len: float) -> s
     return ";".join(parts)
 
 
+def loudnorm_two_pass(src: str, dst: str, target_i: float = -14.0, tp: float = -1.5, lra: float = 11.0) -> dict:
+    """EBU R128 two-pass: measure, then apply measured values (linear) - video stream copied."""
+    res = subprocess.run([_ff(), "-hide_banner", "-i", src, "-af", f"loudnorm=I={target_i}:TP={tp}:LRA={lra}:print_format=json",
+                          "-f", "null", "-"], capture_output=True, text=True, timeout=300)
+    m = re.search(r"\{[^{}]*\"input_i\"[^{}]*\}", res.stderr or "", re.S)
+    if not m:
+        raise RuntimeError("loudnorm measure failed")
+    meas = json.loads(m.group(0))
+    af = (f"loudnorm=I={target_i}:TP={tp}:LRA={lra}:measured_I={meas['input_i']}:measured_TP={meas['input_tp']}:"
+          f"measured_LRA={meas['input_lra']}:measured_thresh={meas['input_thresh']}:offset={meas['target_offset']}:linear=true,"
+          f"aresample=48000")
+    _run([_ff(), "-y", "-i", src, "-c:v", "copy", "-af", af, "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", dst])
+    return meas
+
+
+def measure_lufs(path: str) -> Optional[float]:
+    res = subprocess.run([_ff(), "-hide_banner", "-i", path, "-af", "ebur128", "-f", "null", "-"], capture_output=True, text=True, timeout=300)
+    vals = re.findall(r"I:\s+(-?[\d.]+) LUFS", res.stderr or "")
+    return float(vals[-1]) if vals else None
+
+
 def assemble(shots: List[dict], hook_text: str, out_path: str, workdir: str) -> dict:
     """shots: dicts with path, seconds, role, caption. Returns probe info of the final mp4."""
     font = _font()
@@ -638,7 +803,10 @@ def assemble(shots: List[dict], hook_text: str, out_path: str, workdir: str) -> 
         normalize_shot(s["path"], dst, float(s["seconds"]), keep_audio=(s["role"] == "hook"))
         norm.append(dst)
     durs = [float(s["seconds"]) for s in shots]
-    total = sum(durs)
+    gen_total = sum(durs)
+    # Held loop frame (free) tops the Short up to MIN_TOTAL when generated footage is just short of it.
+    tail = round(min(LOOP_TAIL_MAX, max(0.0, MIN_TOTAL - gen_total)), 2)
+    total = gen_total + tail
     cuts, acc = [], 0.0
     for d in durs[:-1]:
         acc += d
@@ -656,10 +824,11 @@ def assemble(shots: List[dict], hook_text: str, out_path: str, workdir: str) -> 
     inputs += ["-loop", "1", "-t", f"{total:.2f}", "-i", loop_png]
     n = len(norm)
     concat_in = "".join(f"[{i}:v][{i}:a]" for i in range(n))
-    filters.append(f"{concat_in}concat=n={n}:v=1:a=1[vc][ac]")
+    filters.append(f"{concat_in}concat=n={n}:v=1:a=1[vc0][ac0]")
+    filters.append(f"[vc0]tpad=stop_mode=clone:stop_duration={tail:.2f}[vc];[ac0]apad=pad_dur={tail:.2f}[ac]")
     # loop ending: last LOOP_DISSOLVE seconds dissolve into the opening frame
     filters.append(f"[{n}:v]scale={W}:{H},setsar=1,fps={FPS},format=yuva420p,"
-                   f"fade=t=in:st={total - LOOP_DISSOLVE:.2f}:d={LOOP_DISSOLVE}:alpha=1[lf]")
+                   f"fade=t=in:st={gen_total - LOOP_DISSOLVE:.2f}:d={LOOP_DISSOLVE}:alpha=1[lf]")
     filters.append(f"[vc][lf]overlay=0:0:shortest=1[vl]")
     text_chain = []
     # hook text from frame 0 (first second guaranteed) through the hook shot
@@ -674,11 +843,11 @@ def assemble(shots: List[dict], hook_text: str, out_path: str, workdir: str) -> 
         t += d
     filters.append(f"[vl]{','.join(text_chain)},format=yuv420p[vout]")
     filters.append(music_bed_filter(total, cuts, durs[0]))
-    filters.append("[ac][music]amix=inputs=2:normalize=0:duration=first,loudnorm=I=-14:TP=-1.5:LRA=11,"
-                   "aresample=48000[aout]")
+    filters.append("[ac][music]amix=inputs=2:normalize=0:duration=first,aresample=48000[aout]")
+    premix = os.path.join(workdir, "premix.mp4")
     cmd = [_ff(), "-y", *inputs, "-filter_complex", ";".join(filters), "-map", "[vout]", "-map", "[aout]",
            "-t", f"{total:.2f}", "-r", str(FPS), "-c:v", "libx264", "-preset", "medium", "-crf", "20",
-           "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", out_path]
+           "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", premix]
     try:
         _run(cmd, timeout=900)
         text_burned = True
@@ -686,13 +855,15 @@ def assemble(shots: List[dict], hook_text: str, out_path: str, workdir: str) -> 
         if "drawtext" not in str(exc).lower():
             raise
         logger.warning("%s ffmpeg lacks drawtext; rendering without burned text", MARKER)
-        filters[3] = "[vl]format=yuv420p[vout]"
+        filters[4] = "[vl]format=yuv420p[vout]"
         cmd[cmd.index("-filter_complex") + 1] = ";".join(filters)
         _run(cmd, timeout=900)
         text_burned = False
+    loudnorm_two_pass(premix, out_path)
     info = probe(out_path)
-    info.update({"text_burned": text_burned, "cuts_at": cuts, "loop_dissolve_s": LOOP_DISSOLVE,
-                 "loudnorm": "I=-14 LUFS, TP=-1.5", "music": "synthesized pad + whoosh SFX (royalty-free)"})
+    info.update({"text_burned": text_burned, "cuts_at": cuts, "loop_dissolve_s": LOOP_DISSOLVE, "loop_tail_s": tail,
+                 "generated_seconds": gen_total, "integrated_lufs": measure_lufs(out_path),
+                 "loudnorm": "two-pass I=-14 LUFS, TP=-1.5", "music": "synthesized pad + whoosh SFX (royalty-free)"})
     return info
 
 
@@ -734,7 +905,12 @@ def produce_short(settings: dict, out_dir: str, avoid_topics: Optional[List[str]
     done: List[dict] = []
     try:
         for shot in plan["shots"]:
-            done.append(generate_shot(shot, settings, workdir, ledger, generators, sleep))
+            start = None
+            if done and shot["role"] == "broll":
+                start = last_frame(done[-1]["path"], os.path.join(workdir, f"start{shot['index']}.jpg"))
+            done.append(generate_shot(shot, settings, workdir, ledger, generators, sleep, start_image=start))
+        captions = build_platform_captions(plan, {s.get("engine") for s in done})
+        copy_audit = audit_and_fix_copy(plan, done, captions)
         out = os.path.join(out_dir, f"short_{uuid.uuid4().hex[:12]}.mp4")
         info = assemble(done, plan["on_screen_hook"], out, workdir)
     except Exception:
@@ -746,8 +922,8 @@ def produce_short(settings: dict, out_dir: str, avoid_topics: Optional[List[str]
     info.update({
         "format": "stitched_short", "version": VERSION, "media_source": "ai_generated",
         "cost": ledger.as_dict(), "cost_usd": ledger.total,
-        "shot_list": [{k: s.get(k) for k in ("index", "role", "seconds", "engine", "model", "attempts", "cost_usd", "caption", "prompt", "errors")} for s in done],
-        "platform_captions": build_platform_captions(plan, {s.get("engine") for s in done}),
+        "shot_list": [{k: s.get(k) for k in ("index", "role", "seconds", "engine", "model", "attempts", "cost_usd", "caption", "prompt", "errors", "chained_from_previous_frame")} for s in done],
+        "platform_captions": captions, "copy_audit": copy_audit,
     })
     logger.info("%s Short ready %s length=%.1fs cost=$%.3f (cap $%.2f)", MARKER, out, info["duration"], ledger.total, ledger.cap)
     return out, plan, info

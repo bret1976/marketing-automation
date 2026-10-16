@@ -107,13 +107,13 @@ def test_generate_shot_retries_max_2_then_veo_lite_fallback(tmp_path):
     calls = []
 
     def failing(name):
-        def f(s, p, sec, d):
+        def f(s, p, sec, d, **kw):
             calls.append(name)
             raise RuntimeError("boom")
         return f
 
     def ok(name):
-        def f(s, p, sec, d):
+        def f(s, p, sec, d, **kw):
             calls.append(name)
             open(d, "wb").write(b"x")
             return {"model": name, "billed_seconds": sec}
@@ -143,7 +143,7 @@ def test_kill_switch(monkeypatch):
 @pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg missing")
 def test_produce_short_end_to_end_with_fake_generators(tmp_path):
     def fake(color, audio):
-        def f(settings, prompt, sec, dest):
+        def f(settings, prompt, sec, dest, **kw):
             cmd = ["ffmpeg", "-y", "-f", "lavfi", "-i", f"color=c={color}:s=720x1280:r=24:d={sec}"]
             if audio:
                 cmd += ["-f", "lavfi", "-i", f"sine=f=440:d={sec}", "-shortest"]
@@ -206,7 +206,7 @@ def test_test_mode_zero_retries_no_fallback(tmp_path, monkeypatch):
     monkeypatch.setenv("SHORTS_TEST_MODE", "1")
     calls = []
 
-    def fail(s, p, sec, d):
+    def fail(s, p, sec, d, **kw):
         calls.append(1)
         raise RuntimeError("x")
     gens = {"seedance_fast": fail, "veo_lite": fail, "veo_fast": fail}
@@ -220,7 +220,7 @@ def test_forced_durations_are_exact(tmp_path, monkeypatch):
     monkeypatch.setenv("SHORTS_TEST_MODE", "1")
     seen = []
 
-    def fake(settings, prompt, sec, dest):
+    def fake(settings, prompt, sec, dest, **kw):
         seen.append(sec)
         subprocess.run(["ffmpeg", "-y", "-f", "lavfi", "-i", f"color=c=red:s=720x1280:r=24:d={sec}", "-c:v", "libx264", "-preset", "ultrafast", dest], check=True, capture_output=True)
         return {"model": "f", "billed_seconds": sec}
@@ -228,3 +228,49 @@ def test_forced_durations_are_exact(tmp_path, monkeypatch):
     out, plan, info = ss.produce_short({"shorts_forced_durations": [4, 5, 5, 5]}, str(tmp_path), llm=lambda s, p: _plan(), generators=gens, sleep=lambda s: None)
     assert seen == [4, 5, 5, 5]
     assert info["cost_usd"] <= 0.75
+
+
+def test_copy_audit_fixes_wrong_model_and_fake_techniques():
+    plan = ss.sanitize_plan(_plan(on_screen_hook="1 robot, 4 shots"))
+    shots = [dict(s, engine=("veo_fast" if s["role"] == "hook" else "seedance_fast"), chained_from_previous_frame=s["role"] == "broll") for s in plan["shots"]]
+    shots[2]["caption"] = "Simulating underwater lighting in Veo."
+    caps = {"youtube": {"title": "1 robot, made with Sora", "caption": "1 robot, made with Sora\nWe used consistent prompt seeds in Veo. Same robot.\n\n#AIFilmmaking #Veo3 #Seedance", "hashtags": ["#AIFilmmaking", "#Veo3", "#Seedance"]},
+            "tiktok": {"caption": "Kept the drone identical across 4 shots. Cut 30% of renders.\n\n#AIFilmmaking #Veo3 #Seedance", "hashtags": ["#AIFilmmaking", "#Veo3", "#Seedance"]}}
+    log = ss.audit_and_fix_copy(plan, shots, caps)
+    assert log["clean"]
+    assert shots[2]["caption"] == "Shot 3: Seedance 1 Pro Fast"
+    assert "seeds" not in caps["youtube"]["caption"] and "Sora" not in caps["youtube"]["caption"]
+    assert "identical" not in caps["tiktok"]["caption"] and "30%" not in caps["tiktok"]["caption"]
+    assert "Seedance 1 Pro Fast" in caps["tiktok"]["caption"]  # factual credit derived from shot records
+    assert "#Seedance" in caps["tiktok"]["caption"]
+    assert ss.copy_problems("Locked style line in every prompt.", {"veo_fast"}) == []
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg missing")
+def test_broll_chains_from_previous_last_frame(tmp_path, monkeypatch):
+    monkeypatch.setenv("SHORTS_TEST_MODE", "1")
+    images = []
+
+    def fake(settings, prompt, sec, dest, **kw):
+        images.append(kw.get("image"))
+        subprocess.run(["ffmpeg", "-y", "-f", "lavfi", "-i", f"testsrc2=s=720x1280:r=24:d={sec}", "-c:v", "libx264", "-preset", "ultrafast", dest], check=True, capture_output=True)
+        return {"model": "f", "billed_seconds": sec}
+    gens = {"veo_fast": fake, "seedance_fast": fake, "veo_lite": fake}
+    out, plan, info = ss.produce_short({"shorts_forced_durations": [4, 5, 5, 5]}, str(tmp_path), llm=lambda s, p: _plan(), generators=gens, sleep=lambda s: None)
+    assert images[0] is None and all(images[1:])
+    assert all(s["chained_from_previous_frame"] for s in info["shot_list"][1:])
+    assert info["duration"] >= 20.0  # 19s generated + 1s held loop frame
+    assert abs(info["integrated_lufs"] - (-14.0)) <= 1.0
+    assert info["cost_usd"] <= 0.75
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg missing")
+def test_baked_in_letterbox_is_removed(tmp_path):
+    src, dst = str(tmp_path / "b.mp4"), str(tmp_path / "n.mp4")
+    subprocess.run(["ffmpeg", "-y", "-f", "lavfi", "-i", "testsrc2=s=720x1280:r=24:d=2", "-vf",
+                    "drawbox=0:0:720:200:black:t=fill,drawbox=0:1080:720:200:black:t=fill", "-c:v", "libx264", "-preset", "ultrafast", src],
+                   check=True, capture_output=True)
+    assert ss.detect_letterbox(src) is not None
+    ss.normalize_shot(src, dst, 2, False)
+    assert ss.detect_letterbox(dst) is None
+    assert (ss.probe(dst)["width"], ss.probe(dst)["height"]) == (1080, 1920)

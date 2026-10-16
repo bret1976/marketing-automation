@@ -100,7 +100,7 @@ def test_cost_cap_env_override(monkeypatch):
     monkeypatch.setenv("SHORTS_COST_CAP_USD", "0.9")
     assert ss.cost_cap({}) == 0.9
     monkeypatch.delenv("SHORTS_COST_CAP_USD")
-    assert ss.cost_cap({}) == ss.DEFAULT_COST_CAP == 1.50
+    assert ss.cost_cap({}) == ss.DEFAULT_COST_CAP == 0.75
 
 
 def test_generate_shot_retries_max_2_then_veo_lite_fallback(tmp_path):
@@ -153,7 +153,7 @@ def test_produce_short_end_to_end_with_fake_generators(tmp_path):
         return f
 
     gens = {"veo_fast": fake("red", True), "seedance_fast": fake("blue", False), "veo_lite": fake("green", True)}
-    out, plan, info = ss.produce_short({}, str(tmp_path), llm=lambda s, p: _plan(), generators=gens, sleep=lambda s: None)
+    out, plan, info = ss.produce_short({"shorts_cost_cap_usd": 1.5}, str(tmp_path), llm=lambda s, p: _plan(), generators=gens, sleep=lambda s: None)
     assert os.path.exists(out)
     assert (info["width"], info["height"]) == (1080, 1920)
     assert 20 <= info["duration"] <= 30.5
@@ -192,3 +192,24 @@ def test_growth_v2_produce_routes_to_stitched(monkeypatch):
 def test_hashtags_drop_tools_we_did_not_use():
     tags = ss.clean_hashtags(["#SoraAI", "#AIFilmmaking", "#Kling", "#Veo3"])
     assert "#SoraAI" not in tags and "#Kling" not in tags and "#Veo3" in tags
+
+
+def test_tool_tags_follow_engines_actually_used():
+    plan = ss.sanitize_plan(_plan())
+    caps = ss.build_platform_captions(plan, {"veo_fast", "veo_lite"})
+    assert all("#Seedance" not in c["caption"] for c in caps.values())
+    caps = ss.build_platform_captions(plan, {"veo_fast", "seedance_fast"})
+    assert any("#Seedance" in c["caption"] for c in caps.values())
+
+
+def test_test_mode_zero_retries_no_fallback(tmp_path, monkeypatch):
+    monkeypatch.setenv("SHORTS_TEST_MODE", "1")
+    calls = []
+
+    def fail(s, p, sec, d):
+        calls.append(1)
+        raise RuntimeError("x")
+    gens = {"seedance_fast": fail, "veo_lite": fail, "veo_fast": fail}
+    with pytest.raises(RuntimeError):
+        ss.generate_shot({"index": 2, "role": "broll", "seconds": 5, "prompt": "p"}, {}, str(tmp_path), ss.CostLedger(0.75), gens, sleep=lambda s: None)
+    assert len(calls) == 1

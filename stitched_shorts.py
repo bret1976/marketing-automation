@@ -44,7 +44,7 @@ MIN_TOTAL, MAX_TOTAL = 20.0, 30.0
 HOOK_MIN, HOOK_MAX = 4, 6
 BROLL_MIN, BROLL_MAX = 4, 8
 MAX_SHOT_RETRIES = 2
-DEFAULT_COST_CAP = 1.50
+DEFAULT_COST_CAP = 0.75  # hard cap per Short (Bret, 2026-10-16)
 LOOP_DISSOLVE = 0.5
 
 VEO_FAST_MODEL = "veo-3.1-fast-generate-preview"
@@ -71,6 +71,16 @@ def enabled(settings: Optional[dict] = None) -> bool:
     if str(os.environ.get("STITCHED_SHORTS", "1")).strip().lower() in {"0", "false", "no", "off"}:
         return False
     return str((settings or {}).get("autopilot_format") or "stitched").lower() != "single"
+
+
+def test_mode(settings: Optional[dict] = None) -> bool:
+    """SHORTS_TEST_MODE=1 (or settings.shorts_test_mode): zero retries, no paid fallback model."""
+    raw = os.environ.get("SHORTS_TEST_MODE", (settings or {}).get("shorts_test_mode", ""))
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def max_retries(settings: Optional[dict] = None) -> int:
+    return 0 if test_mode(settings) else MAX_SHOT_RETRIES
 
 
 def cost_cap(settings: Optional[dict] = None) -> float:
@@ -321,12 +331,27 @@ def plan_short(settings: dict, avoid_topics: Optional[List[str]] = None, avoid_t
 # per-platform captions + staggered schedule
 # --------------------------------------------------------------------------
 
-def build_platform_captions(plan: dict) -> Dict[str, dict]:
+TOOL_TAGS = {"#veo3": {"veo_fast", "veo_lite"}, "#veo": {"veo_fast", "veo_lite"}, "#seedance": {"seedance_fast"}}
+
+
+def filter_tool_tags(tags: List[str], used_engines: Optional[set]) -> List[str]:
+    if used_engines is None:
+        return tags
+    return [t for t in tags if t.lower() not in TOOL_TAGS or TOOL_TAGS[t.lower()] & used_engines]
+
+
+def build_platform_captions(plan: dict, used_engines: Optional[set] = None) -> Dict[str, dict]:
     hook = plan.get("on_screen_hook") or ""
     title = plan.get("title_line") or hook
     q = plan.get("comment_question") or ""
     p = plan.get("platforms") or {}
     base_tags = ["#AIFilmmaking", "#CinematicAI", "#BehindTheScenes", "#Veo3", "#Seedance"]
+
+    base_tags = filter_tool_tags(base_tags, used_engines)
+
+    def _tags(tags, fallback=None, lo=3, hi=5):  # tool-aware: never tag a model we did not use
+        raw = tags if isinstance(tags, list) else _HASHTAG_RE.findall(str(tags or ""))
+        return clean_hashtags(filter_tool_tags(list(raw), used_engines), fallback, lo, hi)
 
     def get(name: str) -> dict:
         v = p.get(name)
@@ -336,17 +361,17 @@ def build_platform_captions(plan: dict) -> Dict[str, dict]:
     yt_title = _clean(yt.get("title") or f"{title}: {hook}", 100)
     if not has_number(yt_title):
         yt_title = _clean(f"{hook} | {title}", 100)
-    yt_tags = clean_hashtags(yt.get("hashtags"), base_tags)
+    yt_tags = _tags(yt.get("hashtags"), base_tags)
     yt_desc = _clean(yt.get("description") or f"How this AI short was made, shot by shot. {q}", 300)
     tt = get("tiktok")
-    tt_tags = clean_hashtags(tt.get("hashtags"), base_tags)
+    tt_tags = _tags(tt.get("hashtags"), base_tags)
     tt_cap = _clean(tt.get("caption") or f"{hook}. Watch it loop. {q}", 150)
     ig = get("instagram")
-    ig_tags = clean_hashtags(ig.get("hashtags"), base_tags)
+    ig_tags = _tags(ig.get("hashtags"), base_tags)
     ig_cap = str(ig.get("caption") or f"{hook}\nEvery frame AI-generated, cut like a real film.\nSave this for your next shot list.")
     ig_cap = "\n".join(_clean(l, 200) for l in ig_cap.splitlines() if _clean(l))
     li = get("linkedin")
-    li_tags = clean_hashtags(li.get("hashtags"), base_tags, lo=3, hi=3)
+    li_tags = _tags(li.get("hashtags"), base_tags, lo=3, hi=3)
     li_cap = str(li.get("caption") or f"{title}\n\n{hook}. One coherent shot list, two video models, one edit.\n\nThe workflow: plan the story first, lock the style, then generate shot by shot.")
     li_cap = "\n".join(_clean(l, 300) for l in li_cap.splitlines())
     out = {
@@ -483,7 +508,10 @@ def generate_shot(shot: dict, settings: dict, workdir: str, ledger: CostLedger,
     chain = engines_for(shot["role"])
     if shot["role"] == "broll" and generators is None and not (settings.get("fal_api_key") or os.environ.get("FAL_KEY") or os.environ.get("FAL_API_KEY")):
         chain = ["veo_lite"]  # no fal key configured: go straight to the Veo Lite fallback
-    for attempt in range(1 + MAX_SHOT_RETRIES):
+    retries = max_retries(settings)
+    if test_mode(settings):
+        chain = chain[:1]  # no fallback to another paid model in test mode
+    for attempt in range(1 + retries):
         engine = chain[min(attempt, len(chain) - 1)] if shot["role"] == "broll" else chain[0]
         secs = shot["seconds"] if engine == "seedance_fast" else veo_seconds_for(shot["seconds"])
         est = shot_cost(engine, secs)
@@ -502,9 +530,9 @@ def generate_shot(shot: dict, settings: dict, workdir: str, ledger: CostLedger,
             ledger.charge(f"shot{shot['index']}:{engine}", 0.0, ok=False, attempt=attempt + 1, error=str(exc)[:200])
             errors.append(f"{engine} attempt {attempt + 1}: {exc}")
             logger.warning("%s shot %s %s attempt %s failed: %s", MARKER, shot["index"], engine, attempt + 1, exc)
-            if attempt < MAX_SHOT_RETRIES:
+            if attempt < retries:
                 sleep(min(20.0, 5.0 * (attempt + 1)))
-    raise RuntimeError(f"shot {shot['index']} failed after {1 + MAX_SHOT_RETRIES} attempts: " + " | ".join(errors)[-800:])
+    raise RuntimeError(f"shot {shot['index']} failed after {1 + retries} attempt(s): " + " | ".join(errors)[-800:])
 
 
 # --------------------------------------------------------------------------
@@ -546,9 +574,18 @@ def _wrap(text: str, width: int) -> str:
 
 
 def _drawtext(textfile: str, font: str, size: int, y: str, start: float, end: float) -> str:
+    """One drawtext per line so every line is centered on its own (not left-aligned in a block)."""
     fontpart = f"fontfile='{font}':" if font else ""
-    return (f"drawtext={fontpart}textfile='{textfile}':fontsize={size}:fontcolor=white:borderw=6:bordercolor=black@0.85:"
-            f"line_spacing=10:x=(w-text_w)/2:y={y}:enable='between(t,{start:.2f},{end:.2f})'")
+    with open(textfile) as fh:
+        lines = [l for l in fh.read().splitlines() if l.strip()] or [""]
+    out = []
+    for i, line in enumerate(lines):
+        lf = f"{textfile}.{i}"
+        with open(lf, "w") as fh:
+            fh.write(line)
+        out.append(f"drawtext={fontpart}textfile='{lf}':fontsize={size}:fontcolor=white:borderw=6:bordercolor=black@0.85:"
+                   f"x=(w-text_w)/2:y={y}+{i}*{int(size * 1.2)}:enable='between(t,{start:.2f},{end:.2f})'")
+    return ",".join(out)
 
 
 def normalize_shot(src: str, dst: str, seconds: float, keep_audio: bool) -> None:
@@ -698,7 +735,7 @@ def produce_short(settings: dict, out_dir: str, avoid_topics: Optional[List[str]
         "format": "stitched_short", "version": VERSION, "media_source": "ai_generated",
         "cost": ledger.as_dict(), "cost_usd": ledger.total,
         "shot_list": [{k: s.get(k) for k in ("index", "role", "seconds", "engine", "model", "attempts", "cost_usd", "caption", "prompt", "errors")} for s in done],
-        "platform_captions": build_platform_captions(plan),
+        "platform_captions": build_platform_captions(plan, {s.get("engine") for s in done}),
     })
     logger.info("%s Short ready %s length=%.1fs cost=$%.3f (cap $%.2f)", MARKER, out, info["duration"], ledger.total, ledger.cap)
     return out, plan, info

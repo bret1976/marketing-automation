@@ -178,7 +178,9 @@ Return ONLY JSON:
                     save/follow CTA, "hashtags": 3-5 (Instagram max is 5)}},
      "linkedin":  {{"caption": 6-10 short lines: professional hook, the craft problem, the workflow, what it teaches,
                     a genuine question for practitioners; no engagement bait, "hashtags": 3}},
-     "twitter":   {{"caption": max 220 chars WITHOUT hashtags: punchy hook, one fact, a question, "hashtags": 3-4}}
+     "twitter":   {{"caption": max 240 chars WITHOUT hashtags or links; LINE 1 is a spectacle hook that names the
+                    model (e.g. "Veo 3.1 + Seedance") or the wow moment, never a question or process opener;
+                    then one fact, "hashtags": 1}}
   }}
 }}
 Consistency: text-to-video models cannot remember a face, so prefer a non-human hero (prop, robot, creature,
@@ -491,7 +493,7 @@ TAG_LINKEDIN = ["#GenerativeAI", "#AIFilmmaking", "#VideoProduction", "#Creative
 # YouTube shows the first 3 description tags above the title and ignores all tags past 60;
 # TikTok guidance is 3-5 specific tags (we run 6 for wider test reach); LinkedIn "a handful".
 TAG_RECIPE = {"tiktok": (7, 2, 2, 2), "instagram": (5, 1, 2, 1), "youtube": (4, 1, 2, 1),
-              "twitter": (3, 1, 1, 1), "linkedin": (4, 0, 0, 0)}
+              "twitter": (1, 0, 1, 0), "linkedin": (4, 0, 0, 0)}  # X: 1 tag max (x-safe-v1)
 _VIRAL_TAG_OK = re.compile(r"ai|film|cinema|anim|vfx|veo|seedance|story|scifi|fantasy", re.I)
 
 

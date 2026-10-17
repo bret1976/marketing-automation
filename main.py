@@ -35,6 +35,7 @@ import spend_guard
 import autopilot_watch
 import yt_proxy
 import growth_v2
+import x_policy
 
 # Growth V2: stop Railway's boot-time cockpit_* monkeypatches (repost-only Autopilot).
 # GROWTH_V2=0 or LEGACY_BOOT_PATCHES=1 lets them apply again.
@@ -1431,7 +1432,11 @@ def publish_via_postproxy(post: dict, settings: dict, platforms: List[str]) -> d
     def caption_for(platform: str) -> str:
         return platform_captions.get(platform) or post.get("text", "")
 
-    twitter_parts = split_twitter_caption(caption_for("twitter"), None if platform_captions else post.get("thread"))
+    if x_policy.enabled():
+        # x-safe-v1: one X post per publish, never a self-reply thread.
+        twitter_parts = [caption_for("twitter")[:TWITTER_CHAR_LIMIT]]
+    else:
+        twitter_parts = split_twitter_caption(caption_for("twitter"), None if platform_captions else post.get("thread"))
     platform_params = resolve_postproxy_platform_params(settings, mapped_platforms)
     skipped_errors: List[str] = []
     publishable: List[str] = []
@@ -2462,6 +2467,8 @@ def save_engagement_state(state: dict):
         logger.error(f"Error saving engagement state file: {e}")
 
 def fetch_and_draft_mention_replies(settings: dict):
+    if not x_policy.replies_enabled():
+        return  # x-safe-v1: no automated X replies (X_REPLIES_ENABLED=1 re-enables)
     required_keys = ["twitter_consumer_key", "twitter_consumer_secret", "twitter_access_token", "twitter_access_token_secret"]
     if not all(settings.get(k) for k in required_keys):
         return
@@ -2644,6 +2651,80 @@ async def publish_post_to_platforms(post: dict, settings: dict, bypass_daily_lim
             "blocked_by_publish_guard": True,
         }
     platforms = resolve_platform_list(post["platform"])
+    x_gate = apply_x_policy(post, platforms)
+    if x_gate.get("result"):
+        return x_gate["result"]
+    platforms = x_gate["platforms"]
+    x_notes = x_gate.get("notes") or []
+    result = await _publish_post_to_platforms_inner(post, settings, platforms, bypass_daily_limit)
+    if x_notes:
+        result["errors"] = list(result.get("errors") or []) + x_notes
+    if x_gate.get("x_caption") is not None and any(x_policy.is_x(str(s)) for s in (result.get("successes") or [])):
+        try:
+            x_policy.record(post, x_gate["x_caption"])
+        except Exception as xp_err:
+            logger.warning("X_POLICY ledger write failed: %s", xp_err)
+    return result
+
+
+def apply_x_policy(post: dict, platforms: List[str]) -> dict:
+    """x-safe-v1 gate for the X path only. Sanitizes the X caption (hook first, <=280,
+    0-1 hashtag, no links, no thread), refuses duplicates/text-only, and holds X to
+    max 2 posts/24h >= 4h apart. Other platforms in the same post are untouched."""
+    if not x_policy.enabled() or not any(x_policy.is_x(p) for p in platforms):
+        return {"platforms": platforms}
+    caps = dict(post.get("platform_captions") or {})
+    raw = caps.get("twitter") or post.get("text") or ""
+    hook = post.get("hook") or (post.get("concept") or {}).get("title_line") or ""
+    x_caption = x_policy.sanitize_caption(raw, hook)
+    ok, reason, retry_at = x_policy.check(post, x_caption)
+    others = [p for p in platforms if not x_policy.is_x(p)]
+    if ok:
+        if caps or x_caption != (post.get("text") or ""):
+            caps["twitter"] = x_caption
+            post["platform_captions"] = caps
+            if not others:
+                post["text"] = x_caption
+        post["thread"] = None
+        post["x_policy"] = {"pack": x_policy.PACK, "caption_chars": len(x_caption)}
+        return {"platforms": platforms, "x_caption": x_caption}
+    logger.info("X_POLICY held X for post %s: %s", post.get("id"), reason)
+    if not others:
+        if retry_at is not None:
+            local = x_policy.schedule_time(datetime.now() + (retry_at - x_policy._now()))
+            return {"result": {"successes": [], "errors": [f"x_policy: {reason}"], "tweet_id": None, "tweet_ids": None,
+                               "x_deferred_until": local.isoformat(timespec="seconds")}}
+        return {"result": {"successes": [], "errors": [f"x_policy: {reason}"], "tweet_id": None, "tweet_ids": None,
+                           "x_policy_blocked": True}}
+    if retry_at is not None:
+        # Cadence hold on a multi-platform post: the other networks publish now and X
+        # gets its own queued post at the next allowed time (varied minute).
+        queued = split_x_post(post, x_caption, x_policy.schedule_time(datetime.now() + (retry_at - x_policy._now())))
+        return {"platforms": others, "notes": [f"x_policy: X queued for {queued['scheduled_time']} ({reason})"]}
+    return {"platforms": others, "notes": [f"x_policy: X skipped ({reason})"]}
+
+
+def split_x_post(post: dict, x_caption: str, when: datetime) -> dict:
+    """Queue a twitter-only copy of post at `when` (server-local time)."""
+    x_post = json.loads(json.dumps(post))
+    x_post["id"] = str(uuid.uuid4())
+    x_post["stagger_group"] = post.get("stagger_group") or post.get("id")
+    x_post["platform"] = "twitter"
+    x_post["text"] = x_caption
+    x_post["platform_captions"] = {"twitter": x_caption}
+    x_post["thread"] = None
+    x_post["status"] = "PENDING"
+    x_post["scheduled_time"] = when.replace(microsecond=0).isoformat(timespec="seconds")
+    for key in ("postproxy_post_id", "postproxy_post_ids", "postproxy_result", "error_message", "posted_at"):
+        x_post.pop(key, None)
+    posts = load_scheduled_posts()
+    posts.append(x_post)
+    save_scheduled_posts(posts)
+    logger.info("X_POLICY queued X post %s for %s (server time)", x_post["id"], x_post["scheduled_time"])
+    return x_post
+
+
+async def _publish_post_to_platforms_inner(post: dict, settings: dict, platforms: List[str], bypass_daily_limit: bool = False) -> dict:
     successes = []
     errors = []
     tweet_id = None
@@ -2688,7 +2769,7 @@ async def publish_post_to_platforms(post: dict, settings: dict, bypass_daily_lim
                     if media_id:
                         media_ids = [media_id]
 
-                if post.get("thread"):
+                if post.get("thread") and not x_policy.enabled():
                     prev_id = None
                     ids_collected = []
                     for idx, tweet in enumerate(post["thread"]):
@@ -2703,10 +2784,11 @@ async def publish_post_to_platforms(post: dict, settings: dict, bypass_daily_lim
                     tweet_ids = ids_collected
                     tweet_id = ids_collected[0] if ids_collected else None
                 else:
+                    x_text = (post.get("platform_captions") or {}).get("twitter") or post["text"]
                     if media_ids:
-                        res = client.create_tweet(text=post["text"], media_ids=media_ids)
+                        res = client.create_tweet(text=x_text, media_ids=media_ids)
                     else:
-                        res = client.create_tweet(text=post["text"])
+                        res = client.create_tweet(text=x_text)
                     tweet_id = res.data["id"]
                 successes.append("twitter")
         except Exception as tw_err:
@@ -2806,6 +2888,18 @@ def apply_publish_result_to_post(p: dict, result: dict):
             publish_guard.record_publish(p)
         except Exception as guard_err:
             logger.warning(f"publish-guard ledger write failed: {guard_err}")
+    if result.get("x_deferred_until"):
+        # x-safe-v1 cadence hold: keep the X post queued for the next allowed slot.
+        p["status"] = "PENDING"
+        p["scheduled_time"] = result["x_deferred_until"]
+        p["error_message"] = "; ".join(errors)
+        p["x_deferrals"] = int(p.get("x_deferrals") or 0) + 1
+        logger.info("X_POLICY rescheduled X post %s to %s (server time)", p.get("id"), p["scheduled_time"])
+        return
+    if result.get("x_policy_blocked"):
+        p["status"] = "SKIPPED"
+        p["error_message"] = "; ".join(errors)
+        return
     if result.get("blocked_by_daily_limit"):
         p["status"] = "AWAITING_APPROVAL"
         p["error_message"] = "; ".join(errors)
@@ -3142,6 +3236,13 @@ async def scheduler_loop():
 
 @app.on_event("startup")
 def startup_event():
+    try:
+        seeded = x_policy.bootstrap_from_posts(load_scheduled_posts())
+        if seeded:
+            logger.info("X_POLICY seeded ledger with %s earlier X posts", seeded)
+        x_policy.log_boot()
+    except Exception as xp_err:
+        logger.warning("X_POLICY boot check failed: %s", xp_err)
     if os.environ.get("DISABLE_BACKGROUND_SCHEDULER", "").lower() == "true":
         logger.info("Background scheduler disabled by DISABLE_BACKGROUND_SCHEDULER=true.")
         return
@@ -4911,6 +5012,8 @@ def send_engagement_reply(item_id: str):
     try:
         if settings.get("mock_mode", True):
             logger.info("[MOCK] Sending engagement reply")
+        elif target.get("platform") == "twitter" and not x_policy.replies_enabled():
+            raise HTTPException(status_code=403, detail="X replies are disabled (x-safe-v1). Reply by hand in the X app.")
         elif target.get("platform") == "twitter":
             client = tweepy.Client(
                 consumer_key=settings["twitter_consumer_key"],
@@ -4960,6 +5063,8 @@ def send_engagement_reply(item_id: str):
         target["sent_at"] = datetime.now().isoformat()
         save_engagement_queue(items)
         return {"status": "SUCCESS", "message": "Reply sent."}
+    except HTTPException:
+        raise
     except Exception as e:
         logger.exception("Failed to send engagement reply")
         raise HTTPException(status_code=500, detail=f"Failed to send reply: {str(e)}")
@@ -5124,7 +5229,9 @@ def health():
             "publish_guard": publish_guard.PACK,
             "autopilot_watch": autopilot_watch.PACK,
             "spend_guard": spend_guard.PACK,
+            "x_policy": x_policy.PACK,
         },
+        "x_policy": x_policy.summary(),
         "publish_guard": publish_guard.summary(),
         "autopilot_watch": _autopilot_watch_compact(),
         "yt_proxy": yt_proxy.summary(),

@@ -46,6 +46,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import stitched_shorts
 import viral_research
+import x_policy
 
 logger = logging.getLogger("growth_v2")
 
@@ -351,7 +352,7 @@ def build_captions(concept: dict, credit: Optional[dict] = None) -> Dict[str, st
     angle = _clean_line(concept.get("linkedin_angle") or "")
     li_parts = ([series] if series else []) + [hook] + lines + ([angle] if angle else []) + ([credit_long] if credit_long else []) + ([question] if question else [])
     linkedin = "\n\n".join(p for p in li_parts if p) + f"\n\n{tag_line}"
-    tweet_tags = " ".join(tags[:2])
+    tweet_tags = " ".join(tags[:1])  # x-safe-v1: X gets 0-1 hashtag
     base = f"{hook} {lines[0]}" if lines else hook
     if series and len(series) + len(base) + len(tweet_tags) + 6 <= 280:
         base = f"{series}: {base}"
@@ -1299,6 +1300,9 @@ def build_staggered_posts(post: dict, info: dict, platforms: List[str], start: O
     (first platform now, others later) instead of identical simultaneous posts."""
     caps = stitched_platform_captions(info, platforms)
     sched = stitched_shorts.staggered_schedule(platforms, start)
+    if "twitter" in sched and x_policy.enabled():
+        # x-safe-v1: X goes out >= 4h after the last X post, at a varied minute.
+        sched["twitter"] = x_policy.schedule_time(datetime.fromisoformat(sched["twitter"])).isoformat(timespec="seconds")
     group = post["id"]
     out = []
     for i, plat in enumerate(sorted(platforms, key=lambda p: sched[p])):
@@ -1441,8 +1445,30 @@ async def run_autopilot(settings: dict, dry_run: bool = False) -> dict:
         save_state(state)
         return {"ok": True, "awaiting_approval": True, "post_id": post["id"]}
     else:
-        posts.append(post)
-        m.save_scheduled_posts(posts)
+        x_queued = None
+        if x_policy.enabled() and "twitter" in platforms:
+            # x-safe-v1: X never goes out in the same second as the slot; it gets its own
+            # post at a varied minute, >= 4h after the previous X post.
+            x_caption = x_policy.sanitize_caption((post.get("platform_captions") or {}).get("twitter") or post.get("text") or "",
+                                                  post.get("hook") or "")
+            others = [p for p in platforms if p != "twitter"]
+            if others:
+                post["platform"] = ",".join(others)
+                post["platform_captions"] = {k: v for k, v in (post.get("platform_captions") or {}).items() if k != "twitter"}
+            posts.append(post)
+            m.save_scheduled_posts(posts)
+            x_queued = m.split_x_post(post, x_caption, x_policy.schedule_time(datetime.now()))
+            if not others:
+                posts = [p for p in m.load_scheduled_posts() if p.get("id") != post["id"]]
+                m.save_scheduled_posts(posts)
+                record_history(state, post)
+                save_state(state)
+                logger.info("%s X-only slot queued for %s", MARKER, x_queued["scheduled_time"])
+                return {"ok": True, "post_id": x_queued["id"], "successes": [], "errors": [], "x_queued_for": x_queued["scheduled_time"]}
+            logger.info("%s X queued separately for %s (x-safe-v1)", MARKER, x_queued["scheduled_time"])
+        else:
+            posts.append(post)
+            m.save_scheduled_posts(posts)
     result = await m.publish_post_to_platforms(post, settings)
     posts = m.load_scheduled_posts()
     for p in posts:

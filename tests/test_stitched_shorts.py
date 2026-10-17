@@ -73,7 +73,10 @@ def test_platform_captions_distinct_and_3_to_5_hashtags():
     texts = [c["caption"] for c in caps.values()]
     assert len(set(texts)) == 5
     for name, c in caps.items():
-        assert 3 <= len(c["hashtags"]) <= 8, name
+        if name == "twitter":  # x-safe-v1: X gets 0-1 hashtag
+            assert len(c["hashtags"]) <= 1
+        else:
+            assert 3 <= len(c["hashtags"]) <= 8, name
         assert "#fyp" not in c["caption"].lower() and "#viral" not in c["caption"].lower()
         assert "http" not in c["caption"]
     assert len(caps["linkedin"]["hashtags"]) in (3, 4, 5)
@@ -391,14 +394,14 @@ def test_research_never_raises():
 
 def test_twitter_caption_fits_280():
     caps = ss.build_platform_captions(dict(_plan(), platforms={"twitter": {"caption": "x " * 300, "hashtags": ["#AIvideo"]}}), {"veo_fast"})
-    assert len(caps["twitter"]["caption"]) <= 280 and "#AIvideo" in caps["twitter"]["caption"]
+    assert len(caps["twitter"]["caption"]) <= 280 and len(caps["twitter"]["hashtags"]) <= 1
 
 
 def test_hashtag_counts_mix_and_tool_cap():
     caps = ss.build_platform_captions(dict(ss.sanitize_plan(_plan()), viral_hashtags=["#aishortfilm", "#mango", "#shortsfeed"]),
                                       {"veo_fast", "seedance_fast"})
     n = {k: len(v["hashtags"]) for k, v in caps.items()}
-    assert 6 <= n["tiktok"] <= 8 and n["instagram"] == 5 and 3 <= n["twitter"] <= 4 and 3 <= n["linkedin"] <= 5
+    assert 6 <= n["tiktok"] <= 8 and n["instagram"] == 5 and n["twitter"] <= 1 and 3 <= n["linkedin"] <= 5
     assert "#Shorts" in caps["youtube"]["hashtags"] and 4 <= n["youtube"] <= 6
     for k, v in caps.items():
         low = [t.lower() for t in v["hashtags"]]

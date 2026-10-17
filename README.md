@@ -97,3 +97,20 @@ render, or post). Scheduled Autopilot slots run in-process and are never counted
 Pattern credit (no code copied): laurentS/slowapi (MIT) per-route limits + 429/Retry-After;
 m24927605/agentic-spendguard (Apache-2.0) reserve-before-call / refund-after;
 jonahberg/the-blue-board PR #235 window + daily cap with 0 = kill switch; OWASP LLM10 Unbounded Consumption.
+
+## X safe mode (x-safe-v1, backend-only)
+
+`x_policy.py` is the single gate for every X publish (PostProxy and direct tweepy). Added 2026-10-16
+after @6framestudios was spam-filtered. Other networks are unchanged.
+
+- No automated X replies/comments: mention-reply drafting for X is off and the engagement-queue
+  X send returns 403. `X_REPLIES_ENABLED=1` re-enables.
+- No X threads (self-reply chains); one post per publish.
+- At most 2 native-video X posts per rolling 24h, at least 4h apart (`X_MAX_POSTS_PER_DAY` /
+  `X_MIN_GAP_HOURS` can only tighten). X is queued as its own post at a varied minute (7-53 min jitter),
+  never in the same second as the slot. A held X post is rescheduled, not failed.
+- X caption: spectacle hook on line 1, <= 280 chars, 0-1 hashtag, no links, video required.
+- Never posts the same caption or the same video to X twice (`STATE_DIR/x_post_ledger.json`,
+  seeded from earlier X posts on first boot), so delete-and-repost and retry double-posts are refused.
+- `/health` -> `x_policy` shows the live settings and next allowed X time; boot logs `X_POLICY ...`.
+- Kill switch: `X_SAFE_MODE=0` restores the old X behaviour.

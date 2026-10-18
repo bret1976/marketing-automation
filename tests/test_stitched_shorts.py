@@ -416,3 +416,41 @@ def test_viral_filter_drops_offtopic_cartoon():
     t = "Dadaji Ka Mango Tree #shorts #shortsfeed #shortvideo #short #shortsvideo #mango #ai #dadaji #cartoon"
     assert not vr.NICHE_RE.search(t)
     assert vr.NICHE_RE.search("POOF | AI Short Film") and vr.NICHE_RE.search("THE TITAN AWAKENS | Seedance 2.5 AI Short")
+
+
+def test_broll_retries_seedance_when_veo_lite_would_break_cap(tmp_path):
+    # Live 2026-10-18 00:03 UTC: Seedance shot 3 was moderated, the Veo Lite fallback ($0.30) did not fit
+    # under the $0.75 cap after $0.518 spent, and the whole Short failed. A Seedance retry ($0.108) fits.
+    calls = []
+
+    def seedance(s, p, sec, d, **kw):
+        calls.append("seedance_fast")
+        if len(calls) == 1:
+            raise RuntimeError("Seedance result HTTP 422: content_policy_violation")
+        open(d, "wb").write(b"x")
+        return {"model": "seedance", "billed_seconds": sec}
+
+    def veo_lite(s, p, sec, d, **kw):
+        calls.append("veo_lite")
+        open(d, "wb").write(b"x")
+        return {"model": "veo_lite", "billed_seconds": sec}
+
+    gens = {"seedance_fast": seedance, "veo_lite": veo_lite}
+    ledger = ss.CostLedger(0.75)
+    ledger.charge("spent", 0.518)
+    shot = {"index": 3, "role": "broll", "seconds": 5, "prompt": "p"}
+    res = ss.generate_shot(shot, {}, str(tmp_path), ledger, gens, sleep=lambda s: None)
+    assert calls == ["seedance_fast", "seedance_fast"] and res["engine"] == "seedance_fast"
+    assert ledger.total <= 0.75
+
+
+def test_broll_still_raises_cap_when_nothing_fits(tmp_path):
+    def failing(s, p, sec, d, **kw):
+        raise RuntimeError("boom")
+
+    gens = {"seedance_fast": failing, "veo_lite": failing}
+    ledger = ss.CostLedger(0.75)
+    ledger.charge("spent", 0.70)
+    shot = {"index": 3, "role": "broll", "seconds": 5, "prompt": "p"}
+    with pytest.raises(ss.CostCapExceeded):
+        ss.generate_shot(shot, {}, str(tmp_path), ledger, gens, sleep=lambda s: None)

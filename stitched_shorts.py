@@ -127,6 +127,9 @@ class CostLedger:
     def total(self) -> float:
         return round(sum(i["usd"] for i in self.items), 4)
 
+    def fits(self, usd: float) -> bool:
+        return self.total + usd <= self.cap + 1e-9
+
     def reserve(self, label: str, usd: float) -> None:
         """Raise BEFORE a paid call that would push the Short over the cap."""
         if self.total + usd > self.cap + 1e-9:
@@ -802,7 +805,8 @@ def generate_shot(shot: dict, settings: dict, workdir: str, ledger: CostLedger,
                   generators: Optional[Dict[str, Callable[..., dict]]] = None, sleep: Callable[[float], None] = time.sleep,
                   start_image: Optional[str] = None, state: Optional[RunState] = None) -> dict:
     """Up to 1 + MAX_SHOT_RETRIES attempts per shot. Hook: Veo Fast only.
-    B-roll: Seedance, falling back to Veo Lite once Seedance has failed."""
+    B-roll: Seedance, falling back to Veo Lite once Seedance has failed (or retrying Seedance when
+    Veo Lite would not fit under the remaining cost cap)."""
     gens = generators or GENERATORS
     errors: List[str] = []
     chain = engines_for(shot["role"])
@@ -820,6 +824,17 @@ def generate_shot(shot: dict, settings: dict, workdir: str, ledger: CostLedger,
             pend = None
         secs = shot["seconds"] if engine == "seedance_fast" else veo_seconds_for(shot["seconds"])
         est = shot_cost(engine, secs)
+        if not pend and shot["role"] == "broll" and engine != chain[0] and not ledger.fits(est):
+            # The pricier fallback (Veo Lite) no longer fits under the cap, but a retry on the cheaper
+            # primary engine (Seedance) still does: retry Seedance instead of failing the whole Short
+            # (and wasting the shots already paid for). Still capped by the same per-Short ledger.
+            alt = chain[0]
+            alt_secs = shot["seconds"] if alt == "seedance_fast" else veo_seconds_for(shot["seconds"])
+            alt_est = shot_cost(alt, alt_secs)
+            if ledger.fits(alt_est):
+                logger.info("%s shot %s: %s ($%.3f) would exceed the $%.2f cap; retrying %s ($%.3f) instead",
+                            MARKER, shot["index"], engine, est, ledger.cap, alt, alt_est)
+                engine, secs, est = alt, alt_secs, alt_est
         if not pend:  # a pending request was already reserved/charged by the run that submitted it
             ledger.reserve(f"shot{shot['index']}:{engine}", est)  # raises CostCapExceeded
         dest = os.path.join(workdir, f"shot{shot['index']}_a{attempt + 1}_{engine}.mp4")

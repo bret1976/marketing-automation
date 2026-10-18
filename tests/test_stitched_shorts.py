@@ -486,6 +486,18 @@ class _Gens:
 
 SLOT_SETTINGS = {"shorts_forced_durations": [4, 5, 5, 5]}
 SHOT3 = "Close-up of robot eye lens"
+SAFE3 = "Slow push-in on the small robot resting calmly on a dune at golden hour, sand drifting softly in the wind"
+
+
+def _llm(calls, replan=lambda prompt: {"prompt": SAFE3, "caption": "Soft light, slow push"}):
+    """Mocked planner ($0): full plan for the planning prompt, one-shot JSON for a re-plan prompt."""
+    def llm(s, p):
+        calls.append("replan" if ss.REPLAN_SHOT_MARKER in p else "plan")
+        if ss.REPLAN_SHOT_MARKER in p:
+            calls.append(p)
+            return replan(p)
+        return _plan()
+    return llm
 
 
 def _moderated_shot3(engine, prompt, n):
@@ -495,10 +507,7 @@ def _moderated_shot3(engine, prompt, n):
 def _fail_slot_attempt_1(tmp_path, slot="2026-10-18-0", settings=None):
     """Live 2026-10-17 5 PM PT: shots 1-2 paid ($0.518 with planning), Seedance shot 3 moderated, Short failed."""
     llm_calls = []
-
-    def llm(s, p):
-        llm_calls.append(1)
-        return _plan()
+    llm = _llm(llm_calls)
     g1 = _Gens(fail=_moderated_shot3)
     with pytest.raises(RuntimeError, match="shot 3 failed"):
         ss.produce_short(dict(settings or SLOT_SETTINGS), str(tmp_path), llm=llm, generators=g1.table(),
@@ -513,19 +522,25 @@ def test_slot_retry_reuses_paid_shots_and_generates_only_missing(tmp_path):
     assert (tmp_path / "runs" / "slot-2026-10-18-0" / "run.json").exists()
     assert [c[0] for c in g1.calls] == ["veo_fast", "seedance_fast", "seedance_fast", "seedance_fast", "seedance_fast"]
 
-    g2 = _Gens()  # slot attempt 2: everything works
+    g2 = _Gens(fail=_moderated_shot3)  # attempt 2: the old shot-3 prompt would still be refused
     out, plan, info = ss.produce_short(dict(SLOT_SETTINGS), str(tmp_path), llm=llm, generators=g2.table(),
                                        sleep=lambda s: None, runs_dir=str(tmp_path / "runs"), slot="2026-10-18-0")
-    assert len(llm_calls) == 1                                   # no second planning call
+    assert [c for c in llm_calls if c in ("plan", "replan")] == ["plan", "replan"]  # no full re-plan, 1 shot re-plan
+    replan_prompt = llm_calls[2]
+    assert SHOT3 in replan_prompt and "content_policy_violation" in replan_prompt and "REFUSED" in replan_prompt
     assert [(c[0], c[1]) for c in g2.calls] == [("seedance_fast", 5), ("seedance_fast", 5)]  # only shots 3 + 4
-    assert SHOT3 in g2.calls[0][2]
+    assert SAFE3 in g2.calls[0][2] and SHOT3 not in g2.calls[0][2]                 # fresh prompt, not the refused one
+    assert "Small rusty robot" in g2.calls[0][2] and "9:16" in g2.calls[0][2]        # style line kept
+    assert "Wide shot ending on the opening frame" in g2.calls[1][2]                 # shot 4 keeps its prompt
     assert g2.calls[0][3] and os.path.exists(g2.calls[0][3])   # shot 3 chains from the reused shot 2's last frame
-    assert info["reused_shots"] == [1, 2] and info["slot_retry_reused"] is True
-    # reused shots count toward this slot's spend: attempt 1 ($0.518) + 2 new Seedance shots
-    assert info["cost_usd"] == pytest.approx(spent_1 + 2 * ss.seedance_cost(5), abs=1e-4)
+    assert info["reused_shots"] == [1, 2] and info["replanned_shots"] == [3] and info["slot_retry_reused"] is True
+    s3 = next(s for s in plan["shots"] if s["index"] == 3)
+    assert s3["replanned"]["refused"] and SHOT3 in s3["replanned"]["old_prompt"] and s3["caption"] == "Soft light, slow push"
+    # reused shots + the re-plan call count toward this slot's spend: $0.518 + $0.01 + 2 Seedance shots
+    assert info["cost_usd"] == pytest.approx(spent_1 + ss.LLM_CALL_USD + 2 * ss.seedance_cost(5), abs=1e-4)
     assert info["cost_usd"] <= 0.75
     labels = [i["label"] for i in info["cost"]["items"] if i["usd"] > 0]
-    assert labels.count("shot1:veo_fast") == 1 and labels.count("plan_llm") == 1
+    assert labels.count("shot1:veo_fast") == 1 and labels.count("plan_llm") == 1 and labels.count("replan_shot3") == 1
     assert [s["cost_usd"] for s in info["shot_list"]][:2] == [ss.shot_cost("veo_fast", 4), ss.seedance_cost(5)]
     assert os.path.exists(out) and info["duration"] >= 19.5
 
@@ -537,7 +552,7 @@ def test_slot_retry_cap_counts_combined_spend(tmp_path):
     first_try = {"n": 0}
 
     def flaky_shot3_once(engine, prompt, n):
-        if SHOT3 in prompt and first_try["n"] == 0:
+        if SAFE3 in prompt and first_try["n"] == 0:
             first_try["n"] += 1
             return "Seedance result HTTP 422: content_policy_violation"
     g2 = _Gens(fail=flaky_shot3_once)
@@ -560,7 +575,7 @@ def test_slot_retry_that_cannot_fit_cap_starts_fresh(tmp_path):
     g2 = _Gens()
     out, plan, info = ss.produce_short(dict(SLOT_SETTINGS), str(tmp_path), llm=llm, generators=g2.table(),
                                        sleep=lambda s: None, runs_dir=str(tmp_path / "runs"), slot="2026-10-18-0")
-    assert len(llm_calls) == 2 and len(g2.calls) == 4 and info["reused_shots"] == []
+    assert llm_calls == ["plan", "plan"] and len(g2.calls) == 4 and info["reused_shots"] == []
     assert info["slot_retry_reused"] is False and info["cost_usd"] <= 0.75
 
 
@@ -573,9 +588,10 @@ def test_slot_retry_regenerates_corrupt_cached_shot_and_keeps_its_cost(tmp_path)
     g2 = _Gens()
     out, plan, info = ss.produce_short(dict(st), str(tmp_path), llm=llm, generators=g2.table(),
                                        sleep=lambda s: None, runs_dir=str(tmp_path / "runs"), slot="2026-10-18-0")
-    assert len(llm_calls) == 1 and info["reused_shots"] == [1] and len(g2.calls) == 3
-    # the corrupt shot 2 was still paid for in attempt 1 -> stays in the slot total
-    expected = ss.LLM_CALL_USD + ss.shot_cost("veo_fast", 4) + 4 * ss.seedance_cost(5)
+    assert [c for c in llm_calls if c in ("plan", "replan")] == ["plan", "replan"]
+    assert info["reused_shots"] == [1] and info["replanned_shots"] == [3] and len(g2.calls) == 3
+    # the corrupt shot 2 was still paid for in attempt 1 -> stays in the slot total (+ the $0.01 re-plan)
+    expected = 2 * ss.LLM_CALL_USD + ss.shot_cost("veo_fast", 4) + 4 * ss.seedance_cost(5)
     assert info["cost_usd"] == pytest.approx(expected, abs=1e-4)
 
 
@@ -654,3 +670,56 @@ def test_growth_v2_produce_passes_slot_only_for_scheduled_slots(monkeypatch):
     asyncio.run(g.produce({}, {}, slot="2026-10-18-15"))
     asyncio.run(g.produce({}, {}))                               # manual / dry run: no slot cache
     assert got == ["2026-10-18-15", None]
+
+
+@pytest.mark.parametrize("bad_replan", [
+    lambda p: (_ for _ in ()).throw(RuntimeError("Gemini plan HTTP 503")),       # LLM down
+    lambda p: {"prompt": SHOT3, "caption": "x"},                                  # same refused prompt
+    lambda p: {"prompt": "too short"},                                            # unusable
+    lambda p: ["not", "an", "object"],
+])
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg missing")
+def test_refused_shot_that_cannot_be_replanned_starts_fresh(tmp_path, bad_replan):
+    calls = []
+    llm = _llm(calls, replan=bad_replan)
+    g1 = _Gens(fail=_moderated_shot3)
+    with pytest.raises(RuntimeError, match="shot 3 failed"):
+        ss.produce_short(dict(SLOT_SETTINGS), str(tmp_path), llm=llm, generators=g1.table(),
+                         sleep=lambda s: None, runs_dir=str(tmp_path / "runs"), slot="2026-10-18-0")
+    g2 = _Gens()
+    out, plan, info = ss.produce_short(dict(SLOT_SETTINGS), str(tmp_path), llm=llm, generators=g2.table(),
+                                       sleep=lambda s: None, runs_dir=str(tmp_path / "runs"), slot="2026-10-18-0")
+    assert [c for c in calls if c in ("plan", "replan")] == ["plan", "replan", "plan"]  # old behavior: fresh plan
+    assert len(g2.calls) == 4 and info["reused_shots"] == [] and info["replanned_shots"] == []
+    assert info["slot_retry_reused"] is False and info["cost_usd"] <= 0.75             # fresh Short, own cap
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg missing")
+def test_refused_shot_replan_that_cannot_fit_cap_starts_fresh(tmp_path, monkeypatch):
+    """$0.518 spent + $0.01 re-plan + 2 Seedance shots = $0.744 fits $0.75; at a $0.74 cap it doesn't."""
+    calls = []
+    llm = _llm(calls)
+    st = dict(SLOT_SETTINGS, shorts_cost_cap_usd=0.74)
+    g1 = _Gens(fail=_moderated_shot3)
+    with pytest.raises(RuntimeError, match="shot 3 failed"):
+        ss.produce_short(dict(st), str(tmp_path), llm=llm, generators=g1.table(),
+                         sleep=lambda s: None, runs_dir=str(tmp_path / "runs"), slot="2026-10-18-0")
+    g2 = _Gens()
+    out, plan, info = ss.produce_short(dict(st), str(tmp_path), llm=llm, generators=g2.table(),
+                                       sleep=lambda s: None, runs_dir=str(tmp_path / "runs"), slot="2026-10-18-0")
+    assert [c for c in calls if c in ("plan", "replan")] == ["plan", "plan"]          # no re-plan call spent
+    assert len(g2.calls) == 4 and info["slot_retry_reused"] is False and info["cost_usd"] <= 0.74
+
+
+def test_failed_shot_errors_skips_done_and_pending(tmp_path):
+    st = ss.RunState(str(tmp_path), "slot-x")
+    st.data["cost_items"] = [
+        {"label": "shot2:seedance_fast", "usd": 0, "ok": False, "error": "old"},
+        {"label": "shot3:seedance_fast", "usd": 0, "ok": False, "error": "422 content_policy_violation"},
+        {"label": "shot4:seedance_fast", "usd": 0.1, "ok": False, "error": "timed out", "pending": True},
+        {"label": "plan_llm", "usd": 0.01, "ok": True}]
+    f = tmp_path / "s2.mp4"
+    f.write_bytes(b"x")
+    st.data["shots"] = {"2": {"index": 2, "path": str(f)}}       # shot 2 failed once, then succeeded
+    st.data["pending"] = {"4": {"engine": "seedance_fast", "request_id": "r"}}
+    assert ss.failed_shot_errors(st) == {3: "422 content_policy_violation"}

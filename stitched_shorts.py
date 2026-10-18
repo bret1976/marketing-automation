@@ -18,9 +18,11 @@ BEFORE every paid call, per-Short cost ledger in the result + log.
 
 Slot retries (2026-10-18, approved by Bret): a scheduled slot uses run_id "slot-<slot>", so when the
 Short fails and the slot retries, attempt 2 resumes the same run: same plan, every finished (paid) shot
-file is reused after a validity check, and only the missing shots are generated. Spend from attempt 1
-stays in the ledger, so the $0.75 cap covers the whole slot. If the saved run can't be finished under
-the cap, it is dropped and attempt 2 starts fresh (the old behavior). Slot caches are deleted after a
+file is reused after a validity check, and only the missing shots are generated. A shot that FAILED or
+was REFUSED in attempt 1 (e.g. a Seedance content-policy 422) is never retried with the same prompt: it is
+re-planned alone with one small LLM call ($0.01, counted) for a fresh, safer prompt. Spend from attempt 1
+stays in the ledger, so the $0.75 cap covers the whole slot. If a failed shot can't be re-planned, or the
+saved run can't be finished under the cap, it is dropped and attempt 2 starts fresh (the old behavior). Slot caches are deleted after a
 successful post and at the start of the next slot. Manual / dry runs (no slot) are unchanged.
 
 Kill switch: STITCHED_SHORTS=0 (or settings.autopilot_format="single") restores
@@ -46,7 +48,7 @@ import viral_research
 
 logger = logging.getLogger("stitched_shorts")
 MARKER = "STITCHED_SHORTS"
-VERSION = "2026-10-18.2"
+VERSION = "2026-10-18.3"
 
 W, H, FPS = 1080, 1920, 30
 MIN_TOTAL, MAX_TOTAL = 20.0, 30.0
@@ -864,6 +866,79 @@ def remaining_cost(plan: dict, state: "RunState") -> float:
                      for s in plan["shots"] if not state.done_shot(s["index"]) and not state.pending(s["index"])), 4)
 
 
+REPLAN_SHOT_MARKER = "RE-PLAN ONE SHOT"
+REPLAN_SHOT_PROMPT = REPLAN_SHOT_MARKER + """: you are the short-form director for 6Frame Studio (AI filmmaking).
+One shot of an already-planned vertical 9:16 Short {why}. The other shots are already generated and paid for,
+so this shot must fit between them: SAME subject/character, SAME world, SAME palette and lens look, same story beat.
+Write a FRESH prompt for it that a cautious video-model safety filter will accept: no violence, weapons, injury,
+blood, explosions, fire hazards, danger to people or animals, no real or famous people, no minors, no brands,
+logos, copyrighted characters, no nudity or suggestive content, no readable text. Calm, clearly harmless action.
+Do not reuse the wording of the refused prompt.
+{role_rule}
+Locked style line (repeat it): {style}
+Previous shot: {prev}
+Next shot: {next}
+Refused / failed prompt: {old}
+Provider error: {error}
+Return ONLY JSON: {{"prompt": 40-90 words: style + camera + subject + exact visible action + vertical framing,
+"caption": max 7 words on-screen behind-the-scenes note for this shot (framing/light/motion), no model names, no hashtags}}"""
+
+
+def failed_shot_errors(state: "RunState") -> Dict[int, str]:
+    """Shots of a saved run that FAILED or were REFUSED and are neither finished nor pending (timed-out
+    requests stay pending and are fetched by id, never re-planned). -> {index: last error}."""
+    out: Dict[int, str] = {}
+    for item in state.data.get("cost_items") or []:
+        m = re.match(r"shot(\d+):", str(item.get("label") or ""))
+        if m and item.get("ok") is False:
+            out[int(m.group(1))] = str(item.get("error") or "failed")
+    return {i: e for i, e in out.items() if not state.done_shot(i) and not state.pending(i)}
+
+
+def replan_shot(settings: dict, plan: dict, index: int, error: str, llm: Callable[[dict, str], Any]) -> dict:
+    """One LLM call for a fresh, safer prompt for ONE shot. Returns the new shot dict; raises if unusable."""
+    shots = plan["shots"]
+    pos = next(i for i, s in enumerate(shots) if s["index"] == index)
+    shot = shots[pos]
+    refused = bool(re.search(r"422|content.?policy|moderat|safety|filtered|refus|blocked", error, re.I))
+    why = "was REFUSED by the video model's content filter" if refused else "FAILED to generate"
+    role_rule = ("It is the HOOK (" f"{shot['seconds']}s): motion AND a distinct, harmless sound effect in the very first second (name the sound)."
+                 if shot["role"] == "hook" else f"It is cinematic b-roll ({shot['seconds']}s), silent.")
+    if pos == len(shots) - 1:
+        role_rule += " LOOP: it ends on a composition matching the opening frame of shot 1."
+    prompt = REPLAN_SHOT_PROMPT.format(
+        why=why, role_rule=role_rule, style=plan.get("style") or "",
+        prev=_clean(shots[pos - 1]["prompt"], 300) if pos > 0 else "(none, this is the first shot)",
+        next=_clean(shots[pos + 1]["prompt"], 300) if pos + 1 < len(shots) else "(none, this is the last shot)",
+        old=_clean(shot["prompt"], 600), error=_clean(error, 200))
+    raw = llm(settings, prompt)
+    if isinstance(raw, list) and raw:
+        raw = raw[0]
+    if not isinstance(raw, dict):
+        raise ValueError("re-plan returned no JSON object")
+    new_prompt = _clean(raw.get("prompt"), 1100)
+    if len(new_prompt.split()) < 8:
+        raise ValueError("re-plan prompt too short")
+    norm = lambda t: re.sub(r"\W+", " ", t.lower()).strip()
+    style = _clean(plan.get("style"), 300)
+    old_core = norm(shot["prompt"].replace(style, ""))
+    for tail in ("vertical 9 16 framing subject centered", "full frame image edge to edge no letterbox or black bars"):
+        old_core = old_core.replace(tail, " ")
+    old_core = " ".join(old_core.split())
+    if norm(new_prompt.replace(style, "")) == old_core or (old_core and old_core in norm(new_prompt)):
+        raise ValueError("re-plan repeated the refused prompt")
+    if style and style.lower()[:40] not in new_prompt.lower():
+        new_prompt = f"{style} {new_prompt}"
+    if "9:16" not in new_prompt:
+        new_prompt += " Vertical 9:16 framing, subject centered."
+    new_prompt += " Full-frame image edge to edge, no letterbox or black bars."
+    caption = _clean(raw.get("caption"), 60) or shot.get("caption") or ""
+    if copy_problems(caption, set()):
+        caption = shot.get("caption") or ""
+    return {**shot, "prompt": new_prompt, "caption": caption,
+            "replanned": {"old_prompt": shot["prompt"], "error": _clean(error, 200), "refused": refused}}
+
+
 def last_frame(video: str, dest: str) -> str:
     """Final frame as JPEG (start image for the next shot's image-to-video)."""
     _run([_ff(), "-y", "-sseof", "-0.15", "-i", video, "-frames:v", "1", "-q:v", "3", "-update", "1", dest])
@@ -1178,21 +1253,45 @@ def produce_short(settings: dict, out_dir: str, avoid_topics: Optional[List[str]
     ledger = CostLedger(cost_cap(settings))
     state = RunState(runs_dir, run_id)
     reused_from_slot = False
+    replanned: List[int] = []
     if slot and state.plan:
         drop_invalid_shots(state, state.plan, shot_validator)
+        failed = failed_shot_errors(state)
         spent = round(sum(float(i.get("usd") or 0) for i in state.data.get("cost_items", [])), 4)
         left = remaining_cost(state.plan, state)
-        if spent + left > ledger.cap + 1e-9:
-            logger.warning("%s slot %s retry: saved run can't finish under the $%.2f cap (spent $%.3f + needs $%.3f); "
-                           "starting a fresh Short", MARKER, slot, ledger.cap, spent, left)
+        replan_usd = round(LLM_CALL_USD * len(failed), 4)
+        fresh_reason = None
+        if spent + replan_usd + left > ledger.cap + 1e-9:
+            fresh_reason = (f"saved run can't finish under the ${ledger.cap:.2f} cap (spent ${spent:.3f} + re-plan "
+                            f"${replan_usd:.3f} + needs ${left:.3f})")
+        else:
+            plan_saved = state.plan
+            for idx in sorted(failed):
+                # a failed/refused shot is never retried with the same prompt: re-plan just that shot
+                state.data["cost_items"].append({"label": f"replan_shot{idx}", "usd": LLM_CALL_USD, "ok": True})
+                state.save()
+                try:
+                    new_shot = replan_shot(settings, plan_saved, idx, failed[idx], llm or call_gemini_text_json)
+                except Exception as exc:
+                    fresh_reason = f"shot {idx} could not be re-planned ({str(exc)[:200]})"
+                    break
+                plan_saved["shots"] = [new_shot if s["index"] == idx else s for s in plan_saved["shots"]]
+                replanned.append(idx)
+                logger.info("%s slot %s retry: shot %s re-planned with a fresh prompt (was: %s)",
+                            MARKER, slot, idx, failed[idx][:160])
+            if not fresh_reason:
+                state.set_plan(plan_saved)
+        if fresh_reason:
+            logger.warning("%s slot %s retry: %s; dropping the saved shots and starting a fresh Short", MARKER, slot, fresh_reason)
             shutil.rmtree(state.dir, ignore_errors=True)
             state = RunState(runs_dir, run_id)
+            replanned = []
         else:
             reused_from_slot = True
-            logger.info("%s slot %s retry: reusing %s paid shot(s) %s ($%.3f already spent this slot), "
+            logger.info("%s slot %s retry: reusing %s paid shot(s) %s, re-planned %s ($%.3f spent this slot incl. re-plan), "
                         "generating the rest (est $%.3f); slot total stays under the $%.2f cap",
                         MARKER, slot, len(state.data.get("shots") or {}), sorted(int(k) for k in (state.data.get("shots") or {})),
-                        spent, left, ledger.cap)
+                        replanned, spent + replan_usd, left, ledger.cap)
     for item in state.data.get("cost_items", []):  # spend from earlier attempts of this run counts toward the cap
         ledger.items.append(dict(item))
     if state.plan:
@@ -1280,7 +1379,7 @@ def produce_short(settings: dict, out_dir: str, avoid_topics: Optional[List[str]
         "viral_research": {"angle": plan.get("viral_angle"), "refs_used": plan.get("viral_refs_used"),
                            "refs": [{k: r.get(k) for k in ("title", "views", "url")} for r in (plan.get("viral_refs") or [])]},
         "run_id": state.run_id, "run_dir": state.dir,
-        "reused_shots": reused, "slot": slot, "slot_retry_reused": reused_from_slot,
+        "reused_shots": reused, "replanned_shots": replanned, "slot": slot, "slot_retry_reused": reused_from_slot,
     })
     state.finish(status="done", output=out, final_captions=captions, copy_audit=copy_audit,
                  final_overlays={"hook": plan["on_screen_hook"], "shots": {s["index"]: s.get("caption") for s in done}},

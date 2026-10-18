@@ -1207,12 +1207,14 @@ def ensure_caption_matches(raw_path: str, concept: dict, settings: dict) -> Tupl
                    "mismatches_fixed": first.get("mismatches")}
 
 
-async def produce(settings: dict, state: dict) -> Tuple[str, dict, dict]:
+async def produce(settings: dict, state: dict, slot: Optional[str] = None) -> Tuple[str, dict, dict]:
     """Originals only. Each failed Veo attempt gets a brand-new concept (new topic + prompt),
     with backoff, walking the Lite->Fast ladder. The transform/repost fallback only runs if
     AUTOPILOT_TRANSFORM_FALLBACK=1 is set explicitly (off by default)."""
     loop = asyncio.get_running_loop()
     if stitched_shorts.enabled(settings):
+        if slot:  # scheduled slot: a retry reuses the shots already paid for (stitched_shorts.slot_run_id)
+            return await loop.run_in_executor(None, lambda: produce_stitched(settings, state, slot=slot))
         return await loop.run_in_executor(None, produce_stitched, settings, state)
     errors: List[str] = []
     tried: List[dict] = []
@@ -1255,7 +1257,11 @@ async def produce(settings: dict, state: dict) -> Tuple[str, dict, dict]:
     raise RuntimeError(f"All {len(errors)} original video attempts failed: " + " | ".join(errors)[-1500:])
 
 
-def produce_stitched(settings: dict, state: dict) -> Tuple[str, dict, dict]:
+def stitched_runs_dir() -> str:
+    return os.path.join(_state_dir(), "stitched_runs")
+
+
+def produce_stitched(settings: dict, state: dict, slot: Optional[str] = None) -> Tuple[str, dict, dict]:
     """Stitched 20-30s Short (stitched_shorts.py): AI-filmmaking niche, originals only.
     Never falls back to a downloaded clip; per-shot retries and the cost cap live in the module."""
     recent = [t for t in recent_post_topics(state) if t][-30:]
@@ -1267,7 +1273,7 @@ def produce_stitched(settings: dict, state: dict) -> Tuple[str, dict, dict]:
         logger.info("%s viral references for this slot: %s", MARKER,
                     [f'{r["views"]:,} views | {r["title"][:70]} | {r["url"]}' for r in viral["refs"][:5]] or viral["errors"])
     out, plan, info = stitched_shorts.produce_short(settings, _main().GENERATED_DIR, recent, titles,
-                                                    runs_dir=os.path.join(_state_dir(), "stitched_runs"), viral=viral)
+                                                    runs_dir=stitched_runs_dir(), viral=viral, slot=slot)
     logger.info("%s viral angle used: %s | based on: %s", MARKER, plan.get("viral_angle"), plan.get("viral_refs_used"))
     caps = info.get("platform_captions") or {}
     concept = {
@@ -1404,12 +1410,12 @@ def inspect_publish_errors(state: dict, post: dict, errors: List[str]) -> None:
             add_alert("youtube_upload_deleted", f"YouTube reported the upload as deleted/removed: {str(err)[:300]}", post.get("id"), state)
 
 
-async def run_autopilot(settings: dict, dry_run: bool = False) -> dict:
+async def run_autopilot(settings: dict, dry_run: bool = False, slot: Optional[str] = None) -> dict:
     m = _main()
     state = load_state()
     platforms, notes = resolve_platforms(settings, state)
     try:
-        abs_video, concept, info = await produce(settings, state)
+        abs_video, concept, info = await produce(settings, state, slot=slot) if slot else await produce(settings, state)
     except Exception:
         if not dry_run and state.get("failed_source_urls"):
             save_state(state)  # remember dead fallback sources so the next slot skips them
@@ -1583,7 +1589,7 @@ async def run_slot(slot: str, settings: dict) -> bool:
     logger.info("Autonomous autoposting slot %s reached. Initiating pipeline... (%s attempt %s/%s)", slot, MARKER, attempt, max_slot_attempts())
     error, ok, result = "", False, {}
     try:
-        result = await run_autopilot(settings)
+        result = await run_autopilot(settings, slot=slot)
         ok = bool(result.get("ok"))
         if not ok:
             error = "; ".join(result.get("errors") or []) or "publish returned no successes"
@@ -1597,6 +1603,10 @@ async def run_slot(slot: str, settings: dict) -> bool:
         info["post_id"] = result.get("post_id")
         save_state(state)
         mark_slot_success(slot)
+        try:  # posted: the slot's shot cache is no longer needed
+            stitched_shorts.clear_slot_cache(stitched_runs_dir())
+        except Exception as exc:
+            logger.warning("%s slot cache cleanup failed: %s", MARKER, exc)
         logger.info("Autonomous slot %s published and persisted.", slot)
         return True
     info["last_error"] = error[-600:]

@@ -16,6 +16,13 @@ Guards: max 2 retries per shot (3 attempts), hard cost cap per Short
 (default $1.50, SHORTS_COST_CAP_USD / settings.shorts_cost_cap_usd) checked
 BEFORE every paid call, per-Short cost ledger in the result + log.
 
+Slot retries (2026-10-18, approved by Bret): a scheduled slot uses run_id "slot-<slot>", so when the
+Short fails and the slot retries, attempt 2 resumes the same run: same plan, every finished (paid) shot
+file is reused after a validity check, and only the missing shots are generated. Spend from attempt 1
+stays in the ledger, so the $0.75 cap covers the whole slot. If the saved run can't be finished under
+the cap, it is dropped and attempt 2 starts fresh (the old behavior). Slot caches are deleted after a
+successful post and at the start of the next slot. Manual / dry runs (no slot) are unchanged.
+
 Kill switch: STITCHED_SHORTS=0 (or settings.autopilot_format="single") restores
 the single 8s clip pipeline in growth_v2.
 """
@@ -39,7 +46,7 @@ import viral_research
 
 logger = logging.getLogger("stitched_shorts")
 MARKER = "STITCHED_SHORTS"
-VERSION = "2026-10-16.1"
+VERSION = "2026-10-18.2"
 
 W, H, FPS = 1080, 1920, 30
 MIN_TOTAL, MAX_TOTAL = 20.0, 30.0
@@ -793,6 +800,70 @@ class RunState:
         self.save()
 
 
+SLOT_RUN_PREFIX = "slot-"
+MIN_SHOT_BYTES = 10_000  # same floor as _download()
+
+
+def slot_run_id(slot: str) -> str:
+    """Stable run id for a scheduled slot, so a slot retry resumes the same run."""
+    return SLOT_RUN_PREFIX + (re.sub(r"[^0-9A-Za-z_-]", "_", str(slot)).strip("_") or "unknown")[:60]
+
+
+def clear_slot_cache(runs_dir: str, keep_run_id: Optional[str] = None) -> List[str]:
+    """Delete saved slot runs (shot files + run.json) except keep_run_id. Only touches "slot-*" dirs,
+    never manual runs. Never raises. Returns the removed run ids."""
+    removed: List[str] = []
+    try:
+        names = os.listdir(runs_dir)
+    except OSError:
+        return removed
+    for name in names:
+        path = os.path.join(runs_dir, name)
+        if name.startswith(SLOT_RUN_PREFIX) and name != keep_run_id and os.path.isdir(path):
+            shutil.rmtree(path, ignore_errors=True)
+            removed.append(name)
+    if removed:
+        logger.info("%s removed slot shot cache: %s", MARKER, removed)
+    return removed
+
+
+def shot_file_ok(path: Optional[str], min_seconds: float = 1.0) -> bool:
+    """A cached shot is reusable only if the file exists, isn't tiny, and ffprobe reads a video stream
+    with a real duration (catches truncated / half-written / corrupt files)."""
+    try:
+        if not path or not os.path.isfile(path) or os.path.getsize(path) < MIN_SHOT_BYTES:
+            return False
+        info = probe(path)
+        return bool(info.get("width") and info.get("height")) and float(info.get("duration") or 0) >= min_seconds
+    except Exception:
+        return False
+
+
+def drop_invalid_shots(state: "RunState", plan: dict, validator: Callable[[Optional[str]], bool] = None) -> List[int]:
+    """Forget finished-shot records whose file is missing/corrupt or no longer matches the plan,
+    so those shots are generated again. Their earlier cost stays in cost_items (it was paid)."""
+    validator = validator or shot_file_ok
+    by_index = {str(s["index"]): s for s in plan.get("shots") or []}
+    dropped: List[int] = []
+    for key, rec in list((state.data.get("shots") or {}).items()):
+        shot = by_index.get(key)
+        if shot is None or rec.get("role") != shot.get("role") or not validator(rec.get("path")):
+            state.data["shots"].pop(key, None)
+            dropped.append(int(key) if key.isdigit() else key)
+    if dropped:
+        logger.warning("%s run %s: cached shot(s) %s missing/corrupt, will regenerate", MARKER, state.run_id, dropped)
+        state.save()
+    return dropped
+
+
+def remaining_cost(plan: dict, state: "RunState") -> float:
+    """Estimated spend for the shots that are neither finished nor already submitted."""
+    lite_only = str(plan.get("broll_engine", "")).startswith("veo_lite")
+    return round(sum(shot_cost("veo_fast", veo_billed_seconds(s["seconds"])) if s["role"] == "hook"
+                     else (shot_cost("veo_lite", veo_seconds_for(s["seconds"])) if lite_only else shot_cost("seedance_fast", s["seconds"]))
+                     for s in plan["shots"] if not state.done_shot(s["index"]) and not state.pending(s["index"])), 4)
+
+
 def last_frame(video: str, dest: str) -> str:
     """Final frame as JPEG (start image for the next shot's image-to-video)."""
     _run([_ff(), "-y", "-sseof", "-0.15", "-i", video, "-frames:v", "1", "-q:v", "3", "-update", "1", dest])
@@ -1095,11 +1166,33 @@ def produce_short(settings: dict, out_dir: str, avoid_topics: Optional[List[str]
                   generators: Optional[Dict[str, Callable[..., dict]]] = None,
                   sleep: Callable[[float], None] = time.sleep, n_shots: int = 4,
                   run_id: Optional[str] = None, runs_dir: Optional[str] = None,
-                  viral: Optional[dict] = None) -> Tuple[str, dict, dict]:
+                  viral: Optional[dict] = None, slot: Optional[str] = None,
+                  shot_validator: Optional[Callable[[Optional[str]], bool]] = None) -> Tuple[str, dict, dict]:
     """Returns (mp4_path, plan, info). info carries cost ledger, shot list, captions, probe.
-    Durable: plan + every finished/submitted shot are saved under runs_dir/run_id; pass the same run_id to resume."""
+    Durable: plan + every finished/submitted shot are saved under runs_dir/run_id; pass the same run_id to resume.
+    slot: scheduled slot id -> run_id "slot-<slot>", so a slot retry reuses the shots already paid for."""
+    runs_dir = runs_dir or os.path.join(out_dir, "runs")
+    if slot:
+        run_id = slot_run_id(slot)
+        clear_slot_cache(runs_dir, keep_run_id=run_id)  # caches of earlier slots are no longer needed
     ledger = CostLedger(cost_cap(settings))
-    state = RunState(runs_dir or os.path.join(out_dir, "runs"), run_id)
+    state = RunState(runs_dir, run_id)
+    reused_from_slot = False
+    if slot and state.plan:
+        drop_invalid_shots(state, state.plan, shot_validator)
+        spent = round(sum(float(i.get("usd") or 0) for i in state.data.get("cost_items", [])), 4)
+        left = remaining_cost(state.plan, state)
+        if spent + left > ledger.cap + 1e-9:
+            logger.warning("%s slot %s retry: saved run can't finish under the $%.2f cap (spent $%.3f + needs $%.3f); "
+                           "starting a fresh Short", MARKER, slot, ledger.cap, spent, left)
+            shutil.rmtree(state.dir, ignore_errors=True)
+            state = RunState(runs_dir, run_id)
+        else:
+            reused_from_slot = True
+            logger.info("%s slot %s retry: reusing %s paid shot(s) %s ($%.3f already spent this slot), "
+                        "generating the rest (est $%.3f); slot total stays under the $%.2f cap",
+                        MARKER, slot, len(state.data.get("shots") or {}), sorted(int(k) for k in (state.data.get("shots") or {})),
+                        spent, left, ledger.cap)
     for item in state.data.get("cost_items", []):  # spend from earlier attempts of this run counts toward the cap
         ledger.items.append(dict(item))
     if state.plan:
@@ -1142,20 +1235,18 @@ def produce_short(settings: dict, out_dir: str, avoid_topics: Optional[List[str]
         plan["draft_platform_captions"] = build_platform_captions(plan)
         state.set_plan(plan)
     # pre-flight: remaining (not finished, not already submitted) shots must fit the cap
-    lite_only = str(plan.get("broll_engine", "")).startswith("veo_lite")
-    est = sum(shot_cost("veo_fast", veo_billed_seconds(s["seconds"])) if s["role"] == "hook"
-              else (shot_cost("veo_lite", veo_seconds_for(s["seconds"])) if lite_only else shot_cost("seedance_fast", s["seconds"]))
-              for s in plan["shots"] if not state.done_shot(s["index"]) and not state.pending(s["index"]))
-    ledger.reserve("preflight_estimate", est)
+    ledger.reserve("preflight_estimate", remaining_cost(plan, state))
     os.makedirs(out_dir, exist_ok=True)
     workdir = state.dir  # shot files live with run.json so they survive a stop
     done: List[dict] = []
+    reused: List[int] = []
     try:
         for shot in plan["shots"]:
             saved = state.done_shot(shot["index"])
             if saved:
                 logger.info("%s run %s: reusing finished shot %s (%s)", MARKER, state.run_id, shot["index"], saved.get("request_id"))
                 done.append({**shot, **saved})
+                reused.append(shot["index"])
                 continue
             start = None
             if done and shot["role"] == "broll":
@@ -1189,6 +1280,7 @@ def produce_short(settings: dict, out_dir: str, avoid_topics: Optional[List[str]
         "viral_research": {"angle": plan.get("viral_angle"), "refs_used": plan.get("viral_refs_used"),
                            "refs": [{k: r.get(k) for k in ("title", "views", "url")} for r in (plan.get("viral_refs") or [])]},
         "run_id": state.run_id, "run_dir": state.dir,
+        "reused_shots": reused, "slot": slot, "slot_retry_reused": reused_from_slot,
     })
     state.finish(status="done", output=out, final_captions=captions, copy_audit=copy_audit,
                  final_overlays={"hook": plan["on_screen_hook"], "shots": {s["index"]: s.get("caption") for s in done}},

@@ -454,3 +454,203 @@ def test_broll_still_raises_cap_when_nothing_fits(tmp_path):
     shot = {"index": 3, "role": "broll", "seconds": 5, "prompt": "p"}
     with pytest.raises(ss.CostCapExceeded):
         ss.generate_shot(shot, {}, str(tmp_path), ledger, gens, sleep=lambda s: None)
+
+
+# --------------------------------------------------------------------------
+# slot retry reuses paid shots (2026-10-18, approved by Bret)
+# --------------------------------------------------------------------------
+
+class _Gens:
+    """Fake generators ($0): record every call, optionally fail some shots."""
+
+    def __init__(self, fail=None):
+        self.calls = []          # (engine, seconds, prompt, image)
+        self.fail = fail or (lambda engine, prompt, n: None)
+
+    def make(self, engine):
+        def gen(settings, prompt, sec, dest, **kw):
+            n = sum(1 for c in self.calls if c[2] == prompt)
+            self.calls.append((engine, sec, prompt, kw.get("image")))
+            err = self.fail(engine, prompt, n)
+            if err:
+                raise RuntimeError(err)
+            if kw.get("on_submit"):
+                kw["on_submit"](f"{engine}-{len(self.calls)}")
+            _fake_video(sec, dest)
+            return {"model": engine, "billed_seconds": sec, "request_id": f"{engine}-{len(self.calls)}"}
+        return gen
+
+    def table(self):
+        return {e: self.make(e) for e in ("veo_fast", "seedance_fast", "veo_lite")}
+
+
+SLOT_SETTINGS = {"shorts_forced_durations": [4, 5, 5, 5]}
+SHOT3 = "Close-up of robot eye lens"
+
+
+def _moderated_shot3(engine, prompt, n):
+    return "Seedance result HTTP 422: content_policy_violation" if SHOT3 in prompt else None
+
+
+def _fail_slot_attempt_1(tmp_path, slot="2026-10-18-0", settings=None):
+    """Live 2026-10-17 5 PM PT: shots 1-2 paid ($0.518 with planning), Seedance shot 3 moderated, Short failed."""
+    llm_calls = []
+
+    def llm(s, p):
+        llm_calls.append(1)
+        return _plan()
+    g1 = _Gens(fail=_moderated_shot3)
+    with pytest.raises(RuntimeError, match="shot 3 failed"):
+        ss.produce_short(dict(settings or SLOT_SETTINGS), str(tmp_path), llm=llm, generators=g1.table(),
+                         sleep=lambda s: None, runs_dir=str(tmp_path / "runs"), slot=slot)
+    return llm, llm_calls, g1
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg missing")
+def test_slot_retry_reuses_paid_shots_and_generates_only_missing(tmp_path):
+    llm, llm_calls, g1 = _fail_slot_attempt_1(tmp_path)
+    spent_1 = round(ss.LLM_CALL_USD + ss.shot_cost("veo_fast", 4) + ss.seedance_cost(5), 4)  # 0.518
+    assert (tmp_path / "runs" / "slot-2026-10-18-0" / "run.json").exists()
+    assert [c[0] for c in g1.calls] == ["veo_fast", "seedance_fast", "seedance_fast", "seedance_fast", "seedance_fast"]
+
+    g2 = _Gens()  # slot attempt 2: everything works
+    out, plan, info = ss.produce_short(dict(SLOT_SETTINGS), str(tmp_path), llm=llm, generators=g2.table(),
+                                       sleep=lambda s: None, runs_dir=str(tmp_path / "runs"), slot="2026-10-18-0")
+    assert len(llm_calls) == 1                                   # no second planning call
+    assert [(c[0], c[1]) for c in g2.calls] == [("seedance_fast", 5), ("seedance_fast", 5)]  # only shots 3 + 4
+    assert SHOT3 in g2.calls[0][2]
+    assert g2.calls[0][3] and os.path.exists(g2.calls[0][3])   # shot 3 chains from the reused shot 2's last frame
+    assert info["reused_shots"] == [1, 2] and info["slot_retry_reused"] is True
+    # reused shots count toward this slot's spend: attempt 1 ($0.518) + 2 new Seedance shots
+    assert info["cost_usd"] == pytest.approx(spent_1 + 2 * ss.seedance_cost(5), abs=1e-4)
+    assert info["cost_usd"] <= 0.75
+    labels = [i["label"] for i in info["cost"]["items"] if i["usd"] > 0]
+    assert labels.count("shot1:veo_fast") == 1 and labels.count("plan_llm") == 1
+    assert [s["cost_usd"] for s in info["shot_list"]][:2] == [ss.shot_cost("veo_fast", 4), ss.seedance_cost(5)]
+    assert os.path.exists(out) and info["duration"] >= 19.5
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg missing")
+def test_slot_retry_cap_counts_combined_spend(tmp_path):
+    """Attempt 2's ledger starts at attempt 1's spend: Veo Lite ($0.30) never fits, Seedance retries do."""
+    llm, _, _ = _fail_slot_attempt_1(tmp_path)
+    first_try = {"n": 0}
+
+    def flaky_shot3_once(engine, prompt, n):
+        if SHOT3 in prompt and first_try["n"] == 0:
+            first_try["n"] += 1
+            return "Seedance result HTTP 422: content_policy_violation"
+    g2 = _Gens(fail=flaky_shot3_once)
+    out, plan, info = ss.produce_short(dict(SLOT_SETTINGS), str(tmp_path), llm=llm, generators=g2.table(),
+                                       sleep=lambda s: None, runs_dir=str(tmp_path / "runs"), slot="2026-10-18-0")
+    assert "veo_lite" not in [c[0] for c in g2.calls]           # 0.518 + 0.30 would break the cap
+    assert [c[0] for c in g2.calls] == ["seedance_fast"] * 3
+    assert info["cost_usd"] <= 0.75 + 1e-9                      # whole slot, both attempts, under the cap
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg missing")
+def test_slot_retry_that_cannot_fit_cap_starts_fresh(tmp_path):
+    """Corrupt cached shot 2 -> regenerating it plus 3+4 would push the slot over $0.75, so the saved run
+    is dropped and attempt 2 is a fresh Short under its own cap (the pre-change behavior)."""
+    llm, llm_calls, _ = _fail_slot_attempt_1(tmp_path)
+    run_dir = tmp_path / "runs" / "slot-2026-10-18-0"
+    shot2 = next(run_dir.glob("shot2_*.mp4"))
+    shot2.write_bytes(shot2.read_bytes()[:20_000])               # truncated / corrupt
+    assert not ss.shot_file_ok(str(shot2))
+    g2 = _Gens()
+    out, plan, info = ss.produce_short(dict(SLOT_SETTINGS), str(tmp_path), llm=llm, generators=g2.table(),
+                                       sleep=lambda s: None, runs_dir=str(tmp_path / "runs"), slot="2026-10-18-0")
+    assert len(llm_calls) == 2 and len(g2.calls) == 4 and info["reused_shots"] == []
+    assert info["slot_retry_reused"] is False and info["cost_usd"] <= 0.75
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg missing")
+def test_slot_retry_regenerates_corrupt_cached_shot_and_keeps_its_cost(tmp_path):
+    st = dict(SLOT_SETTINGS, shorts_cost_cap_usd=1.5)
+    llm, llm_calls, _ = _fail_slot_attempt_1(tmp_path, settings=st)
+    run_dir = tmp_path / "runs" / "slot-2026-10-18-0"
+    next(run_dir.glob("shot2_*.mp4")).write_bytes(b"\x00" * 50_000)   # big enough, but not a video
+    g2 = _Gens()
+    out, plan, info = ss.produce_short(dict(st), str(tmp_path), llm=llm, generators=g2.table(),
+                                       sleep=lambda s: None, runs_dir=str(tmp_path / "runs"), slot="2026-10-18-0")
+    assert len(llm_calls) == 1 and info["reused_shots"] == [1] and len(g2.calls) == 3
+    # the corrupt shot 2 was still paid for in attempt 1 -> stays in the slot total
+    expected = ss.LLM_CALL_USD + ss.shot_cost("veo_fast", 4) + 4 * ss.seedance_cost(5)
+    assert info["cost_usd"] == pytest.approx(expected, abs=1e-4)
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg missing")
+def test_successful_first_try_is_unchanged_with_slot(tmp_path):
+    runs = []
+    for slot in (None, "2026-10-18-15"):
+        g = _Gens()
+        sub = tmp_path / (slot or "manual")
+        out, plan, info = ss.produce_short(dict(SLOT_SETTINGS), str(sub), llm=lambda s, p: _plan(), generators=g.table(),
+                                           sleep=lambda s: None, runs_dir=str(sub / "runs"), slot=slot)
+        runs.append((g.calls, info, plan))
+    (calls_a, info_a, plan_a), (calls_b, info_b, plan_b) = runs
+    assert [(c[0], c[1], c[2]) for c in calls_a] == [(c[0], c[1], c[2]) for c in calls_b]
+    assert info_a["cost_usd"] == info_b["cost_usd"] <= 0.75
+    strip = lambda sl: [{k: v for k, v in s.items() if k != "request_id"} for s in sl]
+    assert strip(info_a["shot_list"]) == strip(info_b["shot_list"])
+    assert info_a["platform_captions"] == info_b["platform_captions"]
+    assert info_b["reused_shots"] == [] and info_b["slot_retry_reused"] is False
+    assert info_b["run_id"] == "slot-2026-10-18-15" and not info_a["run_id"].startswith("slot-")
+
+
+def test_slot_cache_cleanup_keeps_current_and_manual_runs(tmp_path):
+    for name in ("slot-2026-10-17-15", "slot-2026-10-18-0", "20261017-120000-abcdef"):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "run.json").write_text("{}")
+    removed = ss.clear_slot_cache(str(tmp_path), keep_run_id="slot-2026-10-18-0")
+    assert removed == ["slot-2026-10-17-15"]
+    assert sorted(os.listdir(tmp_path)) == ["20261017-120000-abcdef", "slot-2026-10-18-0"]
+    assert ss.clear_slot_cache(str(tmp_path / "missing")) == []
+    assert ss.slot_run_id("2026-10-18-0") == "slot-2026-10-18-0" and ss.slot_run_id("../x y") == "slot-x_y"
+
+
+def test_growth_v2_slot_passes_slot_and_cleans_cache_after_post(tmp_path, monkeypatch):
+    import asyncio
+    import growth_v2 as g
+    seen = {}
+
+    async def fake_autopilot(settings, dry_run=False, slot=None):
+        seen["slot"] = slot
+        return {"ok": True, "post_id": "p1"}
+    (tmp_path / "slot-2026-10-18-15").mkdir()
+    (tmp_path / "keep-manual").mkdir()
+    monkeypatch.setattr(g, "run_autopilot", fake_autopilot)
+    monkeypatch.setattr(g, "load_state", lambda: {})
+    monkeypatch.setattr(g, "save_state", lambda st: None)
+    monkeypatch.setattr(g, "mark_slot_success", lambda slot: None)
+    monkeypatch.setattr(g, "stitched_runs_dir", lambda: str(tmp_path))
+    assert asyncio.run(g.run_slot("2026-10-18-15", {})) is True
+    assert seen["slot"] == "2026-10-18-15"
+    assert os.listdir(tmp_path) == ["keep-manual"]
+
+
+def test_growth_v2_failed_slot_keeps_cache_for_retry(tmp_path, monkeypatch):
+    import asyncio
+    import growth_v2 as g
+
+    async def boom(settings, dry_run=False, slot=None):
+        raise RuntimeError("shot 3 failed after 3 attempt(s)")
+    (tmp_path / "slot-2026-10-18-15").mkdir()
+    monkeypatch.setattr(g, "run_autopilot", boom)
+    monkeypatch.setattr(g, "load_state", lambda: {})
+    monkeypatch.setattr(g, "save_state", lambda st: None)
+    monkeypatch.setattr(g, "add_alert", lambda *a, **k: None)
+    monkeypatch.setattr(g, "stitched_runs_dir", lambda: str(tmp_path))
+    assert asyncio.run(g.run_slot("2026-10-18-15", {})) is False
+    assert os.listdir(tmp_path) == ["slot-2026-10-18-15"]
+
+
+def test_growth_v2_produce_passes_slot_only_for_scheduled_slots(monkeypatch):
+    import asyncio
+    import growth_v2 as g
+    got = []
+    monkeypatch.setattr(g, "produce_stitched", lambda settings, state, slot=None: got.append(slot) or ("/tmp/x.mp4", {}, {}))
+    monkeypatch.setattr(g.stitched_shorts, "enabled", lambda s=None: True)
+    asyncio.run(g.produce({}, {}, slot="2026-10-18-15"))
+    asyncio.run(g.produce({}, {}))                               # manual / dry run: no slot cache
+    assert got == ["2026-10-18-15", None]

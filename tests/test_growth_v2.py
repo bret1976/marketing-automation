@@ -215,6 +215,12 @@ def test_all_attempts_fail_walks_lite_then_fast_and_never_reposts(monkeypatch, t
     monkeypatch.setattr(g, "build_transformed_clip", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no repost")))
     with pytest.raises(RuntimeError, match="All 5 original video attempts failed"):
         asyncio.run(g.produce({}, {}))
+    # unbilled failures may retry on Veo Lite; Veo Fast ($0.80 for 8s) never fits under the $0.75 cap
+    assert engines == ["google_veo_lite"] * 3
+    engines.clear()
+    monkeypatch.setenv("SHORTS_COST_CAP_USD", "5")
+    with pytest.raises(RuntimeError, match="All 5 original video attempts failed"):
+        asyncio.run(g.produce({}, {}))
     assert engines == ["google_veo_lite"] * 3 + ["google_veo_fast"] * 2
 
 
@@ -267,6 +273,7 @@ def test_mismatch_counts_toward_retry_with_new_topic(monkeypatch, tmp_path):
 
     monkeypatch.setattr(g, "ensure_caption_matches", ensure)
     monkeypatch.setattr(g, "render_vertical", lambda *a, **k: {})
+    monkeypatch.setenv("SHORTS_COST_CAP_USD", "2")  # room for a second paid clip
     _, concept, info = asyncio.run(g.produce({}, {}))
     assert concept["topic"] == "t1" and info["attempt"] == 2 and info["caption_check"] == "match"
 
@@ -459,3 +466,77 @@ def test_rewrite_keeps_number(monkeypatch):
     c = dict(_concept(), on_screen_hook="2,000°C without contact")
     fixed, info = g.ensure_caption_matches("/x.mp4", c, {})
     assert g.has_number(fixed["on_screen_hook"]) and fixed["on_screen_hook"].startswith("2,000°C")
+
+
+def _single_env(monkeypatch, tmp_path):
+    import growth_v2 as g
+    for k in ("AUTOPILOT_FORMAT", "STITCHED_SHORTS", "SHORTS_COST_CAP_USD", "AUTOPILOT_TRANSFORM_FALLBACK", "GROWTH_VIDEO_ENGINES"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("GROWTH_RETRY_BACKOFF", "0")
+    monkeypatch.setattr(g, "_main", lambda: _fake_main(tmp_path))
+    monkeypatch.setattr(g, "ensure_opening_sound", lambda raw: (raw, {"sfx_added": False}))
+    monkeypatch.setattr(g, "render_vertical", lambda *a, **k: {"width": 1080, "height": 1920, "duration": 8.0})
+    monkeypatch.setattr(g, "build_transformed_clip", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no repost")))
+    monkeypatch.setattr(g, "produce_stitched", lambda *a, **k: (_ for _ in ()).throw(AssertionError("stitched path must be off")))
+    return g
+
+
+def test_default_is_one_8s_veo_lite_clip_under_cap(monkeypatch, tmp_path):
+    """2026-10-19: the default Short is ONE 8s Veo Lite clip (no multi-shot), ~$0.45 on the ledger, cap $0.75."""
+    import asyncio
+    g = _single_env(monkeypatch, tmp_path)
+    calls = []
+    monkeypatch.setattr(g, "plan_concept", lambda s, st, extra_avoid=None: dict(_concept("lichtenberg"), title_line="Trapped Lightning In Acrylic"))
+    monkeypatch.setattr(g, "generate_original_clip", lambda c, s, e: calls.append(e) or ("/tmp/raw.mp4", {"engine": e}))
+    monkeypatch.setattr(g, "ensure_caption_matches", lambda raw, c, s: (c, {"caption_check": "match"}))
+    _, concept, info = asyncio.run(g.produce({}, {}))
+    assert calls == ["google_veo_lite"]
+    assert info["format"] == "single_8s" and info["media_source"] == "ai_generated"
+    assert info["cost_usd"] == 0.45 and info["cost"]["cap_usd"] == 0.75
+    assert g.single_clip_cost("google_veo_lite") == 0.40 and g.single_clip_cost("google_veo_fast") == 0.80
+    assert concept["title_line"] == "Trapped Lightning In Acrylic"
+
+
+def test_billed_mismatch_never_buys_a_second_clip_over_cap(monkeypatch, tmp_path):
+    import asyncio
+    import pytest
+    g = _single_env(monkeypatch, tmp_path)
+    calls = []
+    monkeypatch.setattr(g, "plan_concept", lambda s, st, extra_avoid=None: _concept(f"t{len(extra_avoid or [])}"))
+    monkeypatch.setattr(g, "generate_original_clip", lambda c, s, e: calls.append(e) or ("/tmp/raw.mp4", {"engine": e}))
+    monkeypatch.setattr(g, "ensure_caption_matches", lambda raw, c, s: (_ for _ in ()).throw(RuntimeError("caption mismatch after rewrite")))
+    with pytest.raises(RuntimeError, match="cost cap"):
+        asyncio.run(g.produce({}, {}))
+    assert calls == ["google_veo_lite"]  # $0.45 spent; another $0.45 would pass $0.75
+
+
+def test_timed_out_veo_counts_as_spent(monkeypatch, tmp_path):
+    import asyncio
+    import pytest
+    g = _single_env(monkeypatch, tmp_path)
+    calls = []
+    monkeypatch.setattr(g, "plan_concept", lambda s, st, extra_avoid=None: _concept(f"t{len(extra_avoid or [])}"))
+    monkeypatch.setattr(g, "generate_original_clip", lambda c, s, e: calls.append(e) or (_ for _ in ()).throw(RuntimeError("google_veo_lite: Failed to download video file")))
+    with pytest.raises(RuntimeError, match="cost cap"):
+        asyncio.run(g.produce({}, {}))
+    assert calls == ["google_veo_lite"]
+
+
+def test_health_reports_format_and_platforms(monkeypatch, tmp_path):
+    import types
+    import growth_v2 as g
+    monkeypatch.delenv("AUTOPILOT_FORMAT", raising=False)
+    monkeypatch.delenv("STITCHED_SHORTS", raising=False)
+    monkeypatch.setenv("GROWTH_PLATFORMS", "instagram,tiktok,linkedin,twitter")
+    live = {p: {"live": True} for p in ("instagram", "tiktok", "youtube", "linkedin", "twitter")}
+    fake = types.SimpleNamespace(GENERATED_DIR=str(tmp_path), load_settings=lambda: {"autonomous_platforms": ["youtube"]},
+                                 build_postproxy_status_payload=lambda settings, live=False: {"channels": live_ch})
+    live_ch = live
+    monkeypatch.setattr(g, "_main", lambda: fake)
+    monkeypatch.setattr(g, "load_state", lambda: {})
+    monkeypatch.setattr(g, "_MEDIA_TOOLS", {"ffmpeg": True})
+    h = g.health()
+    assert h["autopilot_format"] == "single" and h["shorts_cost_cap_usd"] == 0.75
+    assert h["platforms"] == ["instagram", "tiktok", "linkedin", "twitter"]  # GROWTH_PLATFORMS pins the list: no YouTube
+    monkeypatch.delenv("GROWTH_PLATFORMS")
+    assert "youtube" in g.health()["platforms"]  # without the pin, every connected channel is added back

@@ -114,3 +114,18 @@ after @6framestudios was spam-filtered. Other networks are unchanged.
   seeded from earlier X posts on first boot), so delete-and-repost and retry double-posts are refused.
 - `/health` -> `x_policy` shows the live settings and next allowed X time; boot logs `X_POLICY ...`.
 - Kill switch: `X_SAFE_MODE=0` restores the old X behaviour.
+
+## Autopilot format (2026-10-19)
+
+Default Short = **one 8-second Veo 3.1 Lite clip** (science/physics "wow" lane, concrete visual title line such as
+"Trapped Lightning In Acrylic"), the format that performed best on TikTok. The stitched 20s multi-shot format
+(`stitched_shorts.py`) is kept but off; turn it back on with `AUTOPILOT_FORMAT=stitched` (or `STITCHED_SHORTS=1`,
+or `settings.autopilot_format="stitched"`).
+
+- Cost: the same hard per-Short cap as stitched Shorts (`SHORTS_COST_CAP_USD`, default **$0.75**) is checked before
+  every Veo call. One 8s Veo Lite clip at 720p = $0.40 (+ about $0.05 of Gemini planning/frame-check calls on the
+  ledger). Veo Fast (8s = $0.80) never fits under the default cap; a billed clip whose caption check fails is not
+  followed by a second paid clip.
+- Platforms: `GROWTH_PLATFORMS=instagram,tiktok,linkedin,twitter` pins the publish list (no YouTube). Without it,
+  every connected PostProxy channel is added automatically.
+- `/health` -> `growth_v2` shows `autopilot_format`, `shorts_cost_cap_usd` and `platforms`.

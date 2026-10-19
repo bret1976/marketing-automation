@@ -51,7 +51,7 @@ import x_policy
 logger = logging.getLogger("growth_v2")
 
 MARKER = "GROWTH_V2"
-VERSION = "2026-10-14.3"
+VERSION = "2026-10-19.1"
 LEGACY_MODULES = {"cockpit_overlay", "cockpit_v9", "cockpit_v10", "cockpit_v10_isolate"}
 MAX_SLOT_ATTEMPTS_DEFAULT = 2
 SLOT_RETRY_SECONDS = 600
@@ -477,7 +477,9 @@ Return ONLY JSON with these keys:
   topic: short name
   topic_key: 3-6 lowercase words identifying the subject
   title_line: the caption's top title, 2-6 words, punchy and show-like, written for THIS video's specific subject
-        and action; no numbering, no "#", no series or brand name, no hashtags or emoji.
+        and action: a concrete visual title in Title Case naming the object and what visibly happens to it, in the
+        style of "Trapped Lightning In Acrylic", "Frozen Disc Glides On Magnets", "Wire Lowers Metal Block"
+        (style only, never reuse these); no numbering, no "#", no series or brand name, no hashtags or emoji.
         It must be clearly different from every one of these earlier titles: {avoid_titles}
   shot_list: array of exactly 3 beats covering the 8 seconds, each an object
         {{"t": "0-1s" | "1-5s" | "5-8s", "shows": concrete visible action in plain words}}; the 0-1s beat also names the sound effect,
@@ -873,6 +875,25 @@ def render_vertical(src: str, dst: str, hook: str, commentary: Optional[List[str
 
 
 DEFAULT_ENGINE_LADDER = ("google_veo_lite", "google_veo_lite", "google_veo_lite", "google_veo_fast", "google_veo_fast")
+SINGLE_CLIP_SECONDS = 8
+# Gemini API list price per generated second, 720p with audio (2026-10). Same ledger rules as stitched Shorts:
+# the cap is checked BEFORE every Veo call; a returned clip is charged in full (also if its caption check
+# fails later); failed/filtered generations are normally not billed and count $0, except timeouts and
+# lost downloads, which are charged in full because Google may still bill them.
+VEO_USD_PER_SECOND = {"google_veo_lite": 0.05, "google_veo_fast": 0.10, "google_veo": 0.40}
+PLAN_USD = 0.03   # concept planning: up to 3 Gemini text calls (generous estimate)
+CHECK_USD = 0.02  # frame check: up to 2 Gemini vision calls (generous estimate)
+
+
+def single_clip_cost(engine: str) -> float:
+    return round(VEO_USD_PER_SECOND.get(engine, VEO_USD_PER_SECOND["google_veo"]) * SINGLE_CLIP_SECONDS, 4)
+
+
+def veo_failure_billed(exc: Any) -> bool:
+    low = str(exc).lower()
+    return any(t in low for t in ("timed out", "timeout", "download", "rendered file missing"))
+
+
 DEFAULT_BACKOFF_SECONDS = (0, 15, 30, 60, 90)
 
 
@@ -1216,14 +1237,34 @@ async def produce(settings: dict, state: dict) -> Tuple[str, dict, dict]:
         return await loop.run_in_executor(None, produce_stitched, settings, state)
     errors: List[str] = []
     tried: List[dict] = []
+    # Same hard per-Short cap as stitched Shorts ($0.75 default), checked BEFORE every paid Veo call.
+    ledger = stitched_shorts.CostLedger(stitched_shorts.cost_cap(settings))
+    started = 0
     for i, engine in enumerate(engine_ladder()):
-        wait = backoff_seconds(i)
-        if i and wait > 0:
+        veo_usd = single_clip_cost(engine)
+        if not ledger.fits(PLAN_USD + veo_usd + CHECK_USD):
+            msg = (f"attempt {i + 1} {engine}: skipped, cost cap ${ledger.cap:.2f} would be exceeded "
+                   f"(spent ${ledger.total:.2f} + ${PLAN_USD + veo_usd + CHECK_USD:.2f})")
+            errors.append(msg)
+            logger.warning("%s %s", MARKER, msg)
+            continue
+        wait = backoff_seconds(started)
+        if started and wait > 0:
             await asyncio.sleep(wait)
+        started += 1
         concept: dict = {}
         try:
+            ledger.charge("plan", PLAN_USD)
             concept = await loop.run_in_executor(None, plan_concept, settings, state, list(tried))
-            raw_path, gen_info = await loop.run_in_executor(None, generate_original_clip, concept, settings, engine)
+            label = f"{engine} {SINGLE_CLIP_SECONDS}s"
+            ledger.reserve(label, veo_usd)  # raises CostCapExceeded before the paid call
+            try:
+                raw_path, gen_info = await loop.run_in_executor(None, generate_original_clip, concept, settings, engine)
+            except Exception as gen_exc:
+                ledger.charge(label, veo_usd if veo_failure_billed(gen_exc) else 0.0, ok=False, error=str(gen_exc)[:200])
+                raise
+            ledger.charge(label, veo_usd, topic=concept.get("topic"))
+            ledger.charge("caption check", CHECK_USD)
             concept, check = await loop.run_in_executor(None, ensure_caption_matches, raw_path, concept, settings)
             gen_info.update(check)
             raw_path, sound = await loop.run_in_executor(None, ensure_opening_sound, raw_path)
@@ -1234,6 +1275,11 @@ async def produce(settings: dict, state: dict) -> Tuple[str, dict, dict]:
             info["media_source"] = "ai_generated"
             info["attempt"] = i + 1
             info["failed_attempts"] = [{"topic": c.get("topic"), "error": e[:200]} for c, e in zip(tried, errors)]
+            info["format"] = "single_8s"
+            info["cost"] = ledger.as_dict()
+            info["cost_usd"] = ledger.total
+            logger.info("%s 8s Short ready %s title=%r engine=%s cost=$%.3f (cap $%.2f)", MARKER, os.path.basename(out),
+                        concept.get("title_line"), gen_info.get("engine") or engine, ledger.total, ledger.cap)
             return out, concept, info
         except Exception as exc:
             if concept:
@@ -2020,7 +2066,7 @@ def status_payload(settings: Optional[dict] = None) -> dict:
     return {
         "marker": MARKER, "version": VERSION, "enabled": enabled(), "paused": paused(),
         "stitched_shorts": stitched_shorts.enabled(settings), "stitched_version": stitched_shorts.VERSION,
-        "shorts_cost_cap_usd": stitched_shorts.cost_cap(settings),
+        "shorts_cost_cap_usd": stitched_shorts.cost_cap(settings), "autopilot_format": stitched_shorts.autopilot_format(settings),
         "transform_fallback": transform_fallback_enabled(), "max_slot_attempts": max_slot_attempts(),
         "legacy_boot_patches_skipped": skipped_legacy_modules(), "legacy_patches_allowed": legacy_patches_allowed(),
         "slot_hours_server": slot_hours(settings), "platforms": platforms, "platform_notes": notes,
@@ -2052,5 +2098,13 @@ def health() -> dict:
     global _MEDIA_TOOLS
     if _MEDIA_TOOLS is None:
         _MEDIA_TOOLS = media_tools()
-    return {"marker": MARKER, "version": VERSION, "enabled": enabled(), "paused": paused(),
-            "legacy_skipped": skipped_legacy_modules(), "media_tools": _MEDIA_TOOLS}
+    out = {"marker": MARKER, "version": VERSION, "enabled": enabled(), "paused": paused(),
+           "legacy_skipped": skipped_legacy_modules(), "media_tools": _MEDIA_TOOLS}
+    try:  # read-only: which format and platforms the next slot will use (no secrets, no live API calls)
+        settings = _main().load_settings()
+        out["autopilot_format"] = stitched_shorts.autopilot_format(settings)
+        out["shorts_cost_cap_usd"] = stitched_shorts.cost_cap(settings)
+        out["platforms"] = resolve_platforms(settings)[0]
+    except Exception as exc:
+        out["platforms_error"] = str(exc)[:200]
+    return out

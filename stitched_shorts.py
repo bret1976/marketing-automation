@@ -16,8 +16,9 @@ Guards: max 2 retries per shot (3 attempts), hard cost cap per Short
 (default $1.50, SHORTS_COST_CAP_USD / settings.shorts_cost_cap_usd) checked
 BEFORE every paid call, per-Short cost ledger in the result + log.
 
-Kill switch: STITCHED_SHORTS=0 (or settings.autopilot_format="single") restores
-the single 8s clip pipeline in growth_v2.
+Off by default since 2026-10-19 (Bret: back to 8s single-clip physics Shorts).
+Turn on with AUTOPILOT_FORMAT=stitched, STITCHED_SHORTS=1 or settings.autopilot_format="stitched";
+otherwise growth_v2 runs the single 8s clip pipeline.
 """
 from __future__ import annotations
 
@@ -73,10 +74,24 @@ _HASHTAG_RE = re.compile(r"#\w+")
 _URL_RE = re.compile(r"(https?://\S+|www\.\S+)", re.I)
 
 
+DEFAULT_FORMAT = "single"  # Bret 2026-10-19: back to the 8s single-clip physics Short; stitched stays opt-in
+
+
+def autopilot_format(settings: Optional[dict] = None) -> str:
+    """"single" (8s physics clip, growth_v2) or "stitched" (this module).
+    Precedence: AUTOPILOT_FORMAT env, then STITCHED_SHORTS env (1/0), then settings.autopilot_format, then DEFAULT_FORMAT."""
+    env = str(os.environ.get("AUTOPILOT_FORMAT") or "").strip().lower()
+    if env:
+        return "stitched" if env == "stitched" else "single"
+    flag = str(os.environ.get("STITCHED_SHORTS") or "").strip().lower()
+    if flag:
+        return "single" if flag in {"0", "false", "no", "off"} else "stitched"
+    fmt = str((settings or {}).get("autopilot_format") or DEFAULT_FORMAT).strip().lower()
+    return "stitched" if fmt == "stitched" else "single"
+
+
 def enabled(settings: Optional[dict] = None) -> bool:
-    if str(os.environ.get("STITCHED_SHORTS", "1")).strip().lower() in {"0", "false", "no", "off"}:
-        return False
-    return str((settings or {}).get("autopilot_format") or "stitched").lower() != "single"
+    return autopilot_format(settings) == "stitched"
 
 
 def test_mode(settings: Optional[dict] = None) -> bool:

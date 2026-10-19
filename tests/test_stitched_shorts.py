@@ -136,11 +136,19 @@ def test_generate_shot_retries_max_2_then_veo_lite_fallback(tmp_path):
     assert calls == ["veo_fast"] * 3  # 1 try + 2 retries, never more
 
 
-def test_kill_switch(monkeypatch):
+def test_format_switch_defaults_to_single_8s(monkeypatch):
+    monkeypatch.delenv("AUTOPILOT_FORMAT", raising=False)
+    monkeypatch.delenv("STITCHED_SHORTS", raising=False)
+    assert not ss.enabled({}) and ss.autopilot_format({}) == "single"  # Bret 2026-10-19: 8s physics Shorts
+    assert ss.enabled({"autopilot_format": "stitched"})
+    monkeypatch.setenv("STITCHED_SHORTS", "1")
     assert ss.enabled({})
-    assert not ss.enabled({"autopilot_format": "single"})
     monkeypatch.setenv("STITCHED_SHORTS", "0")
-    assert not ss.enabled({})
+    assert not ss.enabled({"autopilot_format": "stitched"})
+    monkeypatch.setenv("AUTOPILOT_FORMAT", "stitched")
+    assert ss.enabled({})
+    monkeypatch.setenv("AUTOPILOT_FORMAT", "single")
+    assert not ss.enabled({"autopilot_format": "stitched"})
 
 
 @pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg missing")
@@ -187,6 +195,7 @@ def test_growth_v2_staggered_posts_per_platform():
 def test_growth_v2_produce_routes_to_stitched(monkeypatch):
     import asyncio
     import growth_v2 as g
+    monkeypatch.setenv("AUTOPILOT_FORMAT", "stitched")
     monkeypatch.setattr(g, "produce_stitched", lambda settings, state: ("/tmp/x.mp4", {"topic": "t"}, {"format": "stitched_short"}))
     out = asyncio.run(g.produce({}, {}))
     assert out[2]["format"] == "stitched_short"

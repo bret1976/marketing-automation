@@ -98,3 +98,63 @@ def test_inactive_postproxy_profile_is_not_live():
     linkedin = next(item for item in channels if item["platform"] == "linkedin")
     assert linkedin["live"] is False
     assert linkedin["status"] == "INACTIVE"
+
+
+# --- ported from VegasCryptoAgent/marketing-automation#17 / #18 ---
+
+def _pp_post():
+    return {
+        "id": "q1",
+        "text": "Hook line\n\n#Physics",
+        "video_path": "/static/assets/generated/clip.mp4",
+        "platform_captions": {
+            "twitter": "Hook tweet #Physics",
+            "linkedin": "Hook line.\\n\\n\\#Physics \\#Science",
+            "youtube": "Hook short\n\n#Physics",
+        },
+    }
+
+
+def test_twitter_quota_does_not_abort_other_postproxy_batches(monkeypatch):
+    captured = []
+
+    def fake_post(settings, path, payload, timeout=180):
+        captured.append(payload)
+        if payload["profiles"] == ["twitter"]:
+            raise ValueError("PostProxy POST /posts failed HTTP 422: 24 hour Twitter quota exceeded")
+        return {"id": f"pp_{len(captured)}", "platforms": [{"platform": p, "status": "published"} for p in payload["profiles"]]}
+
+    monkeypatch.setattr(main, "postproxy_post", fake_post)
+    monkeypatch.setattr(main, "postproxy_media_url", lambda *a, **k: "https://app.example.com/clip.mp4")
+    monkeypatch.setattr(main, "resolve_postproxy_platform_params", lambda *a, **k: {})
+    monkeypatch.setattr(main, "load_postproxy_state", lambda: {})
+    result = main.publish_via_postproxy(_pp_post(), {"postproxy_enabled": True, "postproxy_api_key": "t"}, ["twitter", "linkedin", "youtube"])
+    assert "linkedin" in result["successes"] and "youtube" in result["successes"]
+    assert any("twitter" in e for e in result["errors"])
+    assert result["postproxy_post_ids"]
+    li = [p for p in captured if p["profiles"] == ["linkedin"]][0]["post"]["body"]
+    assert li == "Hook line.\n\n#Physics #Science"
+
+
+def test_apply_publish_result_persists_all_postproxy_ids():
+    post = {"status": "PUBLISHING"}
+    main.apply_publish_result_to_post(post, {
+        "successes": ["linkedin", "youtube"],
+        "errors": ["twitter: 24 hour Twitter quota exceeded"],
+        "postproxy_post_id": "tw_1",
+        "postproxy_post_ids": ["tw_1", "li_2", "yt_3"],
+        "postproxy_result": {"platforms": []},
+        "blocked_by_publish_guard": True,
+    })
+    assert post["status"] == "PARTIAL_SUCCESS"
+    assert post["postproxy_post_ids"] == ["tw_1", "li_2", "yt_3"]
+
+
+def test_reconcile_does_not_fail_whole_post_when_only_twitter_id_is_stored(monkeypatch):
+    posts = [{"id": "q1", "platform": "twitter,linkedin,instagram,tiktok,youtube", "status": "SUCCESS",
+              "postproxy_post_id": "tw_only", "error_message": None}]
+    monkeypatch.setattr(main, "postproxy_get", lambda settings, path, timeout=30: {
+        "platforms": [{"platform": "twitter", "status": "failed", "error": "24 hour Twitter quota exceeded"}]})
+    assert main.reconcile_postproxy_posts(posts, {"postproxy_enabled": True, "postproxy_api_key": "t"}) is True
+    assert posts[0]["status"] == "PARTIAL_SUCCESS"
+    assert "twitter" in posts[0]["error_message"]

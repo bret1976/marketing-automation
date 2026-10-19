@@ -1430,7 +1430,7 @@ def publish_via_postproxy(post: dict, settings: dict, platforms: List[str]) -> d
     platform_captions = post.get("platform_captions") or {}
 
     def caption_for(platform: str) -> str:
-        return platform_captions.get(platform) or post.get("text", "")
+        return growth_v2.unescape_caption_escapes(platform_captions.get(platform) or post.get("text", ""))
 
     if x_policy.enabled():
         # x-safe-v1: one X post per publish, never a self-reply thread.
@@ -1520,7 +1520,24 @@ def publish_via_postproxy(post: dict, settings: dict, platforms: List[str]) -> d
     elif remaining:
         batches.append((remaining, bool(media_url), post.get("text", ""), None))
 
-    results = [publish_batch(batch_platforms, include_media, body, thread_parts) for batch_platforms, include_media, body, thread_parts in batches]
+    # Port of VegasCryptoAgent/marketing-automation#17: one failing batch (usually the
+    # Twitter quota error) must not abort LinkedIn / Shorts / Reels batches.
+    results = []
+    for batch_platforms, include_media, body, thread_parts in batches:
+        try:
+            results.append(publish_batch(batch_platforms, include_media, body, thread_parts))
+        except Exception as batch_err:
+            logger.exception(f"PostProxy batch failed for {batch_platforms}")
+            results.append({
+                "platforms": [
+                    {
+                        "platform": platform,
+                        "status": "failed",
+                        "error": sanitize_postproxy_error(str(batch_err)),
+                    }
+                    for platform in batch_platforms
+                ]
+            })
     platform_results = []
     for result in results:
         platform_results.extend(result.get("platforms") or [])
@@ -2419,12 +2436,25 @@ def reconcile_postproxy_posts(posts: List[dict], settings: dict) -> bool:
                 if item.get("status") in ("published", "processing", "processed", "scheduled", "pending")
             ]
             post["postproxy_result"] = latest_posts[0] if len(latest_posts) == 1 else {"posts": latest_posts, "platforms": platform_results}
+            intended = {
+                platform_to_postproxy(p)
+                for p in resolve_platform_list(post.get("platform") or "")
+                if platform_to_postproxy(p) in POSTPROXY_SUPPORTED_PLATFORMS
+            }
+            seen = {item.get("platform") for item in platform_results if item.get("platform")}
+            incomplete = bool(intended - seen)
+            failure_text = "; ".join(f"{i.get('platform')}: {i.get('error') or i.get('status')}" for i in failures)
             if failures and accepted:
                 post["status"] = "PARTIAL_SUCCESS"
-                post["error_message"] = "; ".join(f"{i.get('platform')}: {i.get('error') or i.get('status')}" for i in failures)
+                post["error_message"] = failure_text
+            elif failures and incomplete and post.get("status") in ("SUCCESS", "PARTIAL_SUCCESS", "PUBLISHING"):
+                # Port of #17: only one child post id was stored (usually Twitter). Do not
+                # mark the whole run FAILED when other PostProxy batches published.
+                post["status"] = "PARTIAL_SUCCESS"
+                post["error_message"] = failure_text
             elif failures:
                 post["status"] = "FAILED"
-                post["error_message"] = "; ".join(f"{i.get('platform')}: {i.get('error') or i.get('status')}" for i in failures)
+                post["error_message"] = failure_text
             elif accepted:
                 post["status"] = "SUCCESS"
                 post["error_message"] = None
@@ -2919,6 +2949,8 @@ def apply_publish_result_to_post(p: dict, result: dict):
         p["tweet_ids"] = result["tweet_ids"]
     if result.get("postproxy_post_id"):
         p["postproxy_post_id"] = result["postproxy_post_id"]
+    if result.get("postproxy_post_ids"):
+        p["postproxy_post_ids"] = result["postproxy_post_ids"]
     if result.get("postproxy_result"):
         p["postproxy_result"] = result["postproxy_result"]
     if result.get("blocked_by_daily_limit"):

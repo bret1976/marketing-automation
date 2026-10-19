@@ -540,3 +540,58 @@ def test_health_reports_format_and_platforms(monkeypatch, tmp_path):
     assert h["platforms"] == ["instagram", "tiktok", "linkedin", "twitter"]  # GROWTH_PLATFORMS pins the list: no YouTube
     monkeypatch.delenv("GROWTH_PLATFORMS")
     assert "youtube" in g.health()["platforms"]  # without the pin, every connected channel is added back
+
+
+# --- ported from VegasCryptoAgent/marketing-automation#17 / #18 ---
+
+def test_transform_sources_prefer_tiktok_then_youtube_then_reddit(monkeypatch):
+    import main as m
+    monkeypatch.setattr(m, "load_growth_os", lambda: {"last_trend_scan": [
+        {"title": "r", "url": "https://www.reddit.com/r/x/comments/abc/def"},
+        {"title": "y", "url": "https://www.youtube.com/watch?v=abc"},
+        {"title": "t", "url": "https://www.tiktok.com/@studio/video/123"},
+    ]})
+    urls = [c["url"] for c in g.pick_transform_sources({"history": []}, 6)]
+    assert "tiktok.com" in urls[0] and "youtube.com" in urls[1] and "reddit.com" in urls[2]
+
+
+def test_youtube_bot_block_detection():
+    assert g.is_youtube_bot_block("Sign in to confirm you're not a bot. Use --cookies-from-browser")
+    assert not g.is_youtube_bot_block("HTTP Error 404")
+
+
+def test_transform_fallback_skips_remaining_youtube_after_bot_check(monkeypatch):
+    import main as m
+    tried = []
+    monkeypatch.setenv("AUTOPILOT_TRANSFORM_FALLBACK", "1")
+    monkeypatch.setattr(g, "pick_transform_sources", lambda state, limit=6: [
+        {"url": "https://www.youtube.com/watch?v=a", "title": "a", "creator": ""},
+        {"url": "https://www.youtube.com/watch?v=b", "title": "b", "creator": ""},
+    ])
+
+    def fake_download(url, *a, **k):
+        tried.append(url)
+        raise RuntimeError("Sign in to confirm you're not a bot")
+
+    monkeypatch.setattr(m, "download_and_trim_original_video", fake_download)
+    import pytest
+    with pytest.raises(RuntimeError):
+        g.build_transformed_clip({}, {})
+    assert tried == ["https://www.youtube.com/watch?v=a"]
+
+
+def test_literal_escapes_cleaned_into_one_linkedin_hashtag_line():
+    concept = dict(g.FALLBACK_CONCEPTS[0])
+    concept["lines"] = ["Spikes form near a magnet.\\n\\n\\#Physics \\#Science"]
+    concept["hashtags"] = ["\\#Physics", "\\n\\n#Science", "\\#Magnetism"]
+    caps = g.build_captions(concept)
+    for text in caps.values():
+        assert "\\n" not in text and "\\#" not in text
+    li_tag_lines = [l for l in caps["linkedin"].split("\n") if l.startswith("#")]
+    assert li_tag_lines == ["#Physics #Science #Magnetism"]
+
+
+def test_unescape_caption_escapes():
+    assert g.unescape_caption_escapes("Hook.\\n\\n\\#A \\#B") == "Hook.\n\n#A #B"
+    assert g.unescape_caption_escapes("a\\r\\nb\\tc") == "a\nb\tc"
+    assert g.unescape_caption_escapes("plain") == "plain"

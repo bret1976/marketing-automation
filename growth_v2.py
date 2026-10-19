@@ -272,8 +272,19 @@ def strip_links(text: str) -> str:
     return "\n".join(line.rstrip() for line in out.splitlines()).strip()
 
 
+def unescape_caption_escapes(text: Any) -> str:
+    """Port of VegasCryptoAgent/marketing-automation#18: Gemini/JSON copy sometimes
+    carries the literal two-character escapes \\n, \\r, \\t, \\# so LinkedIn showed
+    '\\n\\n#tag'. Turn them into real characters."""
+    raw = str(text or "")
+    if "\\" not in raw:
+        return raw
+    out = raw.replace("\\r\\n", "\n").replace("\\n", "\n").replace("\\r", "\n")
+    return out.replace("\\t", "\t").replace("\\#", "#")
+
+
 def _clean_line(text: Any) -> str:
-    text = strip_links(str(text or ""))
+    text = strip_links(unescape_caption_escapes(text))
     text = _OPENER_RE.sub("", text)
     text = _HASHTAG_RE.sub("", text)
     return " ".join(text.split()).strip(" -\u2013\u2014|")
@@ -299,10 +310,12 @@ def clean_hook(text: Any) -> str:
 
 def normalize_hashtags(tags: Any, fallback: Optional[List[str]] = None) -> List[str]:
     if isinstance(tags, str):
-        tags = re.split(r"[\s,]+", tags)
+        tags = re.split(r"[\s,]+", unescape_caption_escapes(tags))
+    elif tags:
+        tags = [t for tag in tags for t in re.split(r"[\s,]+", unescape_caption_escapes(tag))]
     out: List[str] = []
     for tag in tags or []:
-        word = re.sub(r"[^\w]", "", str(tag).lstrip("#"))
+        word = re.sub(r"[^\w]", "", str(tag).strip().lstrip("\\#"))
         if not word or word.isdigit():
             continue
         candidate = f"#{word}"
@@ -952,8 +965,29 @@ def pick_transform_sources(state: dict, limit: int = 6) -> List[dict]:
             continue
         seen.add(url)
         out.append({"url": url, "title": trend.get("title") or "", "creator": creator})
-    out.sort(key=lambda c: 1 if "reddit.com" in c["url"].lower() else 0)
+    out.sort(key=lambda c: source_download_rank(c["url"]))
     return out[:max(1, limit)]
+
+
+def _is_youtube_url(url: str) -> bool:
+    low = (url or "").lower()
+    return "youtube.com" in low or "youtu.be" in low
+
+
+def source_download_rank(url: str) -> int:
+    """Port of #17: TikTok/Instagram first (yt-dlp fetches them without cookies),
+    then YouTube, Reddit last (auth-walled for yt-dlp)."""
+    low = (url or "").lower()
+    if "tiktok.com" in low or "instagram.com" in low:
+        return 0
+    if "reddit.com" in low:
+        return 2
+    return 1
+
+
+def is_youtube_bot_block(error: str) -> bool:
+    low = (error or "").lower()
+    return any(tok in low for tok in ("sign in to confirm", "not a bot", "cookies-from-browser", "use --cookies"))
 
 
 def pick_transform_source(state: dict) -> Optional[dict]:
@@ -1045,7 +1079,11 @@ def build_transformed_clip(settings: dict, state: dict) -> Optional[Tuple[str, d
     downloaded = None
     source: dict = {}
     failures: List[str] = []
+    skip_youtube = False
     for cand in sources:
+        if skip_youtube and _is_youtube_url(cand["url"]):
+            failures.append(f"{cand['url']}: skipped YouTube after bot-check")
+            continue
         try:
             downloaded = m.download_and_trim_original_video(cand["url"], cand["title"], 15, False, 180)
             source = cand
@@ -1053,6 +1091,8 @@ def build_transformed_clip(settings: dict, state: dict) -> Optional[Tuple[str, d
         except Exception as exc:
             failures.append(f"{cand['url']}: {str(exc)[:120]}")
             _remember_failed_source(state, cand["url"], str(exc))
+            if _is_youtube_url(cand["url"]) and is_youtube_bot_block(str(exc)):
+                skip_youtube = True
             logger.warning("%s fallback source failed, trying next: %s (%s)", MARKER, cand["url"], str(exc)[:160])
     if not downloaded:
         raise RuntimeError(f"All {len(sources)} fallback sources failed to download: " + " ; ".join(failures)[:900])

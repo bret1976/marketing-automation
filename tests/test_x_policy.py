@@ -103,6 +103,11 @@ def main_mod(tmp_path, monkeypatch):
     import x_policy
     importlib.reload(x_policy)
     import main
+    # main may already be imported by another test with a different STATE_DIR;
+    # point its state files at this test's tmp dir so runs never share/leak state.
+    monkeypatch.setattr(main, "STATE_DIR", str(tmp_path))
+    monkeypatch.setattr(main, "SCHEDULED_POSTS_FILE", str(tmp_path / "scheduled_posts.json"))
+    monkeypatch.setattr(main, "POSTPROXY_STATE_FILE", str(tmp_path / "postproxy_state.json"))
     return main
 
 

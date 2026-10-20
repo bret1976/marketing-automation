@@ -54,7 +54,17 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("main")
 autopilot_watch.install()  # passive log tap; AUTOPILOT_WATCH=0 disables
 
-app = FastAPI(title="6Frame Studio Marketing Automation Hub")
+import contextlib
+
+
+@contextlib.asynccontextmanager
+async def _lifespan(_app):
+    # Same startup work as the former @app.on_event("startup") hook (deprecated in FastAPI).
+    startup_event()
+    yield
+
+
+app = FastAPI(title="6Frame Studio Marketing Automation Hub", lifespan=_lifespan)
 
 PUBLIC_API_PATHS = {
     "/api/auth/login",
@@ -3266,7 +3276,6 @@ async def scheduler_loop():
 
         await asyncio.sleep(10)
 
-@app.on_event("startup")
 def startup_event():
     try:
         seeded = x_policy.bootstrap_from_posts(load_scheduled_posts())

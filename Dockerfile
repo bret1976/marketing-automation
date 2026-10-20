@@ -46,8 +46,8 @@ WORKDIR /app
 RUN npm install hyperframes@0.7.40
 
 # Copy requirements and install dependencies
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+COPY requirements.txt requirements-nodeps.txt ./
+RUN pip install --no-cache-dir --upgrade pip==26.2.1 setuptools==83.0.0 && pip install --no-cache-dir -r requirements.txt && pip install --no-cache-dir --no-deps -r requirements-nodeps.txt
 
 # Copy rest of the application code
 COPY . .

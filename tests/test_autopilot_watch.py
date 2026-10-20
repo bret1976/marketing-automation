@@ -1,6 +1,6 @@
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import autopilot_watch as aw
 
@@ -120,7 +120,10 @@ def test_log_tap_and_post_scan_merge(tmp_path, monkeypatch):
     _ledger(tmp_path, ["2026-10-07-0"])
     assert aw.install() is True
     logging.getLogger("main").warning("Google Search grounding failed: 402 RESOURCE_EXHAUSTED prepay credits are depleted")
-    posts = [{"status": "FAILED", "scheduled_time": "2026-10-06T16:00:00",
+    # Relative dates so the 72h lookback window keeps covering the recent row
+    # (a fixed 2026-10-06 date aged out of the window and broke this test).
+    recent = (datetime.now() - timedelta(hours=6)).strftime("%Y-%m-%dT%H:%M:%S")
+    posts = [{"status": "FAILED", "scheduled_time": recent,
               "error_message": "No original video could be downloaded. Tried 3 source(s). Last error: Sign in to confirm you're not a bot"},
              {"status": "FAILED", "scheduled_time": "2026-09-01T16:00:00", "error_message": "Missing required page_id"}]
     r = aw.report(settings={"autonomous_posting": True}, posts=posts, state_dir=tmp_path)

@@ -1,0 +1,5 @@
+# tweepy 4.15-4.17 declare oauthlib<4; oauthlib 4.0.0 fixes CVE-2026-49265.
+# tweepy only uses oauthlib through requests-oauthlib OAuth1 (HMAC-SHA1), verified
+# byte-identical signatures on 3.3.1 vs 4.0.0. Installed with --no-deps; its real
+# deps (requests, requests-oauthlib, oauthlib) are pinned in requirements.txt.
+tweepy==4.15.0

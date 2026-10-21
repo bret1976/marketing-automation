@@ -10,8 +10,13 @@ Rules (all on unless X_SAFE_MODE=0):
   * No automated replies/comments on X (mention-reply drafting and the
     engagement-queue X send are off). X_REPLIES_ENABLED=1 re-enables.
   * No X threads (self-reply chains): one post per publish.
-  * At most X_MAX_POSTS_PER_DAY (2) native-video originals per rolling 24h,
-    at least X_MIN_GAP_HOURS (4) apart, scheduled at varied minutes.
+  * At most X_MAX_POSTS_PER_DAY (2) native-video originals per rolling
+    X_CAP_WINDOW_HOURS (20h) window, at least X_MIN_GAP_HOURS (4) apart,
+    scheduled at varied minutes. The window is 20h, not 24h, because the slots
+    are 8 AM / 5 PM PT plus 7-53 min jitter: a strict 24h window made every
+    day's third post wait for yesterday's jittered time, so X ratcheted later
+    each day (Oct 2026: X going out at 2 PM and 11 PM PT). 20h still allows
+    only 2 per day and keeps X on the 8 AM / 5 PM slots.
   * Caption: hook first line, <= 280 chars, 0-1 hashtag, no links, never
     a link-only or text-only (no video) post.
   * Never posts the same caption or the same video to X twice (permanent
@@ -71,6 +76,14 @@ def min_gap_hours() -> float:
         return max(4.0, float(os.environ.get("X_MIN_GAP_HOURS", "4")))
     except ValueError:
         return 4.0
+
+
+def cap_window_hours() -> float:
+    """Rolling window for the post cap. Env may only widen it (stricter), 20..24h."""
+    try:
+        return max(20.0, min(24.0, float(os.environ.get("X_CAP_WINDOW_HOURS", "20"))))
+    except ValueError:
+        return 20.0
 
 
 def is_x(platform: Any) -> bool:
@@ -163,10 +176,11 @@ def next_allowed_at(now: Optional[datetime] = None) -> datetime:
     candidates = [now]
     if rows:
         candidates.append(_parse(rows[-1]["at"]) + timedelta(hours=min_gap_hours()))
-    window = [r for r in rows if (now - _parse(r["at"])).total_seconds() < 86400]
+    win_h = cap_window_hours()
+    window = [r for r in rows if (now - _parse(r["at"])).total_seconds() < win_h * 3600]
     cap = max_posts_per_day()
     if cap and len(window) >= cap:
-        candidates.append(_parse(window[-cap]["at"]) + timedelta(hours=24))
+        candidates.append(_parse(window[-cap]["at"]) + timedelta(hours=win_h))
     return max(candidates)
 
 
@@ -281,7 +295,7 @@ def check(post: dict, caption: str) -> Tuple[bool, str, Optional[datetime]]:
         return False, dup, None
     allowed = next_allowed_at()
     if allowed > _now() + timedelta(seconds=30):
-        return False, (f"X cadence: max {max_posts_per_day()}/24h, >= {min_gap_hours():g}h apart; "
+        return False, (f"X cadence: max {max_posts_per_day()}/{cap_window_hours():g}h, >= {min_gap_hours():g}h apart; "
                        f"next slot {allowed.isoformat(timespec='minutes')} UTC"), allowed
     return True, "", None
 
@@ -295,6 +309,7 @@ def summary() -> dict:
         "threads_enabled": not enabled(),
         "max_posts_per_day": max_posts_per_day(),
         "min_gap_hours": min_gap_hours(),
+        "cap_window_hours": cap_window_hours(),
         "max_hashtags": 1,
         "max_chars": X_CHAR_LIMIT,
         "links_allowed": False,
@@ -339,7 +354,7 @@ def bootstrap_from_posts(posts: List[dict]) -> int:
 
 def log_boot() -> None:
     s = summary()
-    logger.info("X_POLICY %s enabled=%s replies=%s threads=%s schedule=max %s/24h, >=%sh apart, minute jitter 7-53; "
+    logger.info("X_POLICY %s enabled=%s replies=%s threads=%s schedule=max %s/%sh, >=%sh apart, minute jitter 7-53; "
                 "captions <=%s chars, <=1 hashtag, no links, video required; next X slot after %s UTC",
                 PACK, s["enabled"], "on" if s["replies_enabled"] else "off", "on" if s["threads_enabled"] else "off",
-                s["max_posts_per_day"], s["min_gap_hours"], s["max_chars"], s["next_x_post_allowed_utc"])
+                s["max_posts_per_day"], s["cap_window_hours"], s["min_gap_hours"], s["max_chars"], s["next_x_post_allowed_utc"])

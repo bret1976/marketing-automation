@@ -1,4 +1,4 @@
-"""x-safe-v1: X path only - no replies, no threads, <=2/24h >=4h apart, hook-first <=280, 0-1 tag, no links, no dupes."""
+"""x-safe-v1: X path only - no replies, no threads, <=2 per 20h window >=4h apart, hook-first <=280, 0-1 tag, no links, no dupes."""
 import asyncio
 import importlib
 import json
@@ -74,7 +74,45 @@ def test_cadence_two_per_day_four_hours(xp):
     json.dump(data, open(xp.ledger_path(), "w"))
     p3 = _post(3, "Kling 4.0 turns a paper plane into a jet\nWatch the fold.")
     ok, why, retry = xp.check(p3, p3["text"])
-    assert not ok and "2/24h" in why  # 2 in the last 24h -> wait for the oldest to age out
+    assert not ok and "2/20h" in why  # 2 in the window -> wait for the oldest to age out
+
+
+def test_slots_do_not_drift_later_each_day(xp, monkeypatch):
+    """8 AM / 5 PM PT slots (15:00 / 00:00 UTC) + up to 53 min jitter must stay on their slots.
+    The old strict 24h window made each day's 8 AM X wait for yesterday's jittered time (ratchet)."""
+    day0 = datetime(2026, 10, 22, 15, 0, tzinfo=timezone.utc)
+    clock = {"now": day0}
+    monkeypatch.setattr(xp, "_now", lambda: clock["now"])
+    monkeypatch.setattr(xp.random, "randint", lambda a, b: b)  # worst-case jitter every time
+    posted = []
+    for i in range(10):  # 5 days of slots
+        slot = day0 + timedelta(hours=9 * ((i + 1) // 2) + 15 * (i // 2))
+        clock["now"] = slot
+        allowed = xp.next_allowed_at()
+        at = max(slot, allowed) + timedelta(minutes=53, seconds=59)
+        clock["now"] = at
+        p = _post(100 + i, f"Distinct physics short number {i}\nnew words {i}", path=f"/c/{i}.mp4")
+        assert xp.check(p, p["text"])[0], (i, at)
+        xp.record(p, p["text"])
+        posted.append(at - slot)
+    assert max(posted) < timedelta(hours=1), posted
+
+
+def test_recovers_from_drifted_ledger(xp, monkeypatch):
+    """Real Oct 20-21 2026 ledger: X went out 21:20 and 06:09 UTC. Next 8 AM PT slot must not wait till 2:20 PM PT."""
+    data = {"posts": [{"at": "2026-10-20T21:20:14+00:00", "post_id": "a"}, {"at": "2026-10-21T06:09:18+00:00", "post_id": "b"}]}
+    json.dump(data, open(xp.ledger_path(), "w"))
+    now = datetime(2026, 10, 21, 15, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(xp, "_now", lambda: now)
+    assert xp.next_allowed_at() <= datetime(2026, 10, 21, 17, 21, tzinfo=timezone.utc)  # was 21:20 UTC
+
+
+def test_cap_window_env_only_tightens(xp, monkeypatch):
+    assert xp.cap_window_hours() == 20
+    monkeypatch.setenv("X_CAP_WINDOW_HOURS", "6")
+    assert xp.cap_window_hours() == 20
+    monkeypatch.setenv("X_CAP_WINDOW_HOURS", "48")
+    assert xp.cap_window_hours() == 24
 
 
 def test_never_duplicates_or_reposts(xp):

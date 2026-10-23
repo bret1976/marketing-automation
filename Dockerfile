@@ -43,7 +43,10 @@ RUN curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o 
 WORKDIR /app
 
 # Preinstall HyperFrames locally so npx resolves the package runtime from /app/node_modules.
-RUN npm install hyperframes@0.7.40
+# package.json pins hyperframes 0.7.40 and overrides its vulnerable transitive deps
+# (sharp, adm-zip, puppeteer-core, @puppeteer/browsers); npm ci installs the exact lockfile.
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev --no-audit --no-fund
 
 # Copy requirements and install dependencies
 COPY requirements.txt requirements-nodeps.txt ./

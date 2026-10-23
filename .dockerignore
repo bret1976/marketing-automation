@@ -18,3 +18,4 @@ reports
 uploads
 static/assets/generated
 *.log
+node_modules/

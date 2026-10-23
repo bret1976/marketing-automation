@@ -170,6 +170,8 @@ def _fake_main(tmp_path):
 
 
 def test_failed_veo_retries_with_new_topic_then_succeeds(monkeypatch, tmp_path):
+    monkeypatch.setenv("GROWTH_VIDEO_ENGINES", "google_veo_lite,google_veo_lite,google_veo_lite,google_veo_fast,google_veo_fast")
+    monkeypatch.setenv("GROWTH_COST_CAP_USD", "0.75")
     monkeypatch.setenv("STITCHED_SHORTS", "0")  # these cover the legacy single-clip ladder
     import asyncio
     import growth_v2 as g
@@ -202,6 +204,8 @@ def test_failed_veo_retries_with_new_topic_then_succeeds(monkeypatch, tmp_path):
 
 
 def test_all_attempts_fail_walks_lite_then_fast_and_never_reposts(monkeypatch, tmp_path):
+    monkeypatch.setenv("GROWTH_VIDEO_ENGINES", "google_veo_lite,google_veo_lite,google_veo_lite,google_veo_fast,google_veo_fast")
+    monkeypatch.setenv("GROWTH_COST_CAP_USD", "0.75")
     monkeypatch.setenv("STITCHED_SHORTS", "0")  # these cover the legacy single-clip ladder
     import asyncio
     import pytest
@@ -218,10 +222,12 @@ def test_all_attempts_fail_walks_lite_then_fast_and_never_reposts(monkeypatch, t
     # unbilled failures may retry on Veo Lite; Veo Fast ($0.80 for 8s) never fits under the $0.75 cap
     assert engines == ["google_veo_lite"] * 3
     engines.clear()
-    monkeypatch.setenv("SHORTS_COST_CAP_USD", "5")
+    monkeypatch.setenv("GROWTH_COST_CAP_USD", "5")  # clamped to the $0.85 hard ceiling
+    assert g.single_cost_cap({}) == 0.85
     with pytest.raises(RuntimeError, match="All 5 original video attempts failed"):
         asyncio.run(g.produce({}, {}))
-    assert engines == ["google_veo_lite"] * 3 + ["google_veo_fast"] * 2
+    # 3 plans already spent $0.09, so Veo Fast ($0.85 with plan + check) never fits under the $0.85 ceiling
+    assert engines == ["google_veo_lite"] * 3
 
 
 def _concept(topic="drop"):
@@ -257,6 +263,8 @@ def test_caption_still_mismatched_raises(monkeypatch):
 
 
 def test_mismatch_counts_toward_retry_with_new_topic(monkeypatch, tmp_path):
+    monkeypatch.setenv("GROWTH_VIDEO_ENGINES", "google_veo_lite,google_veo_lite,google_veo_lite,google_veo_fast,google_veo_fast")
+    monkeypatch.setenv("GROWTH_COST_CAP_USD", "0.75")
     monkeypatch.setenv("STITCHED_SHORTS", "0")  # these cover the legacy single-clip ladder
     import asyncio
     import growth_v2 as g
@@ -273,7 +281,9 @@ def test_mismatch_counts_toward_retry_with_new_topic(monkeypatch, tmp_path):
 
     monkeypatch.setattr(g, "ensure_caption_matches", ensure)
     monkeypatch.setattr(g, "render_vertical", lambda *a, **k: {})
-    monkeypatch.setenv("SHORTS_COST_CAP_USD", "2")  # room for a second paid clip
+    monkeypatch.setenv("GROWTH_COST_CAP_USD", "0.85")  # $0.45 + $0.45 Lite would pass $0.85, so use a $0.40 total
+    monkeypatch.setattr(g, "PLAN_USD", 0.0)
+    monkeypatch.setattr(g, "CHECK_USD", 0.0)  # room for a second paid clip: $0.40 + $0.40
     _, concept, info = asyncio.run(g.produce({}, {}))
     assert concept["topic"] == "t1" and info["attempt"] == 2 and info["caption_check"] == "match"
 
@@ -470,7 +480,7 @@ def test_rewrite_keeps_number(monkeypatch):
 
 def _single_env(monkeypatch, tmp_path):
     import growth_v2 as g
-    for k in ("AUTOPILOT_FORMAT", "STITCHED_SHORTS", "SHORTS_COST_CAP_USD", "AUTOPILOT_TRANSFORM_FALLBACK", "GROWTH_VIDEO_ENGINES"):
+    for k in ("AUTOPILOT_FORMAT", "STITCHED_SHORTS", "SHORTS_COST_CAP_USD", "AUTOPILOT_TRANSFORM_FALLBACK", "GROWTH_VIDEO_ENGINES", "GROWTH_COST_CAP_USD"):
         monkeypatch.delenv(k, raising=False)
     monkeypatch.setenv("GROWTH_RETRY_BACKOFF", "0")
     monkeypatch.setattr(g, "_main", lambda: _fake_main(tmp_path))
@@ -485,6 +495,8 @@ def test_default_is_one_8s_veo_lite_clip_under_cap(monkeypatch, tmp_path):
     """2026-10-19: the default Short is ONE 8s Veo Lite clip (no multi-shot), ~$0.45 on the ledger, cap $0.75."""
     import asyncio
     g = _single_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("GROWTH_VIDEO_ENGINES", "google_veo_lite,google_veo_lite,google_veo_lite,google_veo_fast,google_veo_fast")
+    monkeypatch.setenv("GROWTH_COST_CAP_USD", "0.75")
     calls = []
     monkeypatch.setattr(g, "plan_concept", lambda s, st, extra_avoid=None: dict(_concept("lichtenberg"), title_line="Trapped Lightning In Acrylic"))
     monkeypatch.setattr(g, "generate_original_clip", lambda c, s, e: calls.append(e) or ("/tmp/raw.mp4", {"engine": e}))
@@ -501,6 +513,8 @@ def test_billed_mismatch_never_buys_a_second_clip_over_cap(monkeypatch, tmp_path
     import asyncio
     import pytest
     g = _single_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("GROWTH_VIDEO_ENGINES", "google_veo_lite,google_veo_lite,google_veo_lite,google_veo_fast,google_veo_fast")
+    monkeypatch.setenv("GROWTH_COST_CAP_USD", "0.75")
     calls = []
     monkeypatch.setattr(g, "plan_concept", lambda s, st, extra_avoid=None: _concept(f"t{len(extra_avoid or [])}"))
     monkeypatch.setattr(g, "generate_original_clip", lambda c, s, e: calls.append(e) or ("/tmp/raw.mp4", {"engine": e}))
@@ -514,6 +528,8 @@ def test_timed_out_veo_counts_as_spent(monkeypatch, tmp_path):
     import asyncio
     import pytest
     g = _single_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("GROWTH_VIDEO_ENGINES", "google_veo_lite,google_veo_lite,google_veo_lite,google_veo_fast,google_veo_fast")
+    monkeypatch.setenv("GROWTH_COST_CAP_USD", "0.75")
     calls = []
     monkeypatch.setattr(g, "plan_concept", lambda s, st, extra_avoid=None: _concept(f"t{len(extra_avoid or [])}"))
     monkeypatch.setattr(g, "generate_original_clip", lambda c, s, e: calls.append(e) or (_ for _ in ()).throw(RuntimeError("google_veo_lite: Failed to download video file")))
@@ -537,6 +553,7 @@ def test_health_reports_format_and_platforms(monkeypatch, tmp_path):
     monkeypatch.setattr(g, "_MEDIA_TOOLS", {"ffmpeg": True})
     h = g.health()
     assert h["autopilot_format"] == "single" and h["shorts_cost_cap_usd"] == 0.75
+    assert h["single_cost_cap_usd"] == 0.85 and h["video_engines"][0] == "gemini_omni"
     assert h["platforms"] == ["instagram", "tiktok", "linkedin", "twitter"]  # GROWTH_PLATFORMS pins the list: no YouTube
     monkeypatch.delenv("GROWTH_PLATFORMS")
     assert "youtube" in g.health()["platforms"]  # without the pin, every connected channel is added back

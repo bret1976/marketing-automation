@@ -1239,7 +1239,7 @@ def normalize_video_duration(engine: str, duration: int) -> int:
         duration = int(duration)
     except (TypeError, ValueError):
         duration = 0
-    if engine.startswith("google_veo"):
+    if engine.startswith("google_veo") or engine == OMNI_ENGINE:
         return 8
     if engine == "runway_gen3":
         return 30 if duration == 30 else 10
@@ -1251,6 +1251,157 @@ def normalize_video_duration(engine: str, duration: int) -> int:
         return min(preferred, key=lambda candidate: abs(candidate - target))
     return max(8, min(duration or 10, 15))
 
+
+
+
+# --------------------------------------------------------------------------
+# Gemini Omni Flash (Interactions API). Google's named replacement for the
+# Veo 3.1 Preview models that were shut down on 2026-10-22.
+# Pricing (ai.google.dev/gemini-api/docs/pricing, updated 2026-10-15):
+#   video output $17.50 / 1M tokens, 5,792 tokens per second of 720p video
+#   (~$0.1014/s, $0.8109 for 8 s); text/thinking output $9.00 / 1M; input $1.50 / 1M.
+# --------------------------------------------------------------------------
+OMNI_ENGINE = "gemini_omni"
+OMNI_MODEL = "gemini-omni-1.1-flash"
+OMNI_LABEL = "Gemini Omni 1.1 Flash"
+OMNI_RESOLUTION = "720p"
+OMNI_VIDEO_TOKENS_PER_SECOND = 5792
+OMNI_VIDEO_USD_PER_MTOKEN = 17.50
+OMNI_TEXT_OUT_USD_PER_MTOKEN = 9.00
+OMNI_INPUT_USD_PER_MTOKEN = 1.50
+OMNI_TARGET_SECONDS = 8
+# Hard cap on billed output tokens per clip: 8 s of 720p video (46,336) + 464 for low thinking (Omni accepts only low|high).
+# Even if every output token were billed at the video rate, one clip costs at most
+# 46,800 * $17.50/1M = $0.8190 (+ <$0.001 prompt), so a single clip can never exceed the $0.85 cap.
+OMNI_MAX_OUTPUT_TOKENS = 46800
+OMNI_TIMEOUT_SECONDS = 600
+
+
+def omni_expected_cost(seconds: float = OMNI_TARGET_SECONDS) -> float:
+    return round(seconds * OMNI_VIDEO_TOKENS_PER_SECOND * OMNI_VIDEO_USD_PER_MTOKEN / 1_000_000, 4)
+
+
+def omni_max_cost(max_output_tokens: int = OMNI_MAX_OUTPUT_TOKENS, prompt_tokens: int = 400) -> float:
+    """Worst case for one clip: every output token at the video rate plus a generous text prompt."""
+    return round(max_output_tokens * OMNI_VIDEO_USD_PER_MTOKEN / 1_000_000
+                 + prompt_tokens * OMNI_INPUT_USD_PER_MTOKEN / 1_000_000, 4)
+
+
+def omni_cost_from_usage(usage: Optional[Dict[str, Any]]) -> Optional[float]:
+    """Actual cost from Interactions `usage` (None if Google did not return usage)."""
+    if not isinstance(usage, dict) or not usage:
+        return None
+    video_out = 0
+    text_out = 0
+    for item in usage.get("output_tokens_by_modality") or []:
+        mod = str(item.get("modality") or "").lower()
+        if mod == "video":
+            video_out += int(item.get("tokens") or 0)
+        else:
+            text_out += int(item.get("tokens") or 0)
+    total_out = int(usage.get("total_output_tokens") or 0)
+    if not video_out and total_out:
+        video_out = total_out  # no modality split: bill everything at the (higher) video rate
+    elif total_out > video_out + text_out:
+        text_out = total_out - video_out
+    text_out += int(usage.get("total_thought_tokens") or 0)
+    inp = int(usage.get("total_input_tokens") or 0)
+    return round(video_out * OMNI_VIDEO_USD_PER_MTOKEN / 1e6 + text_out * OMNI_TEXT_OUT_USD_PER_MTOKEN / 1e6
+                 + inp * OMNI_INPUT_USD_PER_MTOKEN / 1e6, 4)
+
+
+def omni_prompt(prompt: str, seconds: int = OMNI_TARGET_SECONDS) -> str:
+    prompt = (prompt or "").strip()
+    if f"exactly {seconds} seconds" in prompt.lower():
+        return prompt
+    return (f"A single continuous {seconds}-second vertical 9:16 cinematic clip, exactly {seconds} seconds long "
+            f"([0-{seconds}s]), with natural synchronized sound. {prompt}").strip()
+
+
+def omni_request_body(prompt: str, aspect_ratio: str = "9:16", seconds: int = OMNI_TARGET_SECONDS) -> Dict[str, Any]:
+    return {
+        "model": OMNI_MODEL,
+        "input": omni_prompt(prompt, seconds),
+        "response_format": {"type": "video", "aspect_ratio": aspect_ratio if aspect_ratio in ("16:9", "9:16") else "9:16",
+                            "resolution": OMNI_RESOLUTION},
+        "generation_config": {"max_output_tokens": OMNI_MAX_OUTPUT_TOKENS, "thinking_level": "low"},
+        "background": False, "store": False, "stream": False,
+    }
+
+
+def _omni_video_part(body: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    for step in body.get("steps") or body.get("outputs") or []:
+        contents = step.get("content") if isinstance(step, dict) else None
+        if isinstance(contents, dict):
+            contents = [contents]
+        for part in contents or []:
+            if isinstance(part, dict) and (part.get("type") == "video" or str(part.get("mime_type", "")).startswith("video/")):
+                return part
+    ov = body.get("output_video")
+    return ov if isinstance(ov, dict) else None
+
+
+def run_omni_generation(job_id: str, prompt: str, settings: Dict[str, Any], aspect_ratio: str = "9:16",
+                        seconds: int = OMNI_TARGET_SECONDS, post=None, get=None) -> None:
+    """One synchronous Omni interaction. Writes GENERATED_DIR/<job_id>.mp4 and sets SUCCESS with the
+    actual cost from usage, or FAILED with an error message (timeouts/lost downloads say so, because
+    Google may still bill them)."""
+    import base64
+    post = post or requests.post
+    get = get or requests.get
+    api_key = settings.get("gemini_api_key") or os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        update_job_status(job_id, "FAILED", 0, "Missing Gemini API Key. Please configure it in Settings.")
+        return
+    headers = {"x-goog-api-key": api_key, "Content-Type": "application/json"}
+    update_job_status(job_id, "PROCESSING", 25, f"Submitting video generation request to {OMNI_LABEL}...")
+    try:
+        r = post(f"https://generativelanguage.googleapis.com/v1beta/interactions",
+                 headers=headers, json=omni_request_body(prompt, aspect_ratio, seconds), timeout=OMNI_TIMEOUT_SECONDS)
+    except requests.exceptions.Timeout:
+        update_job_status(job_id, "FAILED", 0, f"{OMNI_LABEL} request timed out after {OMNI_TIMEOUT_SECONDS}s")
+        return
+    except Exception as exc:
+        update_job_status(job_id, "FAILED", 0, f"Video generation failed: {str(exc)[:300]}")
+        return
+    if r.status_code != 200:
+        update_job_status(job_id, "FAILED", 0, f"Video generation failed: {r.status_code} {r.text[:400]}")
+        return
+    try:
+        body = r.json()
+    except Exception:
+        update_job_status(job_id, "FAILED", 0, "Video generation failed: unreadable Omni response")
+        return
+    usage = body.get("usage") or {}
+    cost = omni_cost_from_usage(usage)
+    if str(body.get("status") or "completed").lower() not in ("completed", "succeeded"):
+        update_job_status(job_id, "FAILED", 0, f"Video generation failed: Omni status {body.get('status')}",
+                          result={"usage": usage, "cost_usd": cost})
+        return
+    part = _omni_video_part(body)
+    if not part:
+        update_job_status(job_id, "FAILED", 0, "No video returned in Omni response (download missing)",
+                          result={"usage": usage, "cost_usd": cost})
+        return
+    try:
+        if part.get("data"):
+            content = base64.b64decode(part["data"])
+        else:
+            uri = part.get("uri") or part.get("file_uri") or ""
+            dl = get(uri, headers={"x-goog-api-key": api_key}, timeout=300)
+            if dl.status_code != 200:
+                raise RuntimeError(f"HTTP {dl.status_code}")
+            content = dl.content
+    except Exception as exc:
+        update_job_status(job_id, "FAILED", 0, f"Omni video download failed: {str(exc)[:200]}",
+                          result={"usage": usage, "cost_usd": cost})
+        return
+    os.makedirs(GENERATED_DIR, exist_ok=True)
+    with open(os.path.join(GENERATED_DIR, f"{job_id}.mp4"), "wb") as fh:
+        fh.write(content)
+    update_job_status(job_id, "SUCCESS", 100, "Video generation complete!",
+                      result={"video_path": f"/static/assets/generated/{job_id}.mp4", "engine": OMNI_ENGINE,
+                              "engine_label": OMNI_LABEL, "model": OMNI_MODEL, "usage": usage, "cost_usd": cost})
 
 
 def gemini_veo_config_kwargs(aspect_ratio: str = "16:9") -> Dict[str, Any]:
@@ -1329,6 +1480,9 @@ def run_video_generation(
         return
     if engine in FAL_TEXT_VIDEO_ENGINES:
         run_fal_video_generation(job_id, prompt, settings, engine, duration)
+        return
+    if engine == OMNI_ENGINE:
+        run_omni_generation(job_id, prompt, settings, aspect_ratio, duration)
         return
 
     prompt = veo_prompt_with_duration_policy(prompt, duration)

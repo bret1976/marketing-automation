@@ -887,19 +887,62 @@ def render_vertical(src: str, dst: str, hook: str, commentary: Optional[List[str
                 pass
 
 
-DEFAULT_ENGINE_LADDER = ("google_veo_lite", "google_veo_lite", "google_veo_lite", "google_veo_fast", "google_veo_fast")
+# 2026-10-23 (Bret): Veo 3.1 Preview was shut down 2026-10-22 (404 "no longer available"), so Gemini Omni 1.1 Flash
+# (720p, 9:16, ~8 s) is the primary engine. Retries stay on Omni; under the $0.85 cap a second Omni clip only fits
+# after an unbilled (filtered/rejected) failure, so a slot can never pay for two clips.
+DEFAULT_ENGINE_LADDER = ("gemini_omni", "gemini_omni", "gemini_omni")
 SINGLE_CLIP_SECONDS = 8
 # Gemini API list price per generated second, 720p with audio (2026-10). Same ledger rules as stitched Shorts:
 # the cap is checked BEFORE every Veo call; a returned clip is charged in full (also if its caption check
 # fails later); failed/filtered generations are normally not billed and count $0, except timeouts and
 # lost downloads, which are charged in full because Google may still bill them.
 VEO_USD_PER_SECOND = {"google_veo_lite": 0.05, "google_veo_fast": 0.10, "google_veo": 0.40}
+# Omni bills tokens: $17.50/1M video tokens x 5,792 tokens/s at 720p = $0.10136/s -> $0.8109 for 8 s.
+OMNI_ENGINE = "gemini_omni"
+OMNI_USD_PER_SECOND = round(5792 * 17.50 / 1_000_000, 6)
+OMNI_MAX_CLIP_USD = 0.82  # orchestrator.OMNI_MAX_OUTPUT_TOKENS (46,800) x $17.50/1M + 400 prompt tokens: hard ceiling per clip
+SINGLE_COST_CAP = 0.85  # per-slot cap for the single 8 s clip on Omni (Bret, 2026-10-23); stitched stays at $0.75
 PLAN_USD = 0.03   # concept planning: up to 3 Gemini text calls (generous estimate)
 CHECK_USD = 0.02  # frame check: up to 2 Gemini vision calls (generous estimate)
+PLAN_TEXT_USD = 0.0125  # Omni path: pre-check estimate for concept planning (charged at real token cost)
+CHECK_TEXT_USD = 0.0125  # Omni path: pre-call reservation for the frame check (charged later at real token cost)
 
 
 def single_clip_cost(engine: str) -> float:
+    """Expected list price of one 8 s clip on `engine`."""
+    if engine == OMNI_ENGINE:
+        return round(OMNI_USD_PER_SECOND * SINGLE_CLIP_SECONDS, 4)
     return round(VEO_USD_PER_SECOND.get(engine, VEO_USD_PER_SECOND["google_veo"]) * SINGLE_CLIP_SECONDS, 4)
+
+
+def single_clip_reserve(engine: str) -> float:
+    """What the ledger reserves before the paid call: the worst case the engine can bill."""
+    return OMNI_MAX_CLIP_USD if engine == OMNI_ENGINE else single_clip_cost(engine)
+
+
+def single_cost_cap(settings: Optional[dict] = None) -> float:
+    """GROWTH_COST_CAP_USD env / settings.growth_cost_cap_usd override; default $0.85. Never above $0.85."""
+    for raw in (os.environ.get("GROWTH_COST_CAP_USD"), (settings or {}).get("growth_cost_cap_usd")):
+        try:
+            if raw not in (None, ""):
+                return min(SINGLE_COST_CAP, max(0.1, float(raw)))
+        except (TypeError, ValueError):
+            pass
+    return SINGLE_COST_CAP
+
+
+def _text_usage(fn, *args, fallback: float = 0.0):
+    """Run fn and return (result, actual Gemini text USD spent inside it)."""
+    m = _main()
+    reset = getattr(m, "text_usage_reset", None)
+    if reset is None:
+        return fn(*args), fallback
+    reset()
+    try:
+        result = fn(*args)
+    finally:
+        spent = m.text_usage_usd()
+    return result, spent
 
 
 def veo_failure_billed(exc: Any) -> bool:
@@ -911,7 +954,7 @@ DEFAULT_BACKOFF_SECONDS = (0, 15, 30, 60, 90)
 
 
 def engine_ladder() -> List[str]:
-    """Cheap 8s Veo Lite first, Veo Fast only after Lite keeps failing. GROWTH_VIDEO_ENGINES=a,b,c overrides."""
+    """8 s Gemini Omni (Veo 3.1 Preview is retired). GROWTH_VIDEO_ENGINES=a,b,c overrides; the cap still applies."""
     raw = os.environ.get("GROWTH_VIDEO_ENGINES")
     ladder = [e.strip() for e in raw.split(",") if e.strip()] if raw else list(DEFAULT_ENGINE_LADDER)
     return ladder[:8] or list(DEFAULT_ENGINE_LADDER)
@@ -935,7 +978,12 @@ def generate_original_clip(concept: dict, settings: dict, engine: str = "google_
         result = status.get("result") or {}
         abs_path = _main().resolve_local_video_path(result.get("video_path") or "")
         if abs_path and os.path.exists(abs_path):
-            return abs_path, {"engine": result.get("engine") or engine, "job_id": job_id}
+            info = {"engine": result.get("engine") or engine, "job_id": job_id}
+            if result.get("cost_usd") is not None:
+                info["actual_cost_usd"] = result["cost_usd"]
+            if result.get("usage"):
+                info["usage"] = result["usage"]
+            return abs_path, info
         raise RuntimeError(f"{engine}: rendered file missing")
     raise RuntimeError(f"{engine}: {status.get('message')}")
 
@@ -1064,6 +1112,8 @@ def call_gemini_vision_json(settings: dict, prompt: str, frames: List[bytes]) ->
         contents=parts,
         config=types.GenerateContentConfig(response_mime_type="application/json"),
     )
+    if hasattr(m, "note_text_usage"):
+        m.note_text_usage(response)
     return m.extract_json_object(response.text)
 
 
@@ -1277,14 +1327,17 @@ async def produce(settings: dict, state: dict) -> Tuple[str, dict, dict]:
         return await loop.run_in_executor(None, produce_stitched, settings, state)
     errors: List[str] = []
     tried: List[dict] = []
-    # Same hard per-Short cap as stitched Shorts ($0.75 default), checked BEFORE every paid Veo call.
-    ledger = stitched_shorts.CostLedger(stitched_shorts.cost_cap(settings))
+    # Hard per-slot cap ($0.85 on Omni), checked BEFORE every paid video call. Omni reserves its worst case
+    # (token-capped), text calls are charged at their real token cost, so plan + clip + check stay <= cap.
+    ledger = stitched_shorts.CostLedger(single_cost_cap(settings))
     started = 0
     for i, engine in enumerate(engine_ladder()):
-        veo_usd = single_clip_cost(engine)
-        if not ledger.fits(PLAN_USD + veo_usd + CHECK_USD):
+        veo_usd = single_clip_reserve(engine)
+        plan_est = PLAN_TEXT_USD if engine == OMNI_ENGINE else PLAN_USD
+        check_est = CHECK_TEXT_USD if engine == OMNI_ENGINE else CHECK_USD
+        if not ledger.fits(plan_est + veo_usd + check_est):
             msg = (f"attempt {i + 1} {engine}: skipped, cost cap ${ledger.cap:.2f} would be exceeded "
-                   f"(spent ${ledger.total:.2f} + ${PLAN_USD + veo_usd + CHECK_USD:.2f})")
+                   f"(spent ${ledger.total:.2f} + ${plan_est + veo_usd + check_est:.2f})")
             errors.append(msg)
             logger.warning("%s %s", MARKER, msg)
             continue
@@ -1294,18 +1347,31 @@ async def produce(settings: dict, state: dict) -> Tuple[str, dict, dict]:
         started += 1
         concept: dict = {}
         try:
-            ledger.charge("plan", PLAN_USD)
-            concept = await loop.run_in_executor(None, plan_concept, settings, state, list(tried))
+            if engine == OMNI_ENGINE:
+                concept, plan_usd = await loop.run_in_executor(None, lambda: _text_usage(plan_concept, settings, state, list(tried), fallback=PLAN_USD))
+                ledger.charge("plan", plan_usd)
+            else:
+                ledger.charge("plan", PLAN_USD)
+                concept = await loop.run_in_executor(None, plan_concept, settings, state, list(tried))
             label = f"{engine} {SINGLE_CLIP_SECONDS}s"
-            ledger.reserve(label, veo_usd)  # raises CostCapExceeded before the paid call
+            ledger.reserve(label, veo_usd + (check_est if engine == OMNI_ENGINE else 0.0))  # raises CostCapExceeded before the paid call
             try:
                 raw_path, gen_info = await loop.run_in_executor(None, generate_original_clip, concept, settings, engine)
             except Exception as gen_exc:
                 ledger.charge(label, veo_usd if veo_failure_billed(gen_exc) else 0.0, ok=False, error=str(gen_exc)[:200])
                 raise
-            ledger.charge(label, veo_usd, topic=concept.get("topic"))
-            ledger.charge("caption check", CHECK_USD)
-            concept, check = await loop.run_in_executor(None, ensure_caption_matches, raw_path, concept, settings)
+            clip_usd = veo_usd
+            if engine == OMNI_ENGINE:
+                actual = gen_info.get("actual_cost_usd")
+                clip_usd = min(veo_usd, float(actual)) if actual is not None else veo_usd
+            ledger.charge(label, clip_usd, topic=concept.get("topic"))
+            if engine == OMNI_ENGINE:
+                (concept, check), check_usd = await loop.run_in_executor(
+                    None, lambda: _text_usage(ensure_caption_matches, raw_path, concept, settings, fallback=CHECK_USD))
+                ledger.charge("caption check", check_usd)
+            else:
+                ledger.charge("caption check", CHECK_USD)
+                concept, check = await loop.run_in_executor(None, ensure_caption_matches, raw_path, concept, settings)
             gen_info.update(check)
             raw_path, sound = await loop.run_in_executor(None, ensure_opening_sound, raw_path)
             gen_info.update(sound)
@@ -2106,7 +2172,8 @@ def status_payload(settings: Optional[dict] = None) -> dict:
     return {
         "marker": MARKER, "version": VERSION, "enabled": enabled(), "paused": paused(),
         "stitched_shorts": stitched_shorts.enabled(settings), "stitched_version": stitched_shorts.VERSION,
-        "shorts_cost_cap_usd": stitched_shorts.cost_cap(settings), "autopilot_format": stitched_shorts.autopilot_format(settings),
+        "shorts_cost_cap_usd": stitched_shorts.cost_cap(settings), "single_cost_cap_usd": single_cost_cap(settings),
+        "video_engines": engine_ladder(), "autopilot_format": stitched_shorts.autopilot_format(settings),
         "transform_fallback": transform_fallback_enabled(), "max_slot_attempts": max_slot_attempts(),
         "legacy_boot_patches_skipped": skipped_legacy_modules(), "legacy_patches_allowed": legacy_patches_allowed(),
         "slot_hours_server": slot_hours(settings), "platforms": platforms, "platform_notes": notes,
@@ -2144,6 +2211,8 @@ def health() -> dict:
         settings = _main().load_settings()
         out["autopilot_format"] = stitched_shorts.autopilot_format(settings)
         out["shorts_cost_cap_usd"] = stitched_shorts.cost_cap(settings)
+        out["single_cost_cap_usd"] = single_cost_cap(settings)
+        out["video_engines"] = engine_ladder()
         out["platforms"] = resolve_platforms(settings)[0]
     except Exception as exc:
         out["platforms_error"] = str(exc)[:200]

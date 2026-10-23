@@ -4027,6 +4027,49 @@ def extract_json_object(text: str) -> Any:
         raise ValueError("Incomplete JSON object in model response.")
     return json.loads(cleaned[start:end + 1])
 
+# gemini-3.6-flash paid tier (ai.google.dev pricing, through 2026-12-31): $0.75/M input, $3.75/M output incl. thinking.
+# Update these on 2027-01-01, when Google doubles them to $1.50 / $7.50.
+TEXT_USD_PER_MTOKEN_IN = 0.75
+TEXT_USD_PER_MTOKEN_OUT = 3.75
+TEXT_GROUNDED_CALL_USD = 0.014  # Google Search grounding after the free monthly quota
+TEXT_CALL_FALLBACK_USD = 0.01   # used when a response carries no usage metadata
+_TEXT_USAGE = threading.local()
+
+
+def text_usage_reset() -> None:
+    _TEXT_USAGE.usd = 0.0
+    _TEXT_USAGE.calls = 0
+
+
+def text_usage_usd() -> float:
+    return round(getattr(_TEXT_USAGE, "usd", 0.0), 5)
+
+
+def text_usage_calls() -> int:
+    return getattr(_TEXT_USAGE, "calls", 0)
+
+
+def text_call_cost(response: Any, grounded: bool = False) -> float:
+    meta = getattr(response, "usage_metadata", None)
+    try:
+        inp = int(getattr(meta, "prompt_token_count", 0) or 0)
+        out = int(getattr(meta, "candidates_token_count", 0) or 0) + int(getattr(meta, "thoughts_token_count", 0) or 0)
+    except (TypeError, ValueError):
+        inp = out = 0
+    if not meta or (inp == 0 and out == 0):
+        usd = TEXT_CALL_FALLBACK_USD
+    else:
+        usd = inp * TEXT_USD_PER_MTOKEN_IN / 1e6 + out * TEXT_USD_PER_MTOKEN_OUT / 1e6
+    return round(usd + (TEXT_GROUNDED_CALL_USD if grounded else 0.0), 5)
+
+
+def note_text_usage(response: Any, grounded: bool = False) -> float:
+    usd = text_call_cost(response, grounded)
+    _TEXT_USAGE.usd = getattr(_TEXT_USAGE, "usd", 0.0) + usd
+    _TEXT_USAGE.calls = getattr(_TEXT_USAGE, "calls", 0) + 1
+    return usd
+
+
 def call_gemini_json(settings: dict, prompt: str, fallback: Any, use_search: bool = True) -> Any:
     api_key = settings.get("gemini_api_key") or os.environ.get("GEMINI_API_KEY")
     if not api_key:
@@ -4043,6 +4086,7 @@ def call_gemini_json(settings: dict, prompt: str, fallback: Any, use_search: boo
         contents=prompt,
         config=types.GenerateContentConfig(**config_kwargs)
     )
+    note_text_usage(response, grounded=use_search)
     try:
         return extract_json_object(response.text)
     except Exception as e:

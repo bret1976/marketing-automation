@@ -52,6 +52,8 @@ SIGNATURES = (
      "Gemini is rate limiting - scans will retry next slot."),
     ("youtube_bot_wall", (("confirm you", "not a bot"),),
      "YouTube is bot-walling yt-dlp downloads - add cookies or rely on TikTok / hosted clips."),
+    ("video_model_retired", (("404", "no longer available", "veo"), ("not_found", "is no longer available")),
+     "Google retired the video model (Veo 3.1 Preview shut down Oct 22 2026) - the generation engine must be migrated; slots fail until then."),
     ("tiktok_discovery_empty", (("tiktok discovery returned 0",),),
      "TikTok discovery found no unused originals this slot."),
     ("no_original_video", (("no original video could be downloaded",),),
@@ -209,8 +211,21 @@ def load_slot_ledger(state_dir: Optional[Path] = None) -> dict:
         return {}
 
 
+def load_attempt_state(state_dir: Optional[Path] = None) -> Dict[str, dict]:
+    """Per-slot attempt records the overlay persists in growth_v2_state.json (survives restarts)."""
+    path = (state_dir or _state_dir()) / "growth_v2_state.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        slots = data.get("slots") if isinstance(data, dict) else None
+        return slots if isinstance(slots, dict) else {}
+    except Exception:
+        return {}
+
+
 def evaluate_slots(now: datetime, hours: List[int], ledger: dict, grace_min: int, lookback_hours: int,
-                   attempted: Iterable[str] = ()) -> Dict[str, Any]:
+                   attempted: Iterable[str] = (), attempt_state: Optional[Dict[str, dict]] = None) -> Dict[str, Any]:
+    """'missed' = never ran; 'failed' = ran but did not publish (still counts toward late/down)."""
+    attempt_state = attempt_state or {}
     successes = set(s for s in (ledger.get("success_slots") or []) if s)
     if ledger.get("last_success_slot"):
         successes.add(ledger["last_success_slot"])
@@ -224,24 +239,32 @@ def evaluate_slots(now: datetime, hours: List[int], ledger: dict, grace_min: int
         elif now < at + timedelta(minutes=grace_min):
             state = "running" if slot in attempted else "due"
         else:
-            state = "missed"
-        rows.append({"slot": slot, "at_utc": _iso(at), "at_pt": _pt(at), "state": state})
+            info = attempt_state.get(slot) or {}
+            ran = slot in attempted or int(info.get("attempts") or 0) > 0
+            state = "failed" if ran else "missed"
+        row = {"slot": slot, "at_utc": _iso(at), "at_pt": _pt(at), "state": state}
+        info = attempt_state.get(slot) or {}
+        if state == "failed":
+            row["attempts"] = int(info.get("attempts") or 0) or None
+            row["last_error"] = redact(str(info.get("last_error") or ""))
+        rows.append(row)
     consecutive = 0
     for row in reversed(rows):
         if row["state"] in ("running", "due"):
             continue
-        if row["state"] == "missed":
+        if row["state"] in ("missed", "failed"):
             consecutive += 1
             continue
         break
-    missed = [r["slot"] for r in rows if r["state"] == "missed"]
+    missed = [r["slot"] for r in rows if r["state"] in ("missed", "failed")]
+    failed = [r["slot"] for r in rows if r["state"] == "failed"]
     if consecutive >= 2:
         status = "down"
     elif consecutive == 1:
         status = "late"
     else:
         status = "ok"
-    return {"status": status, "consecutive_missed": consecutive, "missed_slots": missed, "slots": rows}
+    return {"status": status, "consecutive_missed": consecutive, "missed_slots": missed, "failed_slots": failed, "slots": rows}
 
 
 # --------------------------------------------------------------------------
@@ -424,9 +447,9 @@ def report(settings: Optional[dict] = None, posts: Optional[List[dict]] = None,
     ledger = load_slot_ledger(state_dir)
     attempted = [a.get("slot") for a in _tap.get("slot_attempts") or []]
     if autoposting_on(settings):
-        slots = evaluate_slots(now, hours, ledger, grace, lookback, attempted)
+        slots = evaluate_slots(now, hours, ledger, grace, lookback, attempted, load_attempt_state(state_dir))
     else:
-        slots = {"status": "disabled", "consecutive_missed": 0, "missed_slots": [], "slots": []}
+        slots = {"status": "disabled", "consecutive_missed": 0, "missed_slots": [], "failed_slots": [], "slots": []}
     scanned = scan_posts(posts or [], now, lookback) if posts is not None else {"failed_rows": None, "issues": {}}
     issues = _active_issues(scanned["issues"], now, lookback)
     last_success_at = ledger.get("last_success_at")
@@ -452,6 +475,7 @@ def report(settings: Optional[dict] = None, posts: Optional[List[dict]] = None,
         "last_success_age_hours": age_hours,
         "consecutive_missed": slots["consecutive_missed"],
         "missed_slots": slots["missed_slots"],
+        "failed_slots": slots["failed_slots"],
         "slots": slots["slots"],
         "failed_rows": scanned["failed_rows"],
         "issues": issues,
@@ -474,6 +498,7 @@ def compact(settings: Optional[dict] = None) -> Dict[str, Any]:
             "last_success_age_hours": full["last_success_age_hours"],
             "consecutive_missed": full["consecutive_missed"],
             "missed_slots": len(full["missed_slots"]),
+            "failed_slots": len(full["failed_slots"]),
             "next_slot_utc": full["schedule"]["next_slot_utc"],
             "top_issue": (full["issues"][0]["id"] if full["issues"] else None),
         }

@@ -1,0 +1,14 @@
+{
+  "name": "marketing-automation-render",
+  "private": true,
+  "description": "Node runtime for HyperFrames template renders (template_renderer.py runs npx hyperframes@0.7.40 from /app).",
+  "dependencies": {
+    "hyperframes": "0.7.40"
+  },
+  "overrides": {
+    "sharp": "^0.35.5",
+    "adm-zip": "^0.6.1",
+    "puppeteer-core": "^25.2.1",
+    "@puppeteer/browsers": "^3.0.6"
+  }
+}

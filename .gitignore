@@ -21,3 +21,4 @@ uploads/
 autopilot_watch.json
 spend_guard_ledger.json
 spend_guard_ledger.tmp
+node_modules/

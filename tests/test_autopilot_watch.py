@@ -168,3 +168,30 @@ import pytest as _pytest
 def _public_dashboard_for_this_module(monkeypatch):
     # Auth is on by default when ADMIN_PASSWORD is set (other test modules set it).
     monkeypatch.setenv("ALLOW_PUBLIC_DASHBOARD", "1")
+
+
+OCT22_404 = ("google_veo_lite: Video generation failed: 404 NOT_FOUND. {'error': {'code': 404, 'message': "
+             "'This model models/veo-3.1-lite-generate-preview is no longer available.', 'status': 'NOT_FOUND'}}")
+
+
+def test_oct22_slot_that_ran_and_gave_up_is_failed_not_missed(tmp_path, monkeypatch):
+    """Replays 2026-10-23-0 (Oct 22 5 PM PT): it ran twice and gave up on a retired Veo model.
+    The watch used to call that 'missed' (never ran); after a restart the log tap is empty too."""
+    _env(monkeypatch, tmp_path)
+    _ledger(tmp_path, ["2026-10-20-15", "2026-10-21-0", "2026-10-21-15", "2026-10-22-0", "2026-10-22-15"],
+            last_at="2026-10-22T15:03:00Z")
+    (tmp_path / "growth_v2_state.json").write_text(json.dumps({"slots": {
+        "2026-10-23-0": {"attempts": 2, "status": "gave_up", "last_error": OCT22_404}}}))
+    r = aw.report(settings={"autonomous_posting": True}, posts=[], now=_now("2026-10-23T13:55:00"), state_dir=tmp_path)
+    row = {s["slot"]: s for s in r["slots"]}["2026-10-23-0"]
+    assert row["state"] == "failed"
+    assert row["attempts"] == 2
+    assert "no longer available" in row["last_error"]
+    assert r["failed_slots"] == ["2026-10-23-0"]
+    assert r["missed_slots"] == ["2026-10-23-0"]  # still counts toward late/down
+    assert r["status"] == "late" and r["consecutive_missed"] == 1
+
+
+def test_classify_retired_video_model():
+    assert "video_model_retired" in aw.classify(OCT22_404)
+    assert "video_model_retired" not in aw.classify("404 page not found")

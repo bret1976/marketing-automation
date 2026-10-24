@@ -932,7 +932,8 @@ def _wrap(text: str, width: int) -> str:
 
 
 def _drawtext(textfile: str, font: str, size: int, y: str, start: float, end: float) -> str:
-    """One drawtext per line so every line is centered on its own (not left-aligned in a block)."""
+    """One drawtext per line so every line is centered on its own (not left-aligned in a block).
+    expansion=none: draw the text literally, so a '%' or '\\' in a hook is not eaten by ffmpeg."""
     fontpart = f"fontfile='{font}':" if font else ""
     with open(textfile) as fh:
         lines = [l for l in fh.read().splitlines() if l.strip()] or [""]
@@ -941,7 +942,7 @@ def _drawtext(textfile: str, font: str, size: int, y: str, start: float, end: fl
         lf = f"{textfile}.{i}"
         with open(lf, "w") as fh:
             fh.write(line)
-        out.append(f"drawtext={fontpart}textfile='{lf}':fontsize={size}:fontcolor=white:borderw=6:bordercolor=black@0.85:"
+        out.append(f"drawtext={fontpart}textfile='{lf}':expansion=none:fontsize={size}:fontcolor=white:borderw=6:bordercolor=black@0.85:"
                    f"x=(w-text_w)/2:y={y}+{i}*{int(size * 1.2)}:enable='between(t,{start:.2f},{end:.2f})'")
     return ",".join(out)
 

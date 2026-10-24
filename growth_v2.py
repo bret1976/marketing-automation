@@ -771,6 +771,9 @@ def _font() -> str:
         return ""
 
 
+# drawtext reads textfile through ffmpeg's text expansion by default: a '%' (e.g. a "99% ..." hook)
+# makes ffmpeg 7.1 log "Stray %" and draw NOTHING while still exiting 0, and a backslash is
+# swallowed. Every textfile drawtext therefore sets expansion=none so the text is drawn literally.
 def _textfile(text: str, width: int) -> str:
     wrapped = "\n".join(textwrap.wrap(text, width=width)) or text
     fd, path = tempfile.mkstemp(suffix=".txt", prefix="g2txt_")
@@ -849,18 +852,18 @@ def render_vertical(src: str, dst: str, hook: str, commentary: Optional[List[str
         if font and hook:
             tf = _textfile(hook.upper(), 18)
             temps.append(tf)
-            filt += (f",drawtext=fontfile='{font}':textfile='{tf}':fontcolor=white:fontsize=78:line_spacing=10:"
+            filt += (f",drawtext=fontfile='{font}':textfile='{tf}':expansion=none:fontcolor=white:fontsize=78:line_spacing=10:"
                      f"box=1:boxcolor=black@0.6:boxborderw=24:x=(w-text_w)/2:y=h*0.14:enable='lt(t,2.8)'")
         if font and commentary:
             for (start, end), line in zip([(2.8, 7.0), (7.0, max_seconds)], commentary[:2]):
                 tf = _textfile(line, 26)
                 temps.append(tf)
-                filt += (f",drawtext=fontfile='{font}':textfile='{tf}':fontcolor=white:fontsize=56:line_spacing=8:"
+                filt += (f",drawtext=fontfile='{font}':textfile='{tf}':expansion=none:fontcolor=white:fontsize=56:line_spacing=8:"
                          f"box=1:boxcolor=black@0.55:boxborderw=18:x=(w-text_w)/2:y=h*0.70:enable='between(t,{start},{end})'")
         if font and footer:
             tf = _textfile(footer, 48)
             temps.append(tf)
-            filt += (f",drawtext=fontfile='{font}':textfile='{tf}':fontcolor=white@0.85:fontsize=34:"
+            filt += (f",drawtext=fontfile='{font}':textfile='{tf}':expansion=none:fontcolor=white@0.85:fontsize=34:"
                      f"box=1:boxcolor=black@0.45:boxborderw=10:x=(w-text_w)/2:y=h-170")
         filt += "[outv]"
         cmd = [_bin("ffmpeg"), "-y", "-i", src, "-t", f"{max_seconds:.2f}", "-filter_complex", filt,

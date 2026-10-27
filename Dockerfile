@@ -1,4 +1,4 @@
-FROM python:3.11-slim
+FROM python:3.11.18-slim
 
 # Install system dependencies (ffmpeg/ffprobe, Chromium for HyperFrames renders, fonts)
 RUN apt-get update && apt-get install -y \

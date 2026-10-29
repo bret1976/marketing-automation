@@ -381,46 +381,12 @@ def build_captions(concept: dict, credit: Optional[dict] = None) -> Dict[str, st
 # --------------------------------------------------------------------------
 
 FALLBACK_CONCEPTS: List[dict] = [
-    {"topic": "Ferrofluid spikes", "topic_key": "ferrofluid magnet spikes",
-     "veo_prompt": "Extreme macro of black ferrofluid on a glass dish; a hidden magnet rises and the liquid instantly erupts into sharp mirror-like spikes that ripple and pulse; studio lighting, centered subject, photoreal, slow push-in.",
-     "on_screen_hook": "This liquid grows spikes", "hook": "This liquid turns into spikes near a magnet",
-     "lines": ["Ferrofluid is oil full of nanoscale iron particles.", "The spikes trace the magnetic field lines."],
-     "hashtags": ["#Science", "#Physics", "#Ferrofluid", "#Magnetism"], "linkedin_angle": "Generated end-to-end with an AI video model, no stock footage."},
-    {"topic": "Rocket shock diamonds", "topic_key": "rocket shock diamonds",
-     "veo_prompt": "Close side view of a rocket engine test firing at night; bright repeating diamond-shaped shock patterns appear in the exhaust plume; heat shimmer, sparks, centered composition, photoreal, steady camera.",
-     "on_screen_hook": "Why rocket fire has diamonds", "hook": "Why rocket exhaust forms glowing diamonds",
-     "lines": ["Those are shock diamonds: standing shock waves in the plume.", "They form when exhaust pressure doesn't match the outside air."],
-     "hashtags": ["#Engineering", "#Rocket", "#Physics", "#Space"], "linkedin_angle": "Fully AI-generated test-stand shot, directed for vertical."},
-    {"topic": "Prince Rupert's drop", "topic_key": "prince ruperts drop glass",
-     "veo_prompt": "Macro shot of a tadpole-shaped glass drop held in pliers; a hammer strikes the bulb and nothing happens; then the thin tail is snipped and the whole drop bursts into powder in slow motion; dark background, centered, photoreal.",
-     "on_screen_hook": "Hammer-proof glass?", "hook": "This glass survives a hammer but not a snip",
-     "lines": ["Rapid cooling locks huge compressive stress into the head.", "Break the tail and that stress releases at about 1 km/s."],
-     "hashtags": ["#Science", "#Physics", "#Glass", "#SlowMotion"], "linkedin_angle": "Physics-accurate slow motion, generated with AI video."},
-    {"topic": "Tesla turbine", "topic_key": "tesla bladeless turbine",
-     "veo_prompt": "Cutaway view of a bladeless Tesla turbine: thin stacked metal discs spinning at blurring speed as glowing air spirals between them; machined aluminum, workshop lighting, centered, photoreal macro.",
-     "on_screen_hook": "A turbine with no blades", "hook": "A turbine with zero blades that still spins fast",
-     "lines": ["Nikola Tesla's design uses smooth discs instead of blades.", "Fluid drag on the disc surfaces does all the work."],
-     "hashtags": ["#Engineering", "#Tesla", "#Mechanics", "#Innovation"], "linkedin_angle": "AI-generated engineering visual, built for 9:16."},
-    {"topic": "Oobleck on a speaker", "topic_key": "oobleck speaker vibration",
-     "veo_prompt": "Top-down close-up of white cornstarch fluid on a vibrating speaker cone; the fluid rises into writhing finger-like shapes that dance with the bass; bright lighting, centered, photoreal macro.",
-     "on_screen_hook": "Sound makes this goo dance", "hook": "Sound waves make this goo come alive",
-     "lines": ["Cornstarch and water stiffens when hit and flows when left alone.", "The speaker hits it fast enough to make it stand up."],
-     "hashtags": ["#Science", "#Physics", "#Oobleck", "#Sound"], "linkedin_angle": "Generated with AI video; no stock or reposted footage."},
-    {"topic": "Thermite rail weld", "topic_key": "thermite rail weld",
-     "veo_prompt": "A ceramic crucible above a gap between two steel rails ignites with blinding white light and molten iron pours down into the mould, sparks spraying; outdoor rail yard at dusk, centered, photoreal.",
-     "on_screen_hook": "How train rails get welded", "hook": "Train tracks are welded with liquid iron",
-     "lines": ["Thermite is aluminum powder plus iron oxide.", "The reaction tops 2,000 \u00b0C and fuses the rails into one."],
-     "hashtags": ["#Engineering", "#Chemistry", "#Railway", "#Science"], "linkedin_angle": "AI-rendered engineering shot, directed frame by frame."},
-    {"topic": "Hydraulic press vs diamond", "topic_key": "hydraulic press diamond",
-     "veo_prompt": "Industrial hydraulic press slowly lowering onto a small clear diamond on a steel anvil; pressure gauge needle climbs; the diamond shatters into glittering dust; dramatic lighting, centered, photoreal.",
-     "on_screen_hook": "Hardest is not toughest", "hook": "The hardest material can still shatter",
-     "lines": ["Diamond is the hardest natural material, but it's brittle.", "Hardness resists scratches; toughness resists breaking."],
-     "hashtags": ["#Engineering", "#Materials", "#Science", "#Diamond"], "linkedin_angle": "AI-generated materials-science visual."},
-    {"topic": "Kelvin water dropper", "topic_key": "kelvin water dropper spark",
-     "veo_prompt": "Two streams of water dripping through metal rings into cans; tiny droplets start bending sideways, then a bright blue spark jumps between two metal spheres; dark lab, centered, photoreal macro.",
-     "on_screen_hook": "Lightning from dripping water", "hook": "Dripping water can make its own lightning",
-     "lines": ["Lord Kelvin's 1867 dropper builds up thousands of volts.", "Tiny charge differences amplify until they spark."],
-     "hashtags": ["#Physics", "#Science", "#Electricity", "#Experiment"], "linkedin_angle": "Generated with AI video, physics-checked script."},
+    {'topic': 'Omaha Beach landing', 'topic_key': 'omaha beach landing 1944', 'title_line': 'Omaha Beach 1944', 'on_screen_hook': 'OMAHA BEACH · 1944', 'hook': 'Omaha Beach 1944. The ramp drops.', 'lines': ['We recreated a WWII landing craft run-in to explore tension using generative video.', 'Technical focus: newsreel shutter, sea spray particles, deep framing.'], 'hashtags': ['#OmahaBeach', '#WWII'], 'veo_prompt': '0-3s: a deafening naval cannon boom as a low camera pushes across gray chop toward a line of landing craft, battleships firing on the horizon 3-5.5s: inside a landing craft from behind helmeted soldiers, spray bursting over the steel ramp 5.5-8s: the ramp clangs down onto a smoky beach as the camera surges forward through haze Desaturated slate-blue steel-gray grade, warm accents only from fire, overcast volumetric haze, 1940s newsreel 1/50 shutter with light film grain, dense particles, camera always moving forward, widescreen 16:9, no text, no faces in close-up. Sound: epic orchestral score with low brass and war drums under realistic effects, no dialogue.', 'shot_list': [{'t': '0-3s', 'shows': 'a deafening naval cannon boom as a low camera pushes across gray chop toward a line of landing craft, battleships firing on the horizon'}, {'t': '3-5.5s', 'shows': 'inside a landing craft from behind helmeted soldiers, spray bursting over the steel ramp'}, {'t': '5.5-8s', 'shows': 'the ramp clangs down onto a smoky beach as the camera surges forward through haze'}], 'linkedin_angle': 'Period-accurate WWII landing recreated with AI video, directed shot by shot.', 'comment_question': 'Which moment in history should we recreate next?'},
+    {'topic': 'Apollo 11 launch', 'topic_key': 'apollo saturn launch 1969', 'title_line': 'Apollo 11 Launch 1969', 'on_screen_hook': 'APOLLO 11 · 1969', 'hook': 'Apollo 11, 1969. Ignition.', 'lines': ['We recreated the Saturn V liftoff to explore raw scale using generative video.', 'Technical focus: exhaust plume particles, ice falling, low tracking angle.'], 'hashtags': ['#Apollo11', '#SpaceHistory'], 'veo_prompt': '0-3s: an enormous engine roar as a low camera tracks toward the Saturn V on the pad, sheets of ice falling from the rocket 3-5.5s: close on the five engines igniting, fire and steam erupting outward 5.5-8s: the rocket clears the tower as the camera tilts up through billowing exhaust Desaturated slate-blue steel-gray grade, warm accents only from fire, overcast volumetric haze, 1940s newsreel 1/50 shutter with light film grain, dense particles, camera always moving forward, widescreen 16:9, no text, no faces in close-up. Sound: epic orchestral score with low brass and war drums under realistic effects, no dialogue.', 'shot_list': [{'t': '0-3s', 'shows': 'an enormous engine roar as a low camera tracks toward the Saturn V on the pad, sheets of ice falling from the rocket'}, {'t': '3-5.5s', 'shows': 'close on the five engines igniting, fire and steam erupting outward'}, {'t': '5.5-8s', 'shows': 'the rocket clears the tower as the camera tilts up through billowing exhaust'}], 'linkedin_angle': 'Apollo-era launch recreated with AI video, built for vertical.', 'comment_question': 'Which moment in history should we recreate next?'},
+    {'topic': 'Titanic iceberg', 'topic_key': 'titanic iceberg night 1912', 'title_line': 'North Atlantic 1912', 'on_screen_hook': 'TITANIC · 1912', 'hook': 'North Atlantic, 1912. Iceberg right ahead.', 'lines': ['We recreated the night the Titanic met the iceberg to explore dread using generative video.', 'Technical focus: night haze, ice spray, slow forward dolly.'], 'hashtags': ['#Titanic', '#History'], 'veo_prompt': '0-3s: a sharp ice crack echoes as the camera glides low over black water toward the bow of a giant four-funnel liner 3-5.5s: the iceberg scrapes along the hull, ice chunks raining onto the deck 5.5-8s: a wide aerial pass as the ship sails on into freezing mist Desaturated slate-blue steel-gray grade, warm accents only from fire, overcast volumetric haze, 1940s newsreel 1/50 shutter with light film grain, dense particles, camera always moving forward, widescreen 16:9, no text, no faces in close-up. Sound: epic orchestral score with low brass and war drums under realistic effects, no dialogue.', 'shot_list': [{'t': '0-3s', 'shows': 'a sharp ice crack echoes as the camera glides low over black water toward the bow of a giant four-funnel liner'}, {'t': '3-5.5s', 'shows': 'the iceberg scrapes along the hull, ice chunks raining onto the deck'}, {'t': '5.5-8s', 'shows': 'a wide aerial pass as the ship sails on into freezing mist'}], 'linkedin_angle': 'Historic maritime moment recreated with AI video, physics-checked.', 'comment_question': 'Which moment in history should we recreate next?'},
+    {'topic': 'Battle of Britain dogfight', 'topic_key': 'battle britain spitfire 1940', 'title_line': 'Battle Of Britain 1940', 'on_screen_hook': 'BATTLE OF BRITAIN · 1940', 'hook': 'Battle of Britain, 1940. Scramble.', 'lines': ['We recreated a Spitfire dogfight over the Channel to explore speed using generative video.', 'Technical focus: cloud vapor, tracer glow, air-to-air tracking.'], 'hashtags': ['#BattleOfBritain', '#WWII'], 'veo_prompt': "0-3s: a Merlin engine roar as the camera tracks alongside a Spitfire breaking through clouds 3-5.5s: over the pilot's shoulder from behind as tracer glow streaks past 5.5-8s: a fast low pass over the white cliffs as the formation climbs Desaturated slate-blue steel-gray grade, warm accents only from fire, overcast volumetric haze, 1940s newsreel 1/50 shutter with light film grain, dense particles, camera always moving forward, widescreen 16:9, no text, no faces in close-up. Sound: epic orchestral score with low brass and war drums under realistic effects, no dialogue.", 'shot_list': [{'t': '0-3s', 'shows': 'a Merlin engine roar as the camera tracks alongside a Spitfire breaking through clouds'}, {'t': '3-5.5s', 'shows': "over the pilot's shoulder from behind as tracer glow streaks past"}, {'t': '5.5-8s', 'shows': 'a fast low pass over the white cliffs as the formation climbs'}], 'linkedin_angle': 'WWII aviation recreated with AI video, period-accurate aircraft.', 'comment_question': 'Which moment in history should we recreate next?'},
+    {'topic': 'Hoover Dam spillway', 'topic_key': 'hoover dam construction 1935', 'title_line': 'Hoover Dam 1935', 'on_screen_hook': 'HOOVER DAM · 1935', 'hook': 'Hoover Dam, 1935. The water arrives.', 'lines': ['We recreated the Hoover Dam build to explore human scale using generative video.', 'Technical focus: canyon dust, cable cars, aerial push-in.'], 'hashtags': ['#HooverDam', '#Engineering'], 'veo_prompt': '0-3s: a steel cable clang as the camera pushes over the canyon rim toward the rising concrete wall 3-5.5s: a bucket of concrete swinging past from behind silhouetted workers 5.5-8s: a wide aerial as the Colorado River churns below the finished arch Desaturated slate-blue steel-gray grade, warm accents only from fire, overcast volumetric haze, 1940s newsreel 1/50 shutter with light film grain, dense particles, camera always moving forward, widescreen 16:9, no text, no faces in close-up. Sound: epic orchestral score with low brass and war drums under realistic effects, no dialogue.', 'shot_list': [{'t': '0-3s', 'shows': 'a steel cable clang as the camera pushes over the canyon rim toward the rising concrete wall'}, {'t': '3-5.5s', 'shows': 'a bucket of concrete swinging past from behind silhouetted workers'}, {'t': '5.5-8s', 'shows': 'a wide aerial as the Colorado River churns below the finished arch'}], 'linkedin_angle': 'Engineering history recreated with AI video for 9:16.', 'comment_question': 'Which moment in history should we recreate next?'},
+    {'topic': 'Endurance in the ice', 'topic_key': 'shackleton endurance ice 1915', 'title_line': 'Weddell Sea 1915', 'on_screen_hook': 'ENDURANCE · 1915', 'hook': 'Weddell Sea, 1915. The ice closes in.', 'lines': ["We recreated Shackleton's ship trapped in pack ice to explore isolation using generative video.", 'Technical focus: blowing snow, ice pressure, low tracking pass.'], 'hashtags': ['#Shackleton', '#Exploration'], 'veo_prompt': '0-3s: a loud ice crack as the camera skims low across pack ice toward a three-masted ship 3-5.5s: close on the wooden hull groaning as ice ridges push against it, snow streaming 5.5-8s: a wide aerial pull forward over the ship alone in endless white Desaturated slate-blue steel-gray grade, warm accents only from fire, overcast volumetric haze, 1940s newsreel 1/50 shutter with light film grain, dense particles, camera always moving forward, widescreen 16:9, no text, no faces in close-up. Sound: epic orchestral score with low brass and war drums under realistic effects, no dialogue.', 'shot_list': [{'t': '0-3s', 'shows': 'a loud ice crack as the camera skims low across pack ice toward a three-masted ship'}, {'t': '3-5.5s', 'shows': 'close on the wooden hull groaning as ice ridges push against it, snow streaming'}, {'t': '5.5-8s', 'shows': 'a wide aerial pull forward over the ship alone in endless white'}], 'linkedin_angle': 'Polar exploration recreated with AI video, directed shot by shot.', 'comment_question': 'Which moment in history should we recreate next?'},
 ]
 
 
@@ -473,44 +439,55 @@ def creators_on_cooldown(state: dict) -> set:
     return creators
 
 
-CONCEPT_PROMPT = """You are the short-form producer for 6Frame Studio, an AI filmmaking studio.
-Invent ONE original 8-second vertical video concept in the "science & engineering wow" lane:
-real physics, extreme machines, materials, chemistry, space, or nature's engineering.
-The whole clip will be generated by an AI video model, so: no real people's faces, no logos,
-no brands, no copyrighted characters, no text inside the video. One continuous shot,
-native vertical 9:16 framing, subject centered and filling the frame.
-It must be factually correct.
-Each clip shows one extreme, measurable fact.
-FIRST SECOND (0-1s beat): the subject is already moving AND there is a distinct, describable sound effect
-(e.g. a sharp crack, hiss, whoosh, clang, snap). Name that sound in veo_prompt. No slow fade-in, no static opener.
-LOOP: the last half-second returns to a composition closely matching the opening frame so the clip loops cleanly;
-say this explicitly at the end of veo_prompt.
+# Style formula modelled on 6Frame Studio's best-engaging post ("Omaha Beach 1944", ~8% like rate vs
+# ~0.5-1% for the macro-physics clips): a cinematic AI recreation of a famous real moment, shot
+# widescreen and blur-padded into 9:16, desaturated period grade, heavy atmosphere, epic score.
+STYLE_NAME = "cinematic-recreation-v1"
+STYLE_ASPECT = "16:9"  # generated widescreen, then blur-padded to 1080x1920 (the reference look)
+STYLE_HASHTAGS = ["#CinematicAI", "#AIFilmmaking", "#HistoryInMotion", "#AICinema"]
+
+CONCEPT_PROMPT = """You are the short-form director for 6Frame Studio, an AI filmmaking studio.
+Invent ONE original 8-second cinematic AI RECREATION of a famous, real, dramatic moment from history,
+exploration or engineering (e.g. a WWII landing, a polar expedition, a moon launch, a shipwreck, a dam
+breaking, a record flight, an ancient siege). It should feel like a frame from a big-budget war/epic film.
+Hard rules: no real identifiable people's faces (crowds, silhouettes, helmets, figures from behind are fine),
+no gore, no logos, no brands, no copyrighted characters, no text, subtitles or titles inside the video,
+no glorifying violence. Period-accurate machines, uniforms and places. Factually correct place and year.
+LOOK (put all of this in veo_prompt): widescreen 16:9 composition with the action in the middle band;
+desaturated slate-blue / steel-gray color grade with warm accents only from fire, flares or sparks;
+overcast or volumetric light through haze; 1940s-newsreel style 1/50 shutter, light film grain;
+dense particles (sea spray, smoke, dust, embers, snow or cloud vapor);
+the camera ALWAYS moves forward or tracks (low push-in, fast low pass, aerial tracking, handheld over a shoulder).
+PACING: 2-3 hard cuts inside the 8 seconds (about 0-3s, 3-5.5s, 5.5-8s), each a new angle on the same moment,
+building from scale (a vast wide) to impact (close, kinetic).
+FIRST SECOND (0-1s beat): already mid-action at full scale AND a distinct loud sound (cannon boom, engine roar,
+ramp clang, ice crack, wave crash). Name that sound in veo_prompt. No fade-in, no static opener.
+SOUND: epic orchestral score (low brass, strings, war drums) under realistic diegetic sound effects;
+no dialogue, no narration, no singing.
 
 Return ONLY JSON with these keys:
-  topic: short name
-  topic_key: 3-6 lowercase words identifying the subject
-  title_line: the caption's top title, 2-6 words, punchy and show-like, written for THIS video's specific subject
-        and action: a concrete visual title in Title Case naming the object and what visibly happens to it, in the
-        style of "Trapped Lightning In Acrylic", "Frozen Disc Glides On Magnets", "Wire Lowers Metal Block"
-        (style only, never reuse these); no numbering, no "#", no series or brand name, no hashtags or emoji.
-        It must be clearly different from every one of these earlier titles: {avoid_titles}
+  topic: short name of the moment
+  topic_key: 3-6 lowercase words identifying the moment
+  title_line: the caption's top title in the form "Place Year" or "Event Year", 2-5 words, Title Case,
+        e.g. "Omaha Beach 1944", "Apollo 11 Launch 1969" (style only, never reuse these); no "#", no emoji,
+        no series or brand name. It must be clearly different from every one of these earlier titles: {avoid_titles}
   shot_list: array of exactly 3 beats covering the 8 seconds, each an object
-        {{"t": "0-1s" | "1-5s" | "5-8s", "shows": concrete visible action in plain words}}; the 0-1s beat also names the sound effect,
-        the 5-8s beat ends back near the opening composition.
-        Each beat must be something a camera can literally see (no abstractions like "stress" or "tension").
-  veo_prompt: 50-110 words, photoreal, written as that same shot list in order (camera, subject,
-        exact action per beat, how the clip ends), vertical 9:16 framing, centered subject
-  on_screen_hook: max 6 words, shown on screen in the first 2 seconds; MUST contain one concrete, factually
-        correct number written in digits (e.g. "3,000 mph crack", "1,000°C in 2 seconds")
-  comment_question: one short question (max 80 characters, ends with "?") that invites a comment about the fact,
-        no "like and subscribe", no "comment below"
-  hook: the caption's first line, about 8-10 words, max 60 characters, curiosity or surprising fact,
+        {{"t": "0-3s" | "3-5.5s" | "5.5-8s", "shows": concrete visible action and camera move in plain words}};
+        the 0-3s beat also names the opening sound. Each beat must be something a camera can literally see.
+  veo_prompt: 70-130 words, photoreal cinematic, written as that same shot list in order (camera move, subject,
+        action, light, particles, grade) plus the sound description; widescreen 16:9
+  on_screen_hook: the title card shown for the first 2.8 seconds, max 5 words, place or event plus the year in
+        digits, e.g. "D-DAY · 1944"
+  comment_question: one short question (max 80 characters, ends with "?") about the moment or which moment to
+        recreate next, no "like and subscribe", no "comment below"
+  hook: the caption's first line, "<Place or event> <year>." then a short second sentence, max 60 characters total,
         no hashtags, no emoji, no links, must NOT start with "At 6Frame Studio"
-  lines: array of 1-2 short plain-language lines (each under 100 characters) explaining the fact
+  lines: array of exactly 2 short lines (each under 100 characters): line 1 "We recreated <what> to explore
+        <feeling> using generative video." ; line 2 "Technical focus: <2-3 craft details e.g. newsreel shutter,
+        particle spray, deep framing>."
   RULE: hook, on_screen_hook and lines may only describe things that appear in shot_list.
-        If the caption says something breaks, explodes, melts etc., a beat must show exactly that.
-  hashtags: array of 3-5 topic hashtags (e.g. #Physics #Engineering), no brand hashtags
-  linkedin_angle: one plain sentence on how the clip was made with AI
+  hashtags: array of 2-3 topic hashtags for the moment (e.g. #OmahaBeach #WWII); style tags are added for you
+  linkedin_angle: one plain sentence on the filmmaking craft behind the recreation
 
 Do NOT reuse any of these recent topics: {avoid}
 {inspiration}"""
@@ -584,6 +561,15 @@ def has_number(text: Any) -> bool:
     return bool(re.search(r"\d", str(text or "")))
 
 
+def style_hashtags(tags: Any) -> List[str]:
+    """Up to 2 topic tags, then the cinematic style tags; max 5 (the caption cap)."""
+    out: List[str] = []
+    for t in list(normalize_hashtags(tags, ["#History"]))[:2] + STYLE_HASHTAGS:
+        if t.lower() not in {x.lower() for x in out}:
+            out.append(t)
+    return out[:5]
+
+
 def sanitize_concept(concept: Any) -> dict:
     if not isinstance(concept, dict):
         return {}
@@ -610,7 +596,7 @@ def sanitize_concept(concept: Any) -> dict:
         "on_screen_hook": clamp_words(_clean_line(concept.get("on_screen_hook") or hook), 40),
         "hook": hook,
         "lines": [clamp_words(_clean_line(l), 110) for l in lines if _clean_line(l)][:2],
-        "hashtags": normalize_hashtags(concept.get("hashtags")),
+        "hashtags": style_hashtags(concept.get("hashtags")),
         "linkedin_angle": clamp_words(_clean_line(concept.get("linkedin_angle") or ""), 200),
         "comment_question": _clean_question(concept.get("comment_question")),
         "title_line": clean_title(concept.get("title_line")),
@@ -852,8 +838,13 @@ def render_vertical(src: str, dst: str, hook: str, commentary: Optional[List[str
         if font and hook:
             tf = _textfile(hook.upper(), 18)
             temps.append(tf)
-            filt += (f",drawtext=fontfile='{font}':textfile='{tf}':expansion=none:fontcolor=white:fontsize=78:line_spacing=10:"
-                     f"box=1:boxcolor=black@0.6:boxborderw=24:x=(w-text_w)/2:y=h*0.14:enable='lt(t,2.8)'")
+            if native_vertical:
+                filt += (f",drawtext=fontfile='{font}':textfile='{tf}':expansion=none:fontcolor=white:fontsize=78:line_spacing=10:"
+                         f"box=1:boxcolor=black@0.6:boxborderw=24:x=(w-text_w)/2:y=h*0.14:enable='lt(t,2.8)'")
+            else:
+                # cinematic title card in the blurred band just above the widescreen picture (reference look)
+                filt += (f",drawtext=fontfile='{font}':textfile='{tf}':expansion=none:fontcolor=0xE8ECEF:fontsize=72:line_spacing=10:"
+                         f"shadowcolor=black@0.7:shadowx=3:shadowy=3:x=(w-text_w)/2:y=h*0.335-text_h-40:enable='lt(t,2.8)'")
         if font and commentary:
             for (start, end), line in zip([(2.8, 7.0), (7.0, max_seconds)], commentary[:2]):
                 tf = _textfile(line, 26)
@@ -975,7 +966,7 @@ def generate_original_clip(concept: dict, settings: dict, engine: str = "google_
 
     job_id = f"g2_{uuid.uuid4().hex}"
     orchestrator.run_video_generation(job_id, concept["veo_prompt"], settings, engine, 8, allow_fallback=False,
-                                     aspect_ratio=os.environ.get("GROWTH_VEO_ASPECT", "9:16"))
+                                     aspect_ratio=os.environ.get("GROWTH_STYLE_ASPECT", STYLE_ASPECT))
     status = orchestrator.get_job_status(job_id)
     if status.get("status") == "SUCCESS":
         result = status.get("result") or {}

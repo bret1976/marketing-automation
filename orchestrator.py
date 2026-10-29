@@ -1310,18 +1310,19 @@ def omni_cost_from_usage(usage: Optional[Dict[str, Any]]) -> Optional[float]:
                  + inp * OMNI_INPUT_USD_PER_MTOKEN / 1e6, 4)
 
 
-def omni_prompt(prompt: str, seconds: int = OMNI_TARGET_SECONDS) -> str:
+def omni_prompt(prompt: str, seconds: int = OMNI_TARGET_SECONDS, aspect_ratio: str = "9:16") -> str:
     prompt = (prompt or "").strip()
     if f"exactly {seconds} seconds" in prompt.lower():
         return prompt
-    return (f"A single continuous {seconds}-second vertical 9:16 cinematic clip, exactly {seconds} seconds long "
+    shape = "widescreen 16:9" if aspect_ratio == "16:9" else "vertical 9:16"
+    return (f"A {seconds}-second {shape} cinematic clip, exactly {seconds} seconds long "
             f"([0-{seconds}s]), with natural synchronized sound. {prompt}").strip()
 
 
 def omni_request_body(prompt: str, aspect_ratio: str = "9:16", seconds: int = OMNI_TARGET_SECONDS) -> Dict[str, Any]:
     return {
         "model": OMNI_MODEL,
-        "input": omni_prompt(prompt, seconds),
+        "input": omni_prompt(prompt, seconds, aspect_ratio),
         "response_format": {"type": "video", "aspect_ratio": aspect_ratio if aspect_ratio in ("16:9", "9:16") else "9:16",
                             "resolution": OMNI_RESOLUTION},
         "generation_config": {"max_output_tokens": OMNI_MAX_OUTPUT_TOKENS, "thinking_level": "low"},

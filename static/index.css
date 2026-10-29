@@ -1304,6 +1304,45 @@ body {
     color: #dc3545;
 }
 
+.socials-row-form {
+    padding: 0.45rem 0.6rem 0.55rem;
+    margin-top: -0.3rem;
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    border-top: none;
+    border-radius: 0 0 7px 7px;
+    background: rgba(0, 0, 0, 0.12);
+}
+
+.socials-help {
+    margin: 0 0 0.4rem;
+    font-size: 0.66rem;
+    color: var(--text-secondary);
+}
+
+.socials-form-line {
+    display: flex;
+    gap: 0.4rem;
+    flex-wrap: wrap;
+    align-items: center;
+}
+
+.socials-input {
+    flex: 1 1 140px;
+    min-height: 30px;
+    font-size: 0.7rem;
+    padding: 0.25rem 0.45rem;
+    border-radius: 6px;
+    border: 1px solid var(--border-color);
+    background: rgba(255, 255, 255, 0.03);
+    color: var(--text-primary);
+}
+
+.socials-form-line .secondary-btn {
+    min-height: 30px;
+    padding: 0.25rem 0.55rem;
+    font-size: 0.68rem;
+}
+
 .growth-list.compact {
     max-height: 220px;
 }

@@ -330,8 +330,88 @@ document.addEventListener("DOMContentLoaded", () => {
         {platform:"linkedin", label:"LinkedIn", status:"INACTIVE", live:false, connected:false},
         {platform:"twitter", label:"Twitter / X", status:"INACTIVE", live:false, connected:false},
         {platform:"youtube", label:"YouTube", status:"INACTIVE", live:false, connected:false},
-        {platform:"threads", label:"Threads", status:"INACTIVE", live:false, connected:false}
+        {platform:"threads", label:"Threads", status:"INACTIVE", live:false, connected:false},
+        {platform:"pinterest", label:"Pinterest", status:"INACTIVE", live:false, connected:false, pick_placement:"board"},
+        {platform:"bluesky", label:"Bluesky", status:"INACTIVE", live:false, connected:false, connect_flow:"app_password"},
+        {platform:"telegram", label:"Telegram", status:"INACTIVE", live:false, connected:false, connect_flow:"bot_token", pick_placement:"chat"},
+        {platform:"google_business", label:"Google Business Profile", status:"INACTIVE", live:false, connected:false, connect_flow:"dashboard"}
     ];
+
+    const SOCIAL_FLOW_HELP = {
+        app_password: "Bluesky uses your handle plus an app password (Settings → Privacy and security → App passwords on bsky.app). Never your main password.",
+        bot_token: "Telegram: message @BotFather, send /newbot, copy the token. Add the bot as an admin of your channel or group, post one message there, then Refresh and pick the chat.",
+        dashboard: "Google Business Profile connects in the PostProxy dashboard. Connect it there, then press Refresh / Sync."
+    };
+
+    function socialRowForm(channel) {
+        const p = escapeHtml(channel.platform);
+        const flow = channel.connect_flow || "oauth";
+        let fields = "";
+        if (flow === "app_password") {
+            fields = `<input type="text" class="socials-input" data-field="identifier" placeholder="yourname.bsky.social" autocomplete="off">
+                      <input type="password" class="socials-input" data-field="app_password" placeholder="App password" autocomplete="off">`;
+        } else if (flow === "bot_token") {
+            fields = `<input type="password" class="socials-input" data-field="bot_token" placeholder="Bot token from @BotFather" autocomplete="off">`;
+        } else {
+            return "";
+        }
+        return `<div class="socials-row-form" data-form-for="${p}" hidden>
+                    <p class="socials-help">${escapeHtml(SOCIAL_FLOW_HELP[flow])}</p>
+                    <div class="socials-form-line">${fields}
+                        <button type="button" class="secondary-btn postproxy-submit-creds-btn" data-platform="${p}">Save &amp; connect</button>
+                    </div>
+                </div>`;
+    }
+
+    function socialPickForm(channel) {
+        if (!channel.pick_placement) return "";
+        const p = escapeHtml(channel.platform);
+        const what = channel.pick_placement === "chat" ? "chat" : "board";
+        return `<div class="socials-row-form" data-pick-for="${p}" hidden>
+                    <p class="socials-help">${what === "chat"
+                        ? "Pick the Telegram channel or group to post to. Not listed? Add your bot as an admin there, post one message, then press Find chats again."
+                        : "Pick the Pinterest board pins should go to."}</p>
+                    <div class="socials-form-line">
+                        <select class="socials-input" data-pick-select="${p}"><option value="">Loading…</option></select>
+                        <button type="button" class="secondary-btn postproxy-pick-reload-btn" data-platform="${p}">Find ${what}s</button>
+                        <button type="button" class="secondary-btn postproxy-pick-save-btn" data-platform="${p}">Save ${what}</button>
+                    </div>
+                </div>`;
+    }
+
+    function loadPlacementChoices(platform) {
+        const select = document.querySelector(`[data-pick-select="${platform}"]`);
+        if (select) select.innerHTML = `<option value="">Loading…</option>`;
+        return fetch(`/api/postproxy/placements/${encodeURIComponent(platform)}`)
+            .then(res => res.ok ? res.json() : res.json().then(e => { throw new Error(e.detail || "Could not load choices") }))
+            .then(data => {
+                if (!select) return;
+                const items = data.placements || [];
+                const pinned = (data.pinned || {}).placement_id || "";
+                if (!data.connected) {
+                    select.innerHTML = `<option value="">Connect ${escapeHtml(platform)} first</option>`;
+                } else if (!items.length) {
+                    select.innerHTML = `<option value="">None found yet</option>`;
+                } else {
+                    select.innerHTML = items.map(i => `<option value="${escapeHtml(i.id)}"${i.id === pinned ? " selected" : ""}>${escapeHtml(i.name)}</option>`).join("");
+                }
+            })
+            .catch(err => { if (select) select.innerHTML = `<option value="">Error</option>`; showToast(err.message, true); });
+    }
+
+    function savePlacementChoice(platform) {
+        const select = document.querySelector(`[data-pick-select="${platform}"]`);
+        if (!select || !select.value) { showToast("Pick one first.", true); return; }
+        const name = select.options[select.selectedIndex]?.text || "";
+        fetch("/api/postproxy/placements", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ platform, placement_id: select.value, name })
+        })
+        .then(res => res.ok ? res.json() : res.json().then(e => { throw new Error(e.detail || "Save failed") }))
+        .then(() => { showToast(`Saved ${name} for ${platform}.`); refreshPostProxyProfiles(); })
+        .catch(err => showToast(err.message, true));
+    }
 
     function renderCockpitSocials(data) {
         const grid = document.getElementById("cockpit-postproxy-socials");
@@ -354,7 +434,9 @@ document.addEventListener("DOMContentLoaded", () => {
         }
         grid.innerHTML = socials.map(channel => {
             const connected = !!channel.connected;
-            const action = connected ? "Reconnect" : "Connect";
+            const flow = channel.connect_flow || "oauth";
+            const action = flow === "dashboard" ? "Open PostProxy" : (connected ? "Reconnect" : "Connect");
+            const pickLabel = channel.pick_placement === "chat" ? "Pick chat" : "Pick board";
             const extra = [
                 channel.profile_name,
                 channel.placement_id ? `${channel.placement_param || "placement"} ${channel.placement_id}` : "",
@@ -368,13 +450,43 @@ document.addEventListener("DOMContentLoaded", () => {
                     </div>
                     <div class="socials-row-actions">
                         <span class="socials-pill socials-pill-${escapeHtml((channel.status || "INACTIVE").toLowerCase())}">${escapeHtml(channel.status || "INACTIVE")}</span>
-                        <button type="button" class="secondary-btn postproxy-connect-btn" data-platform="${escapeHtml(channel.platform)}" data-reconnect="${connected ? "true" : "false"}">${action}</button>
+                        ${connected && channel.pick_placement ? `<button type="button" class="secondary-btn postproxy-pick-btn" data-platform="${escapeHtml(channel.platform)}">${pickLabel}</button>` : ""}
+                        <button type="button" class="secondary-btn postproxy-connect-btn" data-platform="${escapeHtml(channel.platform)}" data-flow="${escapeHtml(flow)}" data-reconnect="${connected ? "true" : "false"}">${action}</button>
                     </div>
-                </div>`;
+                </div>
+                ${socialRowForm(channel)}
+                ${socialPickForm(channel)}`;
         }).join("");
         grid.querySelectorAll(".postproxy-connect-btn").forEach(btn => {
-            btn.addEventListener("click", () => connectPostProxyPlatform(btn.dataset.platform, btn.dataset.reconnect === "true"));
+            btn.addEventListener("click", () => {
+                const flow = btn.dataset.flow || "oauth";
+                if (flow === "app_password" || flow === "bot_token") {
+                    const form = grid.querySelector(`[data-form-for="${btn.dataset.platform}"]`);
+                    if (form) form.hidden = !form.hidden;
+                    return;
+                }
+                connectPostProxyPlatform(btn.dataset.platform, btn.dataset.reconnect === "true");
+            });
         });
+        grid.querySelectorAll(".postproxy-submit-creds-btn").forEach(btn => {
+            btn.addEventListener("click", () => {
+                const form = grid.querySelector(`[data-form-for="${btn.dataset.platform}"]`);
+                const extra = {};
+                form.querySelectorAll("[data-field]").forEach(input => { extra[input.dataset.field] = input.value.trim(); });
+                connectPostProxyPlatform(btn.dataset.platform, false, extra);
+                form.querySelectorAll("input").forEach(input => { input.value = ""; });
+            });
+        });
+        grid.querySelectorAll(".postproxy-pick-btn").forEach(btn => {
+            btn.addEventListener("click", () => {
+                const form = grid.querySelector(`[data-pick-for="${btn.dataset.platform}"]`);
+                if (!form) return;
+                form.hidden = !form.hidden;
+                if (!form.hidden) loadPlacementChoices(btn.dataset.platform);
+            });
+        });
+        grid.querySelectorAll(".postproxy-pick-reload-btn").forEach(btn => btn.addEventListener("click", () => loadPlacementChoices(btn.dataset.platform)));
+        grid.querySelectorAll(".postproxy-pick-save-btn").forEach(btn => btn.addEventListener("click", () => savePlacementChoice(btn.dataset.platform)));
     }
 
     function setPostProxyBusy(busy, label) {
@@ -410,13 +522,14 @@ document.addEventListener("DOMContentLoaded", () => {
             .finally(() => setPostProxyBusy(false));
     }
 
-    function connectPostProxyPlatform(platform, reconnect = false) {
+    function connectPostProxyPlatform(platform, reconnect = false, extra = {}) {
         fetch("/api/postproxy/connect", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
                 platform,
                 reconnect,
+                ...extra,
                 profile_group_id: document.getElementById("postproxy-profile-group-id")?.value || "",
                 redirect_url: window.location.origin + "/api/postproxy/callback"
             })
@@ -426,7 +539,10 @@ document.addEventListener("DOMContentLoaded", () => {
             return res.json();
         })
         .then(data => {
-            if (data.url) {
+            if (data.dashboard_only) {
+                window.open(data.dashboard_url, "_blank", "noopener,noreferrer");
+                showToast(data.message || "Connect it in the PostProxy dashboard, then Refresh.");
+            } else if (data.url) {
                 window.open(data.url, "_blank", "noopener,noreferrer");
                 showToast(`PostProxy ${reconnect ? "reconnect" : "connect"} opened for ${platform}.`);
             } else if (data.already_connected && data.dashboard_url) {
@@ -435,6 +551,9 @@ document.addEventListener("DOMContentLoaded", () => {
                 refreshPostProxyProfiles();
             } else if (data.already_connected) {
                 showToast(`PostProxy ${platform} is already connected.`);
+                refreshPostProxyProfiles();
+            } else if (data.status === "SUCCESS" && (platform === "bluesky" || platform === "telegram")) {
+                showToast(`${platform} connected in PostProxy. Syncing...`);
                 refreshPostProxyProfiles();
             } else {
                 showToast("PostProxy did not return a connection URL.", true);

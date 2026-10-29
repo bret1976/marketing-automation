@@ -417,6 +417,14 @@ class PostProxyConnectRequest(BaseModel):
     redirect_url: Optional[str] = None
     profile_group_id: Optional[str] = None
     reconnect: bool = False
+    identifier: Optional[str] = None
+    app_password: Optional[str] = None
+    bot_token: Optional[str] = None
+
+class PostProxyPinRequest(BaseModel):
+    platform: str
+    placement_id: str = ""
+    name: str = ""
 
 class ControlledPostProxyPublishRequest(BaseModel):
     platforms: Optional[List[str]] = None
@@ -879,8 +887,26 @@ POSTPROXY_SUPPORTED_PLATFORMS = {
 }
 POSTPROXY_CONNECTABLE_PLATFORMS = [
     "instagram", "tiktok", "linkedin", "twitter", "youtube", "facebook",
-    "threads", "pinterest", "bluesky",
+    "threads", "pinterest", "bluesky", "telegram",
 ]
+# How each platform connects in PostProxy. Everything else is a sign-in link (OAuth).
+POSTPROXY_CONNECT_FLOW = {"bluesky": "app_password", "telegram": "bot_token", "google_business": "dashboard"}
+# Platforms where the tester picks one target (board / chat) before posting.
+POSTPROXY_PICK_PLACEMENT = {"pinterest": "board", "telegram": "chat"}
+POSTPROXY_PINS_FILE = os.path.join(STATE_DIR, "postproxy_pins.json")
+
+def load_postproxy_pins() -> dict:
+    data = read_json_file(POSTPROXY_PINS_FILE, {})
+    return data if isinstance(data, dict) else {}
+
+def save_postproxy_pin(platform: str, placement_id: str, name: str = "") -> dict:
+    pins = load_postproxy_pins()
+    if placement_id:
+        pins[platform] = {"placement_id": str(placement_id), "name": name or ""}
+    else:
+        pins.pop(platform, None)
+    write_json_file(POSTPROXY_PINS_FILE, pins)
+    return pins
 # Platforms that 422 unless a placement id is sent with the post.
 PLACEMENT_PARAM_BY_PLATFORM = {
     "facebook": "page_id",
@@ -1048,7 +1074,8 @@ def sync_postproxy_account(settings: Optional[dict] = None) -> dict:
                     placement_error = sanitize_postproxy_error(str(e))
                     logger.warning(f"PostProxy placements for {platform} ({profile_id}) failed: {placement_error}")
             param = PLACEMENT_PARAM_BY_PLATFORM.get(platform)
-            placement_id = pick_placement_id(placements)
+            pinned = (load_postproxy_pins().get(platform) or {}).get("placement_id")
+            placement_id = pinned or pick_placement_id(placements)
             if not placement_id and platform == "facebook":
                 placement_id = settings.get("facebook_page_id") or None
             placements_by_platform[platform] = {
@@ -1105,6 +1132,9 @@ def postproxy_profile_for_platform(settings: dict, platform: str, require_active
 def first_postproxy_placement_id(settings: dict, platform: str) -> Optional[str]:
     mapped = platform_to_postproxy(platform)
     state = load_postproxy_state()
+    pinned = (load_postproxy_pins().get(mapped) or {}).get("placement_id")
+    if pinned:
+        return str(pinned)
     cached = (state.get("placements") or {}).get(mapped) or {}
     if cached.get("placement_id"):
         return str(cached["placement_id"])
@@ -1283,6 +1313,8 @@ def build_social_channel_status(settings: Optional[dict] = None, state: Optional
         ("threads", "Threads"),
         ("pinterest", "Pinterest"),
         ("bluesky", "Bluesky"),
+        ("telegram", "Telegram"),
+        ("google_business", "Google Business Profile"),
     ]
     channels = []
     seen = set()
@@ -1311,6 +1343,8 @@ def build_social_channel_status(settings: Optional[dict] = None, state: Optional
             "placement_param": placement.get("param"),
             "placement_name": placement.get("placement_name"),
             "expires_at": (profile or {}).get("expires_at"),
+            "connect_flow": POSTPROXY_CONNECT_FLOW.get(key, "oauth"),
+            "pick_placement": POSTPROXY_PICK_PLACEMENT.get(key),
         })
     for platform, profile in profiles_by_platform.items():
         if platform in seen:
@@ -1739,10 +1773,22 @@ def create_postproxy_connection(req: PostProxyConnectRequest, request: Request):
         origin = str(request.base_url).rstrip("/")
         public_base = (settings.get("public_base_url") or os.environ.get("PUBLIC_BASE_URL") or origin).rstrip("/")
         redirect_url = req.redirect_url or f"{public_base}/api/postproxy/callback"
-        payload = {
-            "platform": platform_to_postproxy(req.platform),
-            "redirect_url": redirect_url,
-        }
+        platform = platform_to_postproxy(req.platform)
+        flow = POSTPROXY_CONNECT_FLOW.get(platform, "oauth")
+        if flow == "dashboard":
+            return {"status": "SUCCESS", "dashboard_only": True, "dashboard_url": POSTPROXY_DASHBOARD_URL,
+                    "message": "Google Business Profile connects in the PostProxy dashboard. Connect it there, then Refresh."}
+        payload: Dict[str, Any] = {"platform": platform}
+        if flow == "app_password":
+            if not (req.identifier and req.app_password):
+                raise ValueError("Bluesky needs your handle and an app password.")
+            payload.update({"identifier": req.identifier.strip(), "app_password": req.app_password.strip()})
+        elif flow == "bot_token":
+            if not req.bot_token:
+                raise ValueError("Telegram needs your bot token from @BotFather.")
+            payload["bot_token"] = req.bot_token.strip()
+        else:
+            payload["redirect_url"] = redirect_url
         result = postproxy_post(settings, f"/profile_groups/{group_id}/initialize_connection", payload, timeout=60)
         return {"status": "SUCCESS", "profile_group_id": group_id, "reconnect": req.reconnect, **result}
     except Exception as e:
@@ -1757,6 +1803,43 @@ def create_postproxy_connection(req: PostProxyConnectRequest, request: Request):
                 "message": message,
             }
         raise HTTPException(status_code=400, detail=message)
+
+@app.get("/api/postproxy/placements/{platform}")
+def get_postproxy_platform_placements(platform: str):
+    """Live list of boards (Pinterest), chats (Telegram), pages, etc. for one connected platform."""
+    settings = load_settings()
+    mapped = platform_to_postproxy(platform)
+    try:
+        profile = postproxy_profile_for_platform(settings, mapped, require_active=False)
+        if not profile:
+            return {"status": "SUCCESS", "platform": mapped, "connected": False, "placements": [],
+                    "pinned": load_postproxy_pins().get(mapped)}
+        items = postproxy_placements(settings, profile.get("id", ""))
+        return {
+            "status": "SUCCESS",
+            "platform": mapped,
+            "connected": True,
+            "param": PLACEMENT_PARAM_BY_PLATFORM.get(mapped),
+            "placements": [{"id": str(i.get("id")), "name": i.get("name") or str(i.get("id"))}
+                           for i in items if isinstance(i, dict) and i.get("id") not in (None, "")],
+            "pinned": load_postproxy_pins().get(mapped),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=sanitize_postproxy_error(str(e)))
+
+@app.post("/api/postproxy/placements")
+def pin_postproxy_placement(req: PostProxyPinRequest):
+    mapped = platform_to_postproxy(req.platform)
+    if mapped not in PLACEMENT_PARAM_BY_PLATFORM:
+        raise HTTPException(status_code=400, detail=f"{mapped} has no board/chat/page to pick.")
+    pins = save_postproxy_pin(mapped, req.placement_id.strip(), req.name.strip())
+    state = load_postproxy_state()
+    cached = (state.get("placements") or {}).get(mapped)
+    if cached is not None:
+        cached["placement_id"] = req.placement_id.strip() or cached.get("placement_id")
+        cached["placement_name"] = req.name.strip() or cached.get("placement_name")
+        save_postproxy_state(state)
+    return {"status": "SUCCESS", "platform": mapped, "pinned": pins.get(mapped)}
 
 @app.post("/api/postproxy/test-publish")
 async def create_postproxy_test_publish(req: ControlledPostProxyPublishRequest):

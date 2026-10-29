@@ -9,6 +9,7 @@
     "sharp": "^0.35.5",
     "adm-zip": "^0.6.1",
     "puppeteer-core": "^25.2.1",
-    "@puppeteer/browsers": "^3.0.6"
+    "@puppeteer/browsers": "^3.0.6",
+    "@hono/node-server": "^2.1.3"
   }
 }

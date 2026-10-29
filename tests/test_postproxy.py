@@ -158,3 +158,26 @@ def test_reconcile_does_not_fail_whole_post_when_only_twitter_id_is_stored(monke
     assert main.reconcile_postproxy_posts(posts, {"postproxy_enabled": True, "postproxy_api_key": "t"}) is True
     assert posts[0]["status"] == "PARTIAL_SUCCESS"
     assert "twitter" in posts[0]["error_message"]
+
+
+def test_pins_saved_per_platform_and_preferred(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "POSTPROXY_PINS_FILE", str(tmp_path / "pins.json"))
+    main.save_postproxy_pin("pinterest", "board_9", "Recipes")
+    main.save_postproxy_pin("telegram", "-100123", "My Channel")
+    pins = main.load_postproxy_pins()
+    assert pins["pinterest"]["placement_id"] == "board_9"
+    assert pins["telegram"]["placement_id"] == "-100123"
+
+
+def test_connect_flow_map_covers_special_platforms():
+    assert main.POSTPROXY_CONNECT_FLOW["bluesky"] == "app_password"
+    assert main.POSTPROXY_CONNECT_FLOW["telegram"] == "bot_token"
+    assert main.POSTPROXY_CONNECT_FLOW["google_business"] == "dashboard"
+    assert main.POSTPROXY_PICK_PLACEMENT == {"pinterest": "board", "telegram": "chat"}
+
+
+def test_dashboard_js_lists_all_platforms():
+    js = open(os.path.join(os.path.dirname(main.__file__), "static", "index.js")).read()
+    for p in ["tiktok", "instagram", "linkedin", "twitter", "facebook", "youtube", "threads",
+              "pinterest", "bluesky", "telegram", "google_business"]:
+        assert f'platform:"{p}"' in js, p

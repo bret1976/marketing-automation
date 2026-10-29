@@ -28,7 +28,7 @@ def test_lockfile_matches_package_json_and_has_patched_transitive_deps():
     assert pkgs[""]["dependencies"] == json.loads(_load("package.json"))["dependencies"]
     assert pkgs["node_modules/hyperframes"]["version"] == "0.7.40"
     # First patched versions for the advisories npm audit reported on hyperframes 0.7.40's tree.
-    floors = {"sharp": "0.35.5", "adm-zip": "0.6.1", "puppeteer-core": "24.43.2", "@puppeteer/browsers": "3.0.0"}
+    floors = {"sharp": "0.35.5", "adm-zip": "0.6.1", "puppeteer-core": "24.43.2", "@puppeteer/browsers": "3.0.0", "@hono/node-server": "2.1.3"}
     for name, floor in floors.items():
         for path, meta in pkgs.items():
             if path.endswith("node_modules/" + name):

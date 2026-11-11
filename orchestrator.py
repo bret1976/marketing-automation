@@ -684,6 +684,22 @@ def run_live_trend_scanner(
     settings: Dict[str, Any]
 ):
     try:
+        # VIRAL_SOURCE=open: free last-24h finder (YouTube Data API + yt-dlp + Reddit), no Gemini.
+        # Default off, so the Gemini Google-Search scan below is unchanged unless the flag is set.
+        import open_viral
+        if open_viral.enabled():
+            update_job_status(job_id, "PROCESSING", 20, "Finding the most-viewed uploads of the last 24 hours (YouTube, Reddit)...")
+            found = open_viral.find_viral()
+            trends = open_viral.to_trends(found, brand=(settings.get("brand_name") or "6Frame Studio"))
+            if not trends:
+                update_job_status(job_id, "FAILED", 0, "Open viral finder found nothing from the last 24 hours. "
+                                  + "; ".join(found.get("errors") or [])[:400])
+                return
+            update_job_status(job_id, "SUCCESS", 100, "Live trend search complete (open sources, last 24h, ranked by views/hour).",
+                              result={"trends": trends[:10], "verified_count": len(trends), "filtered_unresolved_count": 0,
+                                      "source": "open", "sources": found.get("sources"), "errors": found.get("errors")})
+            return
+
         api_key = settings.get("gemini_api_key") or os.environ.get("GEMINI_API_KEY")
         if not api_key:
             update_job_status(job_id, "FAILED", 0, "Missing Gemini API Key. Please configure it in Settings.")

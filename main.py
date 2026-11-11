@@ -1224,6 +1224,9 @@ def split_twitter_caption(text: str, existing_thread: Optional[List[str]] = None
         parts = [chunk for chunk in chunks if chunk]
     return [truncate_twitter_text(part, limit) for part in parts] or [""]
 
+LANDSCAPE_PLATFORMS = {"linkedin", "twitter"}
+
+
 def postproxy_media_url(post: dict, settings: dict, platforms: List[str]) -> Optional[str]:
     if not post.get("video_path"):
         return None
@@ -1471,6 +1474,15 @@ def publish_via_postproxy(post: dict, settings: dict, platforms: List[str]) -> d
     if not mapped_platforms:
         return {"successes": [], "errors": ["PostProxy: no supported platforms selected."]}
     media_url = postproxy_media_url(post, settings, mapped_platforms)
+    # Footage mode (VIDEO_ENGINE=footage) renders a 16:9 twin: LinkedIn/X get it, everything else keeps 9:16.
+    landscape_url = None
+    if media_url and post.get("landscape_video_path") and any(p in LANDSCAPE_PLATFORMS for p in mapped_platforms):
+        landscape_url = get_public_video_url({"video_path": post["landscape_video_path"]}, settings, "")
+
+    def media_for(batch_platforms: List[str]) -> Optional[str]:
+        if landscape_url and set(batch_platforms) <= LANDSCAPE_PLATFORMS:
+            return landscape_url
+        return media_url
     platform_captions = post.get("platform_captions") or {}
 
     def caption_for(platform: str) -> str:
@@ -1532,7 +1544,7 @@ def publish_via_postproxy(post: dict, settings: dict, platforms: List[str]) -> d
         if group_id:
             payload["profile_group_id"] = group_id
         if include_media and media_url:
-            payload["media"] = [media_url]
+            payload["media"] = [media_for(batch_platforms)]
         if thread_parts and len(thread_parts) > 1 and set(batch_platforms).issubset({"twitter", "threads"}):
             payload["post"]["body"] = thread_parts[0]
             payload["thread"] = [{"body": part} for part in thread_parts[1:]]
@@ -1556,11 +1568,18 @@ def publish_via_postproxy(post: dict, settings: dict, platforms: List[str]) -> d
     elif remaining and platform_captions:
         # One PostProxy post per distinct caption (short no-link caption for
         # TikTok/YouTube/Instagram, longer one for LinkedIn).
-        groups: Dict[str, List[str]] = {}
+        groups: Dict[Any, List[str]] = {}
         for platform in remaining:
-            groups.setdefault(caption_for(platform), []).append(platform)
-        for body, group in groups.items():
+            wide = bool(landscape_url) and platform in LANDSCAPE_PLATFORMS
+            groups.setdefault((caption_for(platform), wide), []).append(platform)
+        for (body, _wide), group in groups.items():
             batches.append((group, bool(media_url), body, None))
+    elif remaining and landscape_url:
+        wide = [p for p in remaining if p in LANDSCAPE_PLATFORMS]
+        tall = [p for p in remaining if p not in LANDSCAPE_PLATFORMS]
+        for group in (tall, wide):
+            if group:
+                batches.append((group, True, post.get("text", ""), None))
     elif remaining:
         batches.append((remaining, bool(media_url), post.get("text", ""), None))
 

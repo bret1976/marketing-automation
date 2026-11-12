@@ -1,18 +1,24 @@
-"""VIDEO_ENGINE=footage: the 8-second Short with NO generation API (no Gemini, Veo, Omni, Runway, FAL).
+"""VIDEO_ENGINE=footage: a 31-55 second Short (target ~45 s) with NO generation API (no Gemini, Veo, Omni, Runway, FAL).
 
 Pipeline (all free, all local except the public archive searches):
   1. topic   - today's most-watched uploads from the keyless open finder (open_viral.py, yt-dlp),
                matched to a hand-written, fact-checked template library (footage_topics.py).
-  2. script  - template hook / on-screen title / 3 VO lines / captions. No LLM.
+  2. script  - template hook / on-screen title / ~8 unhurried VO lines / captions. No LLM.
   3. footage - real, free, legally reusable clips matched to the topic: NASA Image & Video Library,
                Wikimedia Commons (PD / CC0 / CC BY only), Internet Archive (public-domain / Prelinger).
                Pexels / Pixabay only when PEXELS_API_KEY / PIXABAY_API_KEY are set. Every clip's
                source page, author and license is recorded in info["footage_sources"].
-  4. edit    - 3 shots cut on the music beat (CC0 Freesound beds, pre-analysed beat grid),
+  4. edit    - ~8-12 shots (2.2-6.5 s each) cut on the music beat (CC0 Freesound beds, pre-analysed beat grid),
                denoise + sharpen + desaturated cinematic grade + grain, Ken Burns only on stills,
                Kokoro (local ONNX) voiceover, burned-in hook + VO captions + source credit.
   5. output  - 1080x1920 (YouTube Shorts / Instagram / TikTok / Facebook) and 1920x1080 (LinkedIn / X),
                H.264 Main 4.0, yuv420p, 30 fps, AAC 44.1 kHz stereo, +faststart.
+
+Length rule (Bret, 2026-11-12): every rendered clip, 9:16 AND 16:9, is >= MIN_SECONDS (31) and
+<= MAX_SECONDS (55), measured with ffprobe on the output. The length comes from the voiceover and the
+footage actually available, never from the app's autonomous_video_duration setting (that is the old
+8-second generation formula). Not enough on-topic footage for 31 s -> the render fails; it is never
+padded with black or shipped short. The voiceover is never sped up to fit.
 
 Off unless VIDEO_ENGINE=footage. Cost: $0.
 """
@@ -34,8 +40,18 @@ import footage_topics
 
 logger = logging.getLogger(__name__)
 MARKER = "FOOTAGE_MODE"
-VERSION = "2026-11-11.1"
-TOTAL_SECONDS = 8.0
+VERSION = "2026-11-12.1"
+MIN_SECONDS = 31.0  # hard floor for every output file (Bret 2026-11-12)
+MAX_SECONDS = 55.0  # hard ceiling for every output file (still a Short everywhere)
+TARGET_SECONDS = 45.0  # aim here when enough good on-topic footage exists
+MIN_SHOT_SECONDS = 2.2
+MAX_SHOT_SECONDS = 6.5  # longest single shot; more shots are used rather than holding one too long
+SHOT_SECONDS = 4.2  # typical shot length the plan aims for
+SEGMENT_SECONDS = MAX_SHOT_SECONDS + 0.5  # every shot is cut this long so beat-snapped lengths always fit
+VO_SPEED = 0.95  # natural, unhurried read; never raised to squeeze lines in
+VO_LEAD = 0.35
+VO_GAP = 0.6  # unhurried pause between lines
+VO_TAIL = 1.6  # music + picture after the last line
 HOOK_SECONDS = 2.8
 FPS = 30
 UA = "6frame-marketing-automation/1.0 (footage mode; https://6framestudio.com)"
@@ -71,6 +87,47 @@ def status() -> dict:
 
 def enabled() -> bool:
     return (os.environ.get("VIDEO_ENGINE") or "").strip().lower() == "footage"
+
+
+def target_seconds() -> float:
+    """FOOTAGE_TARGET_SECONDS (default 45), always clamped into [MIN_SECONDS, MAX_SECONDS].
+    Deliberately NOT autonomous_video_duration: a stale 8 s setting must never shrink a footage clip."""
+    try:
+        t = float(os.environ.get("FOOTAGE_TARGET_SECONDS") or TARGET_SECONDS)
+    except ValueError:
+        t = TARGET_SECONDS
+    return min(max(t, MIN_SECONDS), MAX_SECONDS)
+
+
+def length_ok(seconds: float) -> bool:
+    return MIN_SECONDS <= float(seconds or 0.0) <= MAX_SECONDS
+
+
+def plan_total(vo_seconds: float, target: Optional[float] = None) -> float:
+    """Planned clip length: at least the target (~45 s), long enough for the whole VO plus a tail,
+    never outside [MIN_SECONDS, MAX_SECONDS]."""
+    t = target_seconds() if target is None else min(max(target, MIN_SECONDS), MAX_SECONDS)
+    return round(min(max(t, (vo_seconds or 0.0) + VO_TAIL, MIN_SECONDS), MAX_SECONDS), 3)
+
+
+def shot_count(total: float) -> int:
+    """How many shots a clip of `total` seconds is planned with (every shot <= MAX_SHOT_SECONDS)."""
+    import math
+    return max(math.ceil(total / MAX_SHOT_SECONDS), int(round(total / SHOT_SECONDS)))
+
+
+def min_shots() -> int:
+    import math
+    return math.ceil(MIN_SECONDS / MAX_SHOT_SECONDS)
+
+
+def fit_total(planned: float, shots_available: int) -> float:
+    """Clip length the shots we actually got can carry. Raises when that is under MIN_SECONDS."""
+    total = min(planned, shots_available * MAX_SHOT_SECONDS, MAX_SECONDS)
+    if total < MIN_SECONDS:
+        raise RuntimeError(f"only {shots_available} usable on-topic shots: {total:.1f}s < {MIN_SECONDS:.0f}s minimum; "
+                           f"not padding or shipping a short clip")
+    return round(total, 3)
 
 
 # --------------------------------------------------------------------------- helpers
@@ -547,7 +604,7 @@ def choose_segments(src: str, duration: float, need: int, shot_len: float, max_p
     lo, hi = (duration * 0.08, duration * 0.92 - shot_len) if duration > 40 else (0.2, duration - shot_len - 0.1)
     if hi <= lo:
         lo, hi = 0.0, max(0.0, duration - shot_len - 0.05)
-    n = max(need, min(max_probes, int((hi - lo) / max(shot_len, 1)) + 1))
+    n = max(need, min(max(max_probes, need + 4), int((hi - lo) / max(shot_len, 1)) + 1))
     points = [lo + (hi - lo) * (i + 0.5) / n for i in range(n)]
     scored = []
     for t in points:
@@ -557,7 +614,7 @@ def choose_segments(src: str, duration: float, need: int, shot_len: float, max_p
     scored.sort(reverse=True)
     picked: List[Tuple[float, float]] = []
     for s, t in scored:
-        if all(abs(t - p[1]) > max(8.0, shot_len * 2) for p in picked):
+        if all(abs(t - p[1]) > max(6.0, shot_len * 1.2) for p in picked):
             picked.append((s, t))
         if len(picked) >= need:
             break
@@ -575,15 +632,51 @@ def load_music(mood: Optional[str] = None) -> dict:
     return pick
 
 
-def beat_cuts(beats: List[float], shots: int = 3, total: float = TOTAL_SECONDS, min_len: float = 1.8) -> List[float]:
-    """Cut points snapped to the nearest beat around even divisions of the clip."""
+def loop_seconds(music: dict) -> float:
+    """Length of the bar-aligned loop unit (a whole number of 4-beat bars) used to extend a bed."""
+    beats = music.get("beats") or []
+    n4 = (len(beats) - 1) // 4 * 4
+    if n4 >= 4:
+        return float(beats[n4])
+    return float(music.get("seconds") or 12.0)
+
+
+def music_beats(music: dict, total: float) -> List[float]:
+    """Beat grid covering `total` seconds. Long beds use their own analysed grid; short excerpts are looped
+    on a bar boundary, so the grid repeats every loop_seconds()."""
+    beats = [float(b) for b in music.get("beats") or []]
+    if not beats or beats[-1] >= total - 0.5 or music.get("loop") is False:
+        return beats
+    unit = loop_seconds(music)
+    base = [b for b in beats if b < unit - 1e-6]
+    out: List[float] = []
+    k = 0
+    while k * unit < total:
+        out += [round(b + k * unit, 3) for b in base]
+        k += 1
+    return [b for b in out if b <= total]
+
+
+def beat_cuts(beats: List[float], shots: int = 3, total: float = 8.0, min_len: float = 1.8,
+              max_len: Optional[float] = None) -> List[float]:
+    """Cut points snapped to the nearest beat around even divisions of the clip (no shot shorter than
+    min_len or, when given, longer than max_len)."""
     cuts: List[float] = []
     for i in range(1, shots):
         target = total * i / shots
-        options = [b for b in beats if (not cuts or b - cuts[-1] >= min_len) and b >= min_len and total - b >= min_len * (shots - i)]
+        prev = cuts[-1] if cuts else 0.0
+        options = [b for b in beats if b - prev >= min_len and total - b >= min_len * (shots - i)
+                   and (max_len is None or (b - prev <= max_len and total - b <= max_len * (shots - i)))]
         cut = min(options, key=lambda b: abs(b - target)) if options else target
         cuts.append(round(cut, 3))
     return cuts
+
+
+def shot_durations(beats: List[float], shots: int, total: float) -> Tuple[List[float], List[float]]:
+    """(cuts, durations) for `shots` beat-snapped shots that sum exactly to `total`."""
+    cuts = beat_cuts(beats, shots, total, min_len=MIN_SHOT_SECONDS, max_len=MAX_SHOT_SECONDS)
+    bounds = [0.0] + cuts + [total]
+    return cuts, [round(bounds[i + 1] - bounds[i], 3) for i in range(len(bounds) - 1)]
 
 
 # --------------------------------------------------------------------------- 4b. voiceover (Kokoro, local)
@@ -623,8 +716,10 @@ def _kokoro():
     return _KOKORO
 
 
-def synth_vo(lines: List[dict], workdir: str, max_total: float = TOTAL_SECONDS - 0.7) -> Tuple[Optional[str], List[dict], dict]:
-    """Returns (wav_path or None, timed captions [{text,start,end}], info). Never raises."""
+def synth_vo(lines: List[dict], workdir: str, max_total: float = MAX_SECONDS - VO_TAIL) -> Tuple[Optional[str], List[dict], dict]:
+    """Returns (wav_path or None, timed captions [{text,start,end}], info). Never raises.
+    One natural, unhurried speed (VO_SPEED): if the script runs past max_total, trailing lines are dropped,
+    the read is never sped up."""
     try:
         import wave
         import numpy as np
@@ -635,23 +730,20 @@ def synth_vo(lines: List[dict], workdir: str, max_total: float = TOTAL_SECONDS -
             name, _, w = part.partition(":")
             vec = k.get_voice_style(name.strip()) * float(w or 1.0)
             style = vec if style is None else style + vec
-        for speed in (0.95, 1.05, 1.15):
-            clips, sr = [], 24000
-            for ln in lines:
-                audio, sr = k.create(ln["say"], voice=style, speed=speed, lang="en-us")
-                idx = np.where(np.abs(audio) > 0.01)[0]
-                if len(idx):
-                    audio = audio[max(0, idx[0] - int(0.02 * sr)): idx[-1] + int(0.06 * sr)]
-                clips.append(audio)
-            gap = 0.14
-            total = sum(len(c) for c in clips) / sr + gap * (len(clips) - 1)
-            if total <= max_total:
-                break
-        if total > max_total:  # drop trailing lines rather than rush the read
-            while len(clips) > 1 and sum(len(c) for c in clips) / sr + gap * (len(clips) - 1) > max_total:
-                clips.pop()
-                lines = lines[:len(clips)]
-        start = 0.35
+        speed = VO_SPEED
+        clips, sr = [], 24000
+        for ln in lines:
+            audio, sr = k.create(ln["say"], voice=style, speed=speed, lang="en-us")
+            idx = np.where(np.abs(audio) > 0.01)[0]
+            if len(idx):
+                audio = audio[max(0, idx[0] - int(0.02 * sr)): idx[-1] + int(0.06 * sr)]
+            clips.append(audio)
+        gap = VO_GAP
+        start = VO_LEAD
+        # drop trailing lines rather than rush the read
+        while len(clips) > 1 and start + sum(len(c) for c in clips) / sr + gap * (len(clips) - 1) > max_total:
+            clips.pop()
+            lines = lines[:len(clips)]
         caps, parts = [], []
         silence = np.zeros(int(gap * sr), dtype=np.float32)
         lead = np.zeros(int(start * sr), dtype=np.float32)
@@ -669,14 +761,18 @@ def synth_vo(lines: List[dict], workdir: str, max_total: float = TOTAL_SECONDS -
             wf.setsampwidth(2)
             wf.setframerate(sr)
             wf.writeframes(pcm)
-        return wav, caps, {"tts": "kokoro-onnx", "voice": voice, "speed": speed, "seconds": round(t, 2)}
+        spoken_end = round(t - gap, 2)
+        return wav, caps, {"tts": "kokoro-onnx", "voice": voice, "speed": speed, "seconds": spoken_end,
+                           "lines_used": len(lines)}
     except Exception as exc:
         logger.warning("%s voiceover unavailable (%s); captions only", MARKER, exc)
         caps, t = [], 0.4
         for ln in lines:
-            caps.append({"text": ln["show"], "start": round(t, 2), "end": round(t + 2.3, 2)})
-            t += 2.4
-        return None, caps, {"tts": "none", "error": str(exc)[:200]}
+            if t + 4.2 > max_total:
+                break
+            caps.append({"text": ln["show"], "start": round(t, 2), "end": round(t + 4.0, 2)})
+            t += 4.4
+        return None, caps, {"tts": "none", "error": str(exc)[:200], "seconds": round(t, 2)}
 
 
 # --------------------------------------------------------------------------- 5. edit / render
@@ -790,7 +886,9 @@ def _draw(workdir: str, text: str, font: str, size: int, y: str, start: float, e
 
 def render(shots: List[dict], vo_wav: Optional[str], captions: List[dict], music: dict, hook: str, credit: str,
            out_path: str, orientation: str, workdir: str) -> dict:
-    """shots: [{path, kind, start, dur}] already local. Writes a CapCut/Meta-safe MP4."""
+    """shots: [{path, kind, start, dur}] already local. Writes a CapCut/Meta-safe MP4 exactly sum(dur) long.
+    Short music beds are looped on a bar boundary so the bed covers the whole clip."""
+    total = round(sum(float(s["dur"]) for s in shots), 3)
     font = _font(True)
     vertical = orientation == "vertical"
     W, H = (1080, 1920) if vertical else (1920, 1080)
@@ -806,7 +904,7 @@ def render(shots: List[dict], vo_wav: Optional[str], captions: List[dict], music
         # exact integer frame budget per shot (cumulative rounding), padded by cloning so a short source can't drop frames
         f0, f1 = round(sum(x["dur"] for x in shots[:i]) * FPS), round(sum(x["dur"] for x in shots[:i + 1]) * FPS)
         if i == len(shots) - 1:
-            f1 = int(round(TOTAL_SECONDS * FPS))
+            f1 = int(round(total * FPS))
         fc.append(f"[{i}:v]{_shot_filter(s['kind'], bw, bh, s['dur'], i, focus)},setpts=PTS-STARTPTS,"
                   f"tpad=stop_mode=clone:stop_duration=1,trim=end_frame={f1 - f0},setpts=N/({FPS}*TB)[s{i}]")
     n = len(shots)
@@ -822,30 +920,36 @@ def render(shots: List[dict], vo_wav: Optional[str], captions: List[dict], music
     draws = [_draw(workdir, _wrap(hook, wrap_hook), font, hook_size, hook_y, 0.0, HOOK_SECONDS, border=5, fade=0.12)]
     for c in captions:
         text, size = fit_caption(c["text"], wrap_cap, cap_size)
-        draws.append(_draw(workdir, text, font, size, cap_y, c["start"], min(c["end"], TOTAL_SECONDS), border=3, plate=True))
+        draws.append(_draw(workdir, text, font, size, cap_y, c["start"], min(c["end"], total), border=3, plate=True))
     if credit:
         ctext, csize = screen_credit(credit, int((1000 if vertical else 1800) / (cred_size * 0.52)), cred_size)
         if "\n" in ctext and not vertical:
             cred_y = f"h-{58 + int(csize * 1.2)}"
-        draws.append(_draw(workdir, ctext, _font(False) or font, csize, cred_y, 0.0, TOTAL_SECONDS,
+        draws.append(_draw(workdir, ctext, _font(False) or font, csize, cred_y, 0.0, total,
                            alpha=0.7, border=2, fade=0.01))
-    fc.append(f"[base]{','.join(draws)},fade=t=out:st={TOTAL_SECONDS - 0.35}:d=0.35[v]")
+    fc.append(f"[base]{','.join(draws)},fade=t=out:st={total - 0.35}:d=0.35[v]")
     # audio: CC0 music bed (starts on a downbeat), ducked under the Kokoro VO, loudness-normalised
     mi = n
     cmd += ["-i", music["path"]]
-    music_chain = f"[{mi}:a]atrim=0:{TOTAL_SECONDS},asetpts=PTS-STARTPTS,aresample=44100,volume=0.9,afade=t=out:st={TOTAL_SECONDS - 0.6}:d=0.6"
+    music_chain = f"[{mi}:a]aresample=44100,"
+    if music.get("loop") is not False and (music.get("seconds") or 12.0) < total:
+        unit = loop_seconds(music)
+        music_chain += (f"atrim=0:{unit:.3f},asetpts=PTS-STARTPTS,afade=t=in:d=0.01,afade=t=out:st={unit - 0.015:.3f}:d=0.015,"
+                        f"aloop=loop=-1:size={int(round(unit * 44100))},")
+    music_chain += (f"atrim=0:{total},asetpts=PTS-STARTPTS,volume=0.9,"
+                    f"afade=t=out:st={total - 1.2:.3f}:d=1.2")
     if vo_wav:
         cmd += ["-i", vo_wav]
         fc.append(f"[{mi + 1}:a]aresample=44100,highpass=f=70,acompressor=threshold=0.1:ratio=3:attack=5:release=80,"
-                  f"volume=1.6,apad=whole_dur={TOTAL_SECONDS}[vo]")
+                  f"volume=1.6,apad=whole_dur={total}[vo]")
         fc.append("[vo]asplit=2[vo1][vosc]")
         fc.append(f"{music_chain}[mus]")
         fc.append("[mus][vosc]sidechaincompress=threshold=0.04:ratio=7:attack=15:release=350:makeup=1[duck]")
         fc.append("[duck][vo1]amix=inputs=2:duration=first:normalize=0,loudnorm=I=-14:TP=-1.5:LRA=9,"
-                  f"aresample=44100,atrim=0:{TOTAL_SECONDS}[a]")
+                  f"aresample=44100,atrim=0:{total}[a]")
     else:
-        fc.append(f"{music_chain},loudnorm=I=-14:TP=-1.5:LRA=9,aresample=44100,atrim=0:{TOTAL_SECONDS}[a]")
-    cmd += ["-filter_complex", ";".join(fc), "-map", "[v]", "-map", "[a]", "-t", f"{TOTAL_SECONDS}",
+        fc.append(f"{music_chain},loudnorm=I=-14:TP=-1.5:LRA=9,aresample=44100,atrim=0:{total}[a]")
+    cmd += ["-filter_complex", ";".join(fc), "-map", "[v]", "-map", "[a]", "-t", f"{total}",
             "-r", str(FPS), "-c:v", "libx264", "-profile:v", "main", "-level:v", "4.0", "-pix_fmt", "yuv420p",
             "-preset", os.environ.get("FOOTAGE_X264_PRESET", "slow"), "-crf", "18", "-maxrate", "12M", "-bufsize", "24M",
             "-g", str(FPS * 2), "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2",
@@ -899,16 +1003,22 @@ def pinned_segments(src: str, duration: float, near: List[float], shot_len: floa
     return out
 
 
-def plan_shots(cands: List[dict], durs: List[float], workdir: str, log: List[str],
+def plan_shots(cands: List[dict], need: int, workdir: str, log: List[str],
                resolve_nasa_fn=resolve_nasa, resolve_archive_fn=resolve_archive,
-               segment_fn=None, probe_fn=None, crop_fn=None, pins: Optional[Dict[str, List[float]]] = None) -> List[Tuple[dict, dict]]:
+               segment_fn=None, probe_fn=None, crop_fn=None, pins: Optional[Dict[str, List[float]]] = None,
+               seg_len: float = SEGMENT_SECONDS, min_need: Optional[int] = None,
+               localize_fn=None) -> List[Tuple[dict, dict]]:
     """Probe up to FOOTAGE_MAX_SOURCES relevant videos, score every candidate segment (exposure, contrast,
     motion, sharpness, no cuts inside), weight by source resolution, then take the best segments globally
-    (max 2 per source while others are available). Stills (Ken Burns) only fill what video can't."""
+    (max 2 per source while others are available, then more per source). Stills (Ken Burns) only fill what
+    video can't. Every shot is cut `seg_len` long (the edit trims it to its beat-snapped length).
+    Returns up to `need` shots; raises if fewer than `min_need` (default: need) are usable."""
     segment_fn = segment_fn or choose_segments
     probe_fn = probe_fn or probe
     crop_fn = crop_fn or detect_crop
-    need = len(durs)
+    localize_fn = localize_fn or localize
+    min_need = need if min_need is None else min_need
+    durs = [seg_len] * need
     pool: List[Tuple[float, dict, str, float]] = []  # (score, cand, src, start)
     stills: List[Tuple[dict, str]] = []
     probed = 0
@@ -949,6 +1059,9 @@ def plan_shots(cands: List[dict], durs: List[float], workdir: str, log: List[str
                 segs = pinned_segments(src, dur_s, pinned, max(durs), c["crop"])
                 # keep the library's narrative order: first pin = hook shot
                 segs = [(t, 1000.0 - k) for k, (t, _) in enumerate(segs)]
+                # a 31-55 s clip needs more than the hand-picked moments: add gated segments from the same film
+                extra = segment_fn(src, dur_s, need, max(durs), crop=c["crop"])
+                segs += [(t, sc) for t, sc in extra if all(abs(t - p) > max(durs) for p, _ in segs)]
             else:
                 segs = segment_fn(src, dur_s, need, max(durs), crop=c["crop"])
             res_w = 1.0 if pinned else min(1.0, (height / 1080.0)) ** 0.5
@@ -975,7 +1088,7 @@ def plan_shots(cands: List[dict], durs: List[float], workdir: str, log: List[str
         i = len(shots)
         dur = durs[i]
         try:
-            local = localize(c, src, start, dur, workdir, i)
+            local = localize_fn(c, src, start, dur, workdir, i)
         except Exception as exc:
             log.append(f"localize failed {c['provider']} {c['title'][:50]} @{start:.1f}s: {exc}"[:220])
             continue
@@ -984,8 +1097,8 @@ def plan_shots(cands: List[dict], durs: List[float], workdir: str, log: List[str
         rec.update({"file_url": src, "segment_start_s": round(start, 2), "segment_seconds": round(dur, 2),
                     "ken_burns": c["kind"] == "image"})
         shots.append((local, rec))
-    if len(shots) < need:
-        raise RuntimeError(f"only {len(shots)} usable shots for {need} slots")
+    if len(shots) < min_need:
+        raise RuntimeError(f"only {len(shots)} usable on-topic shots (need {min_need} for {MIN_SECONDS:.0f}s)")
     return shots
 
 
@@ -1014,12 +1127,22 @@ def produce_footage(out_dir: str, viral: Optional[dict] = None, avoid_keys: Opti
                 log += errs
                 log.append(f"topic {topic['key']} (viral score {pick.get('score')}): {len(cands)} relevant candidates")
                 music = load_music(topic.get("mood"))
-                cuts = beat_cuts(music["beats"])
-                bounds = [0.0] + cuts + [TOTAL_SECONDS]
-                durs = [round(bounds[i + 1] - bounds[i], 3) for i in range(len(bounds) - 1)]
+                # length comes from the unhurried VO + footage, never from autonomous_video_duration
+                vo_wav, captions, vo_info = synth_vo(topic["vo"], workdir)
+                planned = plan_total(float(vo_info.get("seconds") or 0.0))
                 pins = {p["title"]: p["near"] for p in topic.get("pinned", [])}
                 cands.sort(key=lambda c: (c.get("title") not in pins,))
-                shots = plan_shots(cands, durs, workdir, log, pins=pins)
+                shots = plan_shots(cands, shot_count(planned), workdir, log, pins=pins, min_need=min_shots())
+                total = fit_total(planned, len(shots))
+                n = shot_count(total) if len(shots) >= shot_count(total) else len(shots)
+                shots = shots[:n]
+                if float(vo_info.get("seconds") or 0.0) + VO_TAIL > total:  # less footage than VO: drop trailing lines
+                    vo_wav, captions, vo_info = synth_vo(topic["vo"], workdir, max_total=total - VO_TAIL)
+                cuts, durs = shot_durations(music_beats(music, total), n, total)
+                for (loc, rec), d in zip(shots, durs):
+                    loc["dur"] = d
+                    rec["segment_seconds"] = d
+                log.append(f"length planned {planned:.1f}s, final {total:.1f}s, {n} shots, VO {vo_info.get('seconds')}s")
                 break
             except Exception as exc:
                 last_err = exc
@@ -1028,7 +1151,6 @@ def produce_footage(out_dir: str, viral: Optional[dict] = None, avoid_keys: Opti
             raise RuntimeError(f"no usable footage for any topic: {last_err}; log={log[-6:]}")
         sources = [rec for _, rec in shots]
         concept = build_concept(topic, sources, pick)
-        vo_wav, captions, vo_info = synth_vo(topic["vo"], workdir)
         name = name or f"g2_footage_{uuid.uuid4().hex}"
         vertical = os.path.join(out_dir, f"{name}.mp4")
         landscape = os.path.join(out_dir, f"{name}_16x9.mp4")
@@ -1038,8 +1160,12 @@ def produce_footage(out_dir: str, viral: Optional[dict] = None, avoid_keys: Opti
         credit = concept["footage_credit"]
         pv = render(locals_, vo_wav, captions, music, topic["on_screen_hook"], credit, vertical, "vertical", workdir)
         pl = render(locals_, vo_wav, captions, music, topic["on_screen_hook"], credit, landscape, "landscape", workdir)
+        for label, meta in (("9:16", pv), ("16:9", pl)):  # hard gate on the real files
+            if not length_ok(meta.get("duration")):
+                raise RuntimeError(f"{label} render is {meta.get('duration')}s, outside {MIN_SECONDS:.0f}-{MAX_SECONDS:.0f}s; not shipping")
         info = {
-            "engine": "footage", "footage_mode": VERSION, "media_source": "archival_footage", "format": "single_8s",
+            "engine": "footage", "footage_mode": VERSION, "media_source": "archival_footage", "format": "footage_short",
+            "duration_s": round(float(pv["duration"]), 2), "length_rule_s": [MIN_SECONDS, MAX_SECONDS],
             "cost_usd": 0.0, "cost": {"cap": 0.0, "total": 0.0, "items": []},
             "concept_source": "footage_template (no LLM)", "topic_key": topic["key"],
             "viral_match": concept["viral_match"], "footage_sources": sources,

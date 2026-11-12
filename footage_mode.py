@@ -345,7 +345,12 @@ def named_in(article: str, title: str) -> bool:
 
 
 def _sentences(text: str) -> List[str]:
-    text = re.sub(r"\([^()]*\)", "", text or "")
+    # plain-format section headings sit on their own line with no end punctuation ("Flight", "Behavior and diet")
+    text = "\n".join(ln for ln in (text or "").split("\n") if re.search(r"[.!?\"')]\s*$", ln.strip()))
+    text = re.sub(r"\b([ap])\.m\.", r"\1m", text)  # "4:00 p.m." is not a sentence end
+    text = re.sub(r"\b([A-Z])\.\s(?=[A-Z])", r"\1 ", text)  # initials: "W. Douglas Burden"
+    text = re.sub(r"\b(St|Dr|Mr|Mrs|Ms|Jr|Sr|Mt|Gen|Col|Lt|Capt|No|vs|c|ca)\.\s", r"\1 ", text)
+    text = re.sub(r"\([^()]*\)", "", text)
     text = re.sub(r"\[[^\]]*\]", "", text)
     text = re.sub(r"\s+([,.;:])", r"\1", " ".join(text.split()))
     out = re.split(r"(?<=[.!?])\s+(?=[A-Z0-9\"'])", text)
@@ -376,16 +381,51 @@ def _chunks(sentence: str, limit: int = 56) -> List[str]:
     return [x for c in out for x in _halve(c, limit) if x]
 
 
-def script_from_text(text: str, min_words: int = 60, max_words: int = 105) -> List[dict]:
-    """VO lines (spoken years, on-screen original) from a plain-text lead. [] if too thin for a 31 s clip."""
-    lines, words = [], 0
-    for s in _sentences(text):
+_APPOSITIVE = re.compile(r",\s+(?:also|commonly|sometimes|often|formerly|officially)\s+(?:known as|called|named)\b[^,]*,", re.I)
+_TRAILING = re.compile(r"(?:,|\s+-|;)\s*(?:including|though|although|as well as|such as|as demonstrated by|consisting of|"
+                       r"which|whereas|while|especially|particularly|mainly|primarily|with|making|resulting in)\b[^.]*", re.I)
+CAPTION_MAX_CHARS = 84  # one complete sentence per caption: <= 3 lines at the 9:16 wrap width
+
+
+def tighten(sentence: str) -> str:
+    """A Wikipedia sentence cut to its main clause (no appositives or trailing asides), still a full sentence."""
+    s = _APPOSITIVE.sub("", sentence)
+    s = re.sub(r";.*$", ".", s)
+    s = _TRAILING.sub("", s)
+    s = re.sub(r"\s+([,.;:])", r"\1", " ".join(s.split())).rstrip(",;: ")
+    if not s.endswith((".", "!", "?")):
+        s = s.rstrip(".") + "."
+    return s
+
+
+# etymology / naming trivia reads badly as narration over footage
+_NAME_LORE = re.compile(r"\b(etymolog\w*|derived from|stems from|epithet|vernacular|latin|greek|old english|named by|"
+                        r"the (?:generic |common |scientific )?name|binomial|taxonom\w*|nomenclature)\b", re.I)
+_DANGLING = re.compile(r"^(it|its|they|their|them|this|these|those|that|such|he|she|his|her|both|also|however|"
+                       r"under their|in addition|as a result)\b", re.I)
+
+
+def script_from_text(text: str, min_words: int = 60, max_words: int = 100, name: str = "") -> List[dict]:
+    """A short documentary VO from a Wikipedia article (lead first): each line is one tightened, complete sentence
+    short enough to sit on screen whole (no mid-sentence captions or pauses). The first line names the subject,
+    and a line opening with a pronoun is used only right after the sentence it refers to. Years are spoken out.
+    [] if too thin for a 31 s clip."""
+    lines, words, prev_kept = [], 0, False
+    name_re = re.compile(r"\b" + re.escape(name.split()[0][:5]), re.I) if name else None
+    for raw in _sentences(text):
+        s = tighten(raw)
         n = len(s.split())
+        ok = (5 <= n <= 17 and len(s) <= CAPTION_MAX_CHARS and not s.count('"') % 2
+              and not re.search(r"[^\x00-\u024F\u2010-\u2030]", s) and not _NAME_LORE.search(s))
+        ok = ok and not (_DANGLING.search(s) and (not prev_kept or not lines))
+        ok = ok and (bool(lines) or name_re is None or bool(name_re.search(s)))
+        prev_kept = False
+        if not ok:
+            continue
         if words and words + n > max_words:
             break
-        # one VO line per sentence (natural read, no mid-sentence pauses); captions step through its pieces
-        lines.append({"say": spoken(s), "show": s, "parts": _chunks(s)})
-        words += n
+        lines.append({"say": spoken(s), "show": s, "parts": [s]})
+        words, prev_kept = words + n, True
     return lines if words >= min_words else []
 
 
@@ -438,7 +478,7 @@ def _wiki_page(pick: str, get: Callable = _get) -> Optional[dict]:
             cat = ""
     return {"title": page.get("title") or pick, "description": page.get("description") or "", "lead": lead,
             "commons_category": cat,
-            "text": full[:6000], "url": f"https://en.wikipedia.org/wiki/{(page.get('title') or pick).replace(' ', '_')}"}
+            "text": full[:15000], "url": f"https://en.wikipedia.org/wiki/{(page.get('title') or pick).replace(' ', '_')}"}
 
 
 def subject_ok(subj: dict) -> Tuple[bool, str]:
@@ -455,10 +495,39 @@ def subject_ok(subj: dict) -> Tuple[bool, str]:
     return True, ""
 
 
+# hashtags + comment question by subject kind (scanned subjects are not all history: wolves, cheetahs, volcanoes...)
+SUBJECT_STYLE = {
+    "wildlife": (["#Wildlife", "#Nature", "#RealFootage"], "Which animal should we make a film about next?"),
+    "nature": (["#Nature", "#Earth", "#RealFootage"], "Which natural wonder should we cover next?"),
+    "space": (["#Space", "#Science", "#RealFootage"], "Which mission or discovery should we cover next?"),
+    "tech": (["#Engineering", "#Science", "#RealFootage"], "Which machine or invention should we cover next?"),
+    "history": (["#History", "#ArchivalFootage", "#RealFootage"], "Which moment in history should we cut next?"),
+    "general": (["#Documentary", "#RealFootage", "#DidYouKnow"], "What should we make a film about next?"),
+}
+
+
+def subject_kind(subj: dict) -> str:
+    d = f"{subj.get('description', '')} {(subj.get('lead') or '')[:300]}".lower()
+    if re.search(r"\b(species|genus|family of|subfamily|mammal|bird|reptile|amphibian|fish|insect|spider|shark|whale|"
+                 r"predator|carnivor|herbivor|canine|feline|felid|rodent|primate|animal|cat|dog|bear|snake)s?\b", d):
+        return "wildlife"
+    if re.search(r"\b(spacecraft|space|rocket|planet|moon|star|galaxy|nasa|astronaut|orbit|comet|asteroid|telescope)\b", d):
+        return "space"
+    if re.search(r"\b(battle|war|disaster|attack|expedition|siege|revolution|empire|dynasty|ancient|century|historic)\b", d):
+        return "history"
+    if re.search(r"\b(volcano|mountain|river|waterfall|glacier|desert|forest|ocean|storm|hurricane|tornado|earthquake|"
+                 r"weather|reef|cave|canyon|aurora|lake)s?\b", d):
+        return "nature"
+    if re.search(r"\b(aircraft|airship|locomotive|ship|engine|machine|vehicle|car|bridge|tower|invention|robot)s?\b", d):
+        return "tech"
+    return "general"
+
+
 def topic_from_subject(subj: dict) -> Optional[dict]:
     """A footage topic (same shape as footage_topics.TOPICS) for a viral subject, scripted from its Wikipedia lead."""
     title = re.sub(r"\s*\([^)]*\)$", "", subj["title"]).strip()
-    vo = script_from_text(subj.get("lead") or "") or script_from_text(subj.get("text") or "")
+    name = re.sub(r"\s*\([^)]*\)$", "", subj["title"]).strip()
+    vo = script_from_text(subj.get("text") or subj.get("lead") or "", name=name)
     if not vo:
         return None
     years = [int(y) for y in _YEAR.findall(" ".join(v["show"] for v in vo[:3])) if int(y) <= datetime.now().year]
@@ -474,6 +543,8 @@ def topic_from_subject(subj: dict) -> Optional[dict]:
             else "cinematic" if re.search(r"space|rocket|launch|nasa|moon|mars|orbit|satellite|flight|aircraft", lower)
             else "reveal")
     tag = "#" + re.sub(r"[^A-Za-z0-9]", "", title.title())[:28]
+    kind = subject_kind(subj)
+    tags, question = SUBJECT_STYLE[kind]
     space = bool(re.search(r"nasa|space|rocket|moon|mars|apollo|shuttle|satellite|orbit|launch|astronaut|telescope", lower))
     return {
         "key": "viral-" + re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:48],
@@ -481,7 +552,7 @@ def topic_from_subject(subj: dict) -> Optional[dict]:
         "on_screen_hook": f"{hook_title} · {year}" if year else hook_title,
         "hook": vo[0]["show"], "vo": vo,
         "lines": [f"Real archival footage: {title}."],
-        "hashtags": [tag], "mood": mood, "match": phrase, "related": None,
+        "hashtags": [tag] + tags, "comment_question": question, "kind": kind, "mood": mood, "match": phrase, "related": None,
         "require": require, "exclude": DYNAMIC_EXCLUDE,
         # with a curated Commons category, search only inside it (a name search drags in homonyms:
         # "Wolf Creek Falls Trail", "Wolf Lowry (1917)"); otherwise fall back to a strict name search
@@ -554,16 +625,20 @@ def build_concept(topic: dict, sources: List[dict], viral_pick: Optional[dict] =
         if label and label not in orgs:
             orgs.append(label)
     credit = "Footage: " + "; ".join(orgs) if orgs else ""
-    lines = (list(topic.get("lines") or [])[:1] + ([credit] if credit else [])
-             + ([topic["text_credit"] + (f": {topic['wikipedia']}" if topic.get("wikipedia") else "")]
-                if topic.get("text_credit") else []))
-    tags = list(dict.fromkeys(topic.get("hashtags", []) + footage_topics.FOOTAGE_HASHTAGS))[:5]
+    # posted captions keep 2 lines of <=110 chars (growth_v2.build_captions): the short Wikipedia text credit rides
+    # on line 1 so it is never clipped off by a long footage credit (the article URL is in info["wikipedia"])
+    first = list(topic.get("lines") or [])[:1]
+    if topic.get("text_credit"):
+        first = [" ".join(x.rstrip(".") + "." for x in first + [topic["text_credit"]])]
+    lines = first + ([credit] if credit else [])
+    base = [] if topic.get("source") == "viral_scan" else footage_topics.FOOTAGE_HASHTAGS
+    tags = list(dict.fromkeys(topic.get("hashtags", []) + base))[:5]
     return {
         "topic": topic["topic"], "topic_key": topic["key"].replace("-", " "),
         "title_line": topic["title_line"], "on_screen_hook": topic["on_screen_hook"], "hook": topic["hook"],
         "lines": lines, "hashtags": tags,
         "linkedin_angle": "Real archival footage, re-edited for 9:16 and 16:9. No AI generation, no paid APIs.",
-        "comment_question": "Which moment in history should we cut next?",
+        "comment_question": topic.get("comment_question") or "Which moment in history should we cut next?",
         "vo": topic["vo"], "concept_source": "footage_template", "footage_credit": credit,
         "topic_source": topic.get("source") or "library", "wikipedia": topic.get("wikipedia"),
         "text_credit": topic.get("text_credit"),
@@ -1197,6 +1272,13 @@ def fit_caption(text: str, width: int, size: int) -> Tuple[str, int]:
         score = max(len(a), len(b))
         if best is None or score < best[0]:
             best = (score, f"{a}\n{b}")
+    if best[0] > width * 1.15 and len(words) >= 6:  # a long complete sentence: three balanced lines, larger type
+        for i in range(1, len(words) - 1):
+            for j in range(i + 1, len(words)):
+                a, b, c = " ".join(words[:i]), " ".join(words[i:j]), " ".join(words[j:])
+                score = max(len(a), len(b), len(c))
+                if score < best[0]:
+                    best = (score, f"{a}\n{b}\n{c}")
     return best[1], size if best[0] <= width else int(size * width / best[0])
 
 

@@ -539,7 +539,16 @@ _LEAD = ("The Hindenburg disaster was an airship accident that occurred on May 6
          "worker on the ground. The disaster was the subject of newsreel coverage, photographs and Herbert Morrison's recorded "
          "radio eyewitness reports from the landing field, which were broadcast the next day. A variety of theories have been "
          "put forward for both the cause of ignition and the initial fuel for the ensuing fire. The event shattered public "
-         "confidence in the giant, passenger-carrying rigid airship and marked the abrupt end of the airship era.")
+         "confidence in the giant, passenger-carrying rigid airship and marked the abrupt end of the airship era.\n\n\n"
+         "Flight\n"
+         "The Hindenburg left Frankfurt on the evening of May 3, 1937. "
+         "Strong headwinds slowed the crossing of the Atlantic. "
+         "Storms over the landing field delayed the arrival by several hours. "
+         "At 7:25 p.m., the airship caught fire and quickly became engulfed in flames. "
+         "The tail struck the ground first, followed by the burning hull. "
+         "Ground crew and survivors ran from the wreck as the frame collapsed. "
+         "Within a minute, the giant ship lay burning on the field. "
+         "Newsreel cameras recorded the whole fire from start to finish.")
 
 
 def _fake_wiki(pages):
@@ -561,9 +570,14 @@ def test_year_words_and_spoken():
 
 
 def test_script_from_text_is_long_enough_and_caption_sized():
-    vo = fm.script_from_text(_LEAD)
-    assert 60 <= sum(len(v["show"].split()) for v in vo) <= 110
-    assert all(len(x) <= 60 for v in vo for x in v["parts"]) and "(" not in " ".join(v["show"] for v in vo)
+    vo = fm.script_from_text(_LEAD, name="Hindenburg disaster")
+    shows = [v["show"] for v in vo]
+    assert 60 <= sum(len(v.split()) for v in shows) <= 100
+    # every caption is one whole, tightened sentence that fits on screen; no headings, no "p.m." split, no asides
+    assert all(v["parts"] == [v["show"]] and len(v["show"]) <= fm.CAPTION_MAX_CHARS for v in vo)
+    assert all(s.endswith(".") and s[0].isupper() for s in shows) and "(" not in " ".join(shows)
+    assert "Hindenburg" in shows[0] and not any(s.startswith("Flight") for s in shows)
+    assert "At 7:25 pm, the airship caught fire and quickly became engulfed in flames." in shows
     assert fm.script_from_text("Too short. Not enough here to narrate.") == []
 
 
@@ -659,3 +673,27 @@ def test_scanned_subject_caps_clips_per_source(tmp_path):
     assert len(fm.plan_shots(cands, 11, str(tmp_path), [], min_need=1, **kw)) == 11  # library topics: unchanged
     with pytest.raises(RuntimeError, match="usable on-topic shots"):
         fm.plan_shots(cands, 11, str(tmp_path), [], min_need=fm.min_shots(), max_per_source=2, **kw)
+
+
+def test_tighten_keeps_main_clause():
+    assert fm.tighten("The wolf, also known as the grey wolf or gray wolf, is a canine native to Eurasia.") == \
+        "The wolf is a canine native to Eurasia."
+    assert fm.tighten("More than thirty subspecies have been recognized, including the dog and dingo, though grey "
+                      "wolves include only wild subspecies.") == "More than thirty subspecies have been recognized."
+
+
+def test_scanned_subject_copy_matches_its_kind_not_history():
+    lead = _LEAD.replace("Hindenburg disaster was an airship accident", "cheetah is a large cat").replace("Hindenburg", "cheetah")
+    t = fm.topic_from_subject({"title": "Cheetah", "description": "Large cat species", "commons_category": "Acinonyx jubatus",
+                               "url": "https://en.wikipedia.org/wiki/Cheetah", "lead": lead, "text": lead})
+    assert t["kind"] == "wildlife"
+    c = fm.build_concept(t, [{"credit_short": "Wikimedia Commons (CC BY 4.0)"}])
+    assert "#History" not in c["hashtags"] and "#Wildlife" in c["hashtags"] and "history" not in c["comment_question"].lower()
+    assert len(c["lines"]) == 2 and "Wikipedia (CC BY-SA 4.0)" in c["lines"][0] and len(c["lines"][0]) <= 110
+    lib = fm.build_concept(fm.footage_topics.TOPICS[0], [])
+    assert "#History" in lib["hashtags"]
+
+
+def test_fit_caption_three_lines_for_long_sentence():
+    text, size = fm.fit_caption("The global cheetah population was estimated at 6,517 mature individuals in 2021.", 26, 56)
+    assert text.count("\n") == 2 and size >= 48

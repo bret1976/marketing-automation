@@ -146,9 +146,19 @@ def _run(cmd: List[str], timeout: int = 300) -> subprocess.CompletedProcess:
 def _get(url: str, params: Optional[dict] = None, timeout: int = 25, headers: Optional[dict] = None) -> requests.Response:
     h = {"User-Agent": UA}
     h.update(headers or {})
-    r = requests.get(url, params=params, timeout=timeout, headers=h)
-    r.raise_for_status()
-    return r
+    for attempt in range(3):  # Wikipedia/Commons drop connections or 429 under load: brief retries, then raise
+        try:
+            r = requests.get(url, params=params, timeout=timeout, headers=h)
+            if r.status_code in (429, 500, 502, 503, 504) and attempt < 2:
+                time.sleep(2 + 3 * attempt)
+                continue
+            r.raise_for_status()
+            return r
+        except (requests.ConnectionError, requests.Timeout):
+            if attempt == 2:
+                raise
+            time.sleep(2 + 3 * attempt)
+    raise RuntimeError("unreachable")
 
 
 def _strip_html(s: Any) -> str:

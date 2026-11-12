@@ -2225,7 +2225,8 @@ def health() -> dict:
         out["autopilot_format"] = stitched_shorts.autopilot_format(settings)
         out["shorts_cost_cap_usd"] = stitched_shorts.cost_cap(settings)
         out["single_cost_cap_usd"] = single_cost_cap(settings)
-        out["video_engines"] = engine_ladder()
+        out["video_engines"] = ["footage"] if footage_mode.enabled() else engine_ladder()
+        out["footage_mode"] = footage_mode.status()
         out["platforms"] = resolve_platforms(settings)[0]
     except Exception as exc:
         out["platforms_error"] = str(exc)[:200]

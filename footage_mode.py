@@ -49,6 +49,14 @@ VIDEO_EXT = (".mp4", ".webm", ".ogv", ".mov", ".m4v", ".mpeg", ".mpg")
 IMAGE_EXT = (".jpg", ".jpeg", ".png", ".tif", ".tiff")
 
 
+def status() -> dict:
+    """Read-only health block: engine flag and whether the Kokoro files exist (no synthesis, no network)."""
+    model, voices = os.environ.get("KOKORO_MODEL") or "", os.environ.get("KOKORO_VOICES") or ""
+    return {"enabled": enabled(), "version": VERSION,
+            "kokoro_model": bool(model and os.path.exists(model)), "kokoro_voices": bool(voices and os.path.exists(voices)),
+            "viral_source": (os.environ.get("VIRAL_SOURCE") or "").strip().lower() or "default"}
+
+
 def enabled() -> bool:
     return (os.environ.get("VIDEO_ENGINE") or "").strip().lower() == "footage"
 

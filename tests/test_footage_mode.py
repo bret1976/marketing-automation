@@ -686,7 +686,7 @@ def test_scanned_subject_copy_matches_its_kind_not_history():
     lead = _LEAD.replace("Hindenburg disaster was an airship accident", "cheetah is a large cat").replace("Hindenburg", "cheetah")
     t = fm.topic_from_subject({"title": "Cheetah", "description": "Large cat species", "commons_category": "Acinonyx jubatus",
                                "url": "https://en.wikipedia.org/wiki/Cheetah", "lead": lead, "text": lead})
-    assert t["kind"] == "wildlife"
+    assert t["kind"] == "wildlife" and "·" not in t["on_screen_hook"]
     c = fm.build_concept(t, [{"credit_short": "Wikimedia Commons (CC BY 4.0)"}])
     assert "#History" not in c["hashtags"] and "#Wildlife" in c["hashtags"] and "history" not in c["comment_question"].lower()
     assert len(c["lines"]) == 2 and "Wikipedia (CC BY-SA 4.0)" in c["lines"][0] and len(c["lines"][0]) <= 110

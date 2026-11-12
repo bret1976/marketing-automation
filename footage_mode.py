@@ -559,7 +559,8 @@ def topic_from_subject(subj: dict) -> Optional[dict]:
     return {
         "key": "viral-" + re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:48],
         "topic": title, "title_line": f"{title}: Real Footage",
-        "on_screen_hook": f"{hook_title} · {year}" if year else hook_title,
+        # a year only for dated subjects (events, missions, machines): "CHEETAH · 2022" would mislead
+        "on_screen_hook": f"{hook_title} · {year}" if year and kind in ("history", "space", "tech") else hook_title,
         "hook": vo[0]["show"], "vo": vo,
         "lines": [f"Real archival footage: {title}."],
         "hashtags": [tag] + tags, "comment_question": question, "kind": kind, "mood": mood, "match": phrase, "related": None,

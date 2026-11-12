@@ -78,8 +78,13 @@ def _strip_html(s: Any) -> str:
     return " ".join(re.sub(r"<[^>]+>", " ", str(s or "")).split())
 
 
+def _ua(src: str) -> List[str]:
+    """-user_agent only for network inputs (ffmpeg rejects it for local files)."""
+    return ["-user_agent", UA] if str(src).startswith(("http://", "https://")) else []
+
+
 def probe(src: str, timeout: int = 60) -> dict:
-    res = _run([_bin("ffprobe"), "-v", "error", "-user_agent", UA, "-show_entries",
+    res = _run([_bin("ffprobe"), "-v", "error", *_ua(src), "-show_entries",
                 "format=duration:stream=codec_type,width,height,codec_name,profile,level,pix_fmt,r_frame_rate,sample_rate,channels",
                 "-of", "json", src], timeout=timeout)
     data = json.loads(res.stdout or "{}")
@@ -406,7 +411,7 @@ def _gray_frames(src: str, start: float, seconds: float = 2.4, fps: float = 3.0,
     vf = (f"crop={crop}," if crop else "") + f"fps={fps},scale={w}:{h},format=gray"
     data = b""
     for attempt in range(2):
-        res = subprocess.run([_bin("ffmpeg"), "-v", "error", "-user_agent", UA, "-ss", f"{start:.2f}", "-i", src, "-t", f"{seconds:.2f}",
+        res = subprocess.run([_bin("ffmpeg"), "-v", "error", *_ua(src), "-ss", f"{start:.2f}", "-i", src, "-t", f"{seconds:.2f}",
                               "-vf", vf, "-f", "rawvideo", "-"], capture_output=True, timeout=120)
         data = res.stdout or b""
         if data or b"429" not in (res.stderr or b""):
@@ -641,15 +646,58 @@ GRADE = ("eq=contrast=1.07:saturation=0.80:gamma=1.03:brightness=0.01,"
          "vignette=angle=PI/7")
 
 
-def _shot_filter(kind: str, w: int, h: int, dur: float, idx: int) -> str:
+def focus_x(path: str, kind: str, out_aspect: float = 9 / 16, samples: int = 6) -> float:
+    """Horizontal centre (0..1) of the action for a portrait crop: the crop-width window with the most
+    edge + motion energy, measured on frames across the shot. 0.5 if it can't be measured."""
+    import numpy as np
+    try:
+        meta = probe(path)
+        w, h = meta["width"], meta["height"]
+        if not w or not h:
+            return 0.5
+        dur = max(0.5, float(meta["duration"] or 1.0)) if kind != "image" else 0.5
+        frames = _gray_frames(path, 0.0, seconds=dur, fps=samples / dur, w=FRAME_W, h=FRAME_H)
+        if not frames:
+            return 0.5
+        arr = np.stack([np.frombuffer(f, dtype=np.uint8).reshape(FRAME_H, FRAME_W).astype(np.float32) for f in frames])
+        edge = np.abs(np.diff(arr, axis=2)).mean(axis=(0, 1))
+        edge = np.append(edge, edge[-1])
+        motion = np.abs(np.diff(arr, axis=0)).mean(axis=(0, 1)) if len(arr) > 1 else np.zeros(FRAME_W)
+        energy = edge + 1.5 * motion
+        win = max(4, int(round(FRAME_W * min(1.0, (h * out_aspect) / w))))
+        if win >= FRAME_W:
+            return 0.5
+        sums = np.convolve(energy, np.ones(win), mode="valid")
+        centre = (int(np.argmax(sums)) + win / 2) / FRAME_W
+        return float(min(max(0.5 + (centre - 0.5) * 0.85, 0.0), 1.0))  # bias slightly toward the middle
+    except Exception:
+        return 0.5
+
+
+def _shot_filter(kind: str, w: int, h: int, dur: float, idx: int, focus: float = 0.5) -> str:
     frames = int(round(dur * FPS))
+    portrait = h > w
     if kind == "image":  # Ken Burns ONLY on stills: slow push-in, alternating drift
         z = "min(1.0+0.0009*on,1.14)"
-        x = "iw/2-(iw/zoom/2)" + ("+on*0.6" if idx % 2 else "-on*0.6")
-        return (f"scale={w * 3}:{h * 3}:force_original_aspect_ratio=increase:flags=lanczos,crop={w * 3}:{h * 3},"
-                f"zoompan=z='{z}':x='{x}':y='ih/2-(ih/zoom/2)':d={frames}:s={w}x{h}:fps={FPS},setsar=1")
-    return (f"fps={FPS},scale={w}:{h}:force_original_aspect_ratio=increase:flags=lanczos,crop={w}:{h},setsar=1,"
-            f"hqdn3d=1.5:1.5:4:4,unsharp=5:5:0.55:5:5:0.0")
+        cx = f"(iw*{focus:.3f})" if portrait else "(iw/2)"
+        x = f"max(0,min(iw-iw/zoom,{cx}-(iw/zoom/2)" + ("+on*0.6" if idx % 2 else "-on*0.6") + "))"
+        fill = (f"scale=-2:{h * 3}:flags=lanczos" if portrait else
+                f"scale={w * 3}:{h * 3}:force_original_aspect_ratio=increase:flags=lanczos,crop={w * 3}:{h * 3}")
+        if portrait:  # crop the still to a wide-enough strip around the focus, then zoompan inside it
+            fill += f",crop='min(iw,{w * 3 * 1.6:.0f})':{h * 3}:'max(0,min(iw-ow,iw*{focus:.3f}-ow/2))':0"
+            x = "iw/2-(iw/zoom/2)" + ("+on*0.6" if idx % 2 else "-on*0.6")
+        return f"{fill},zoompan=z='{z}':x='{x}':y='ih/2-(ih/zoom/2)':d={frames}:s={w}x{h}:fps={FPS},setsar=1"
+    clean = "hqdn3d=1.5:1.5:4:4,unsharp=5:5:0.55:5:5:0.0"
+    if not portrait:
+        return (f"fps={FPS},scale={w}:{h}:force_original_aspect_ratio=increase:flags=lanczos,crop={w}:{h},setsar=1,{clean}")
+    # Full-bleed 9:16 pan-and-scan: denoise at source size, fill the height with 8% overscan, then a slow
+    # pan (alternating direction) across the action's centre. No blurred bars, no letterbox.
+    over = int(round(h * 1.08 / 2) * 2)
+    pan = 0.10  # fraction of the scaled width travelled over the shot
+    d = 1 if idx % 2 == 0 else -1
+    x = (f"max(0,min(iw-ow,iw*{focus:.3f}-ow/2+{d}*iw*{pan}*(t/{max(dur, 0.1):.3f}-0.5)))")
+    return (f"fps={FPS},{clean},scale=-2:{over}:flags=lanczos,crop={w}:{h}:x='{x}':y='(ih-oh)/2',"
+            f"unsharp=5:5:0.35:5:5:0.0,setsar=1")
 
 
 def _textfile(workdir: str, text: str) -> str:
@@ -672,6 +720,23 @@ def _wrap(text: str, width: int) -> str:
     return "\n".join(lines)
 
 
+def fit_caption(text: str, width: int, size: int) -> Tuple[str, int]:
+    """One line when it nearly fits (font shrinks up to ~22%); otherwise two balanced lines, never an orphan word."""
+    text = " ".join(text.split())
+    if len(text) <= width:
+        return text, size
+    if len(text) <= int(width * 1.28):
+        return text, int(size * width / len(text))
+    words = text.split()
+    best = None
+    for i in range(1, len(words)):
+        a, b = " ".join(words[:i]), " ".join(words[i:])
+        score = max(len(a), len(b))
+        if best is None or score < best[0]:
+            best = (score, f"{a}\n{b}")
+    return best[1], size if best[0] <= width else int(size * width / best[0])
+
+
 def _draw(workdir: str, text: str, font: str, size: int, y: str, start: float, end: float, alpha: float = 1.0,
           border: int = 4, fade: float = 0.18, plate: bool = False) -> str:
     tf = _textfile(workdir, text).replace(":", r"\:")
@@ -689,7 +754,7 @@ def render(shots: List[dict], vo_wav: Optional[str], captions: List[dict], music
     font = _font(True)
     vertical = orientation == "vertical"
     W, H = (1080, 1920) if vertical else (1920, 1080)
-    bw, bh = (1080, 1350) if vertical else (1920, 1080)  # 4:5 hero band in 9:16; full frame in 16:9
+    bw, bh = W, H  # full-bleed in both orientations (9:16 is a pan-and-scan of the action, never padded)
     cmd = [_bin("ffmpeg"), "-y", "-v", "error"]
     fc = []
     for i, s in enumerate(shots):
@@ -697,25 +762,27 @@ def render(shots: List[dict], vo_wav: Optional[str], captions: List[dict], music
             cmd += ["-loop", "1", "-t", f"{s['dur'] + 0.2:.3f}", "-i", s["path"]]
         else:
             cmd += ["-ss", f"{s['start']:.3f}", "-t", f"{s['dur'] + 0.2:.3f}", "-i", s["path"]]
-        fc.append(f"[{i}:v]{_shot_filter(s['kind'], bw, bh, s['dur'], i)},trim=duration={s['dur']:.3f},setpts=PTS-STARTPTS[s{i}]")
+        focus = s.get("focus", 0.5) if vertical else 0.5
+        # exact integer frame budget per shot (cumulative rounding), padded by cloning so a short source can't drop frames
+        f0, f1 = round(sum(x["dur"] for x in shots[:i]) * FPS), round(sum(x["dur"] for x in shots[:i + 1]) * FPS)
+        if i == len(shots) - 1:
+            f1 = int(round(TOTAL_SECONDS * FPS))
+        fc.append(f"[{i}:v]{_shot_filter(s['kind'], bw, bh, s['dur'], i, focus)},setpts=PTS-STARTPTS,"
+                  f"tpad=stop_mode=clone:stop_duration=1,trim=end_frame={f1 - f0},setpts=N/({FPS}*TB)[s{i}]")
     n = len(shots)
     fc.append("".join(f"[s{i}]" for i in range(n)) + f"concat=n={n}:v=1:a=0,{GRADE},noise=alls=5:allf=t+u,format=yuv420p[prog]")
+    fc.append("[prog]null[base]")
     if vertical:
-        fc.append("[prog]split=2[fg][bgsrc]")
-        fc.append(f"[bgsrc]scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},gblur=sigma=28,"
-                  f"eq=brightness=-0.16:saturation=0.6[bg]")
-        band_y = (H - bh) // 2
-        fc.append(f"[bg][fg]overlay=0:{band_y},format=yuv420p[base]")
-        hook_y, cap_y, cred_y = str(band_y - 190), str(band_y + bh - 250), str(H - 130)
-        hook_size, cap_size, cred_size, wrap_hook, wrap_cap = 74, 56, 26, 22, 30
+        # inside TikTok/Reels/Shorts safe area: top ~10% and bottom ~25% carry platform UI
+        hook_y, cap_y, cred_y = "210", "1250", "1420"
+        hook_size, cap_size, cred_size, wrap_hook, wrap_cap = 74, 56, 26, 20, 26
     else:
-        fc.append("[prog]null[base]")
-        hook_y, cap_y, cred_y = "90", "h-230", "h-60"
+        hook_y, cap_y, cred_y = "90", "h-310", "h-58"  # ~150 px clear between caption plate and credit
         hook_size, cap_size, cred_size, wrap_hook, wrap_cap = 78, 58, 24, 34, 44
     draws = [_draw(workdir, _wrap(hook, wrap_hook), font, hook_size, hook_y, 0.0, HOOK_SECONDS, border=5, fade=0.12)]
     for c in captions:
-        draws.append(_draw(workdir, _wrap(c["text"], wrap_cap), font, cap_size, cap_y, c["start"], min(c["end"], TOTAL_SECONDS),
-                           border=3, plate=True))
+        text, size = fit_caption(c["text"], wrap_cap, cap_size)
+        draws.append(_draw(workdir, text, font, size, cap_y, c["start"], min(c["end"], TOTAL_SECONDS), border=3, plate=True))
     if credit:
         draws.append(_draw(workdir, credit[:90], _font(False) or font, cred_size, cred_y, 0.0, TOTAL_SECONDS,
                            alpha=0.7, border=2, fade=0.01))
@@ -759,7 +826,7 @@ def localize(c: dict, src: str, start: float, dur: float, workdir: str, idx: int
     err = None
     for attempt in range(3):  # Wikimedia/Archive rate-limit (429) or drop long range reads: back off and retry
         try:
-            _run([_bin("ffmpeg"), "-y", "-v", "error", "-user_agent", UA, "-ss", f"{start:.3f}", "-i", src, "-t", f"{dur + 0.4:.3f}",
+            _run([_bin("ffmpeg"), "-y", "-v", "error", *_ua(src), "-ss", f"{start:.3f}", "-i", src, "-t", f"{dur + 0.4:.3f}",
                   *vf, "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "12", "-pix_fmt", "yuv420p", dest], timeout=600)
             got = probe(dest).get("duration") or 0.0
             if got >= dur - 0.05:
@@ -782,6 +849,8 @@ def pinned_segments(src: str, duration: float, near: List[float], shot_len: floa
             sc = segment_score(_gray_frames(src, t, seconds=min(shot_len, 2.6), crop=crop))
             if sc is not None and (best is None or sc > best[1]):
                 best = (t, sc)
+        if best is None and t0 + shot_len <= duration:
+            best = (t0, 0.0)  # hand-checked moment: keep it even if a probe was rate-limited or the gate is strict
         if best:
             out.append(best)
     return out
@@ -921,6 +990,8 @@ def produce_footage(out_dir: str, viral: Optional[dict] = None, avoid_keys: Opti
         vertical = os.path.join(out_dir, f"{name}.mp4")
         landscape = os.path.join(out_dir, f"{name}_16x9.mp4")
         locals_ = [s for s, _ in shots]
+        for (loc, rec) in shots:
+            loc["focus"] = rec["portrait_focus_x"] = round(focus_x(loc["path"], loc["kind"]), 3)
         credit = concept["footage_credit"]
         pv = render(locals_, vo_wav, captions, music, topic["on_screen_hook"], credit, vertical, "vertical", workdir)
         pl = render(locals_, vo_wav, captions, music, topic["on_screen_hook"], credit, landscape, "landscape", workdir)

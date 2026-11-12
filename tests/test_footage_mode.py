@@ -257,3 +257,47 @@ def test_produce_uses_footage_engine_without_gemini(monkeypatch, tmp_path):
     post = growth_v2.build_post(out, c, i, ["instagram", "linkedin"])
     assert post["landscape_video_path"].endswith("_16x9.mp4")
     assert post["vertical_video_path"].endswith("g2_footage_x.mp4") and post["origin"] == "original"
+
+
+def test_fit_caption_never_orphans():
+    assert fm.fit_caption("It sank in under 3 hours.", 26, 56) == ("It sank in under 3 hours.", 56)
+    one, size = fm.fit_caption("Titanic sinks in under 3 hours.", 26, 56)
+    assert "\n" not in one and size < 56
+    two, _ = fm.fit_caption("The largest landslide in recorded history.", 26, 56)
+    a, b = two.split("\n")
+    assert len(b.split()) >= 2 and abs(len(a) - len(b)) <= 6
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg not installed")
+def test_vertical_is_full_bleed_not_padded(tmp_path):
+    import numpy as np
+    src = str(tmp_path / "wide.mp4")  # 16:9 source with detail everywhere
+    subprocess.run(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=1280x720:rate=30", "-t", "9",
+                    "-pix_fmt", "yuv420p", src], check=True)
+    shots = [{"path": src, "kind": "video", "start": float(i * 3), "dur": d, "focus": 0.5}
+             for i, d in enumerate((2.7, 2.7, 2.6))]
+    out = str(tmp_path / "v.mp4")
+    fm.render(shots, None, [], fm.load_music("cinematic"), "HOOK", "", out, "vertical", str(tmp_path))
+    raw = subprocess.run(["ffmpeg", "-v", "error", "-ss", "4", "-i", out, "-frames:v", "1", "-vf", "format=gray",
+                          "-f", "rawvideo", "-"], capture_output=True, check=True).stdout
+    img = np.frombuffer(raw, dtype=np.uint8).reshape(1920, 1080).astype(np.float32)
+    # the picture runs to the top and bottom edges: same column structure as the middle (a blurred or
+    # black pad band would have almost no horizontal detail compared with the picture)
+    detail = lambda band: np.abs(np.diff(band, axis=1)).mean()
+    mid = detail(img[800:1100])
+    for band in (img[:250], img[-250:]):
+        assert detail(band) > 0.4 * mid
+    assert img[:40].mean() > 30 and img[-40:].mean() > 30  # no black letterbox
+    # exactly 8.0 s at 30 fps
+    n = subprocess.run(["ffprobe", "-v", "error", "-count_frames", "-select_streams", "v:0", "-show_entries",
+                        "stream=nb_read_frames", "-of", "csv=p=0", out], capture_output=True, text=True).stdout.strip()
+    assert int(n) == int(fm.TOTAL_SECONDS * fm.FPS)
+
+
+def test_focus_x_reads_local_files(tmp_path):
+    # regression: -user_agent on a local file made ffmpeg fail, so every shot fell back to centre (0.5)
+    src = str(tmp_path / "wide.mp4")
+    subprocess.run(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=1280x720:rate=30", "-t", "3",
+                    "-pix_fmt", "yuv420p", src], check=True)
+    assert fm._ua(src) == [] and fm._ua("https://x/y.webm")
+    assert len(fm._gray_frames(src, 0.0, seconds=2.0, fps=2)) >= 2

@@ -103,7 +103,7 @@ TOPICS: List[dict] = [
         "key": "titanic-1912", "topic": "Titanic", "title_line": "Titanic: Real Footage",
         "on_screen_hook": "TITANIC · 1912", "hook": "April 15, 1912. Titanic sinks in under three hours.",
         "vo": [{"say": "April fifteenth, nineteen twelve.", "show": "April 15, 1912."},
-               {"say": "Titanic sinks in under three hours.", "show": "Titanic sinks in under 3 hours."},
+               {"say": "It sank in under three hours.", "show": "It sank in under 3 hours."},
                {"say": "Her wreck lies over two miles down.", "show": "Her wreck: over 2 miles down."}],
         "lines": ["Real archival and NOAA expedition footage of Titanic, cut to 8 seconds."],
         "hashtags": ["#Titanic", "#History"], "mood": "emotional",

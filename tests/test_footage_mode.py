@@ -301,3 +301,43 @@ def test_focus_x_reads_local_files(tmp_path):
                     "-pix_fmt", "yuv420p", src], check=True)
     assert fm._ua(src) == [] and fm._ua("https://x/y.webm")
     assert len(fm._gray_frames(src, 0.0, seconds=2.0, fps=2)) >= 2
+
+
+def test_modern_offtopic_clips_rejected_for_historic_topics():
+    topic = next(t for t in ft.TOPICS if t["key"] == "pearl-harbor-1941")
+    fake = [
+        {"provider": "wikimedia_commons", "id": "1", "kind": "video", "title": "Reporter- Why didn't you inform allies before attacking Iran- Trump-....webm", "description": "attack", "license": "Public domain"},
+        {"provider": "wikimedia_commons", "id": "2", "kind": "video", "title": "National Pearl Harbor Remembrance Day QIISsZYm1SA.webm", "description": "", "license": "CC BY 3.0"},
+        {"provider": "wikimedia_commons", "id": "3", "kind": "video", "title": "Pearl Harbor 2016 drone tour.webm", "description": "", "license": "Public domain"},
+        {"provider": "internet_archive", "id": "4", "kind": "video", "title": "Avenge December 7 (Pearl Harbor)", "description": "", "license": "Public domain"},
+    ]
+    orig = {k: getattr(fm, k) for k in ("search_nasa", "search_commons", "search_archive", "search_pexels", "search_pixabay")}
+    try:
+        fm.search_commons = lambda q, kind, get: fake if kind == "video" else []
+        for k in ("search_nasa", "search_pexels", "search_pixabay"):
+            setattr(fm, k, lambda *a, **kw: [])
+        fm.search_archive = lambda q, get: []
+        kept, _ = fm.gather_candidates(topic)
+    finally:
+        for k, v in orig.items():
+            setattr(fm, k, v)
+    assert [c["id"] for c in kept] == ["4"]
+    assert fm.topic_year(topic) == 1941
+
+
+def test_screen_credit_fits_frame():
+    long = ("Footage: Internet Archive (public domain); Wikimedia Commons (public domain); "
+            "The U.S. National Archives (public domain); Jane Doe / Wikimedia Commons (CC BY 4.0)")
+    text, size = fm.screen_credit(long, int(1000 / (26 * 0.52)), 26)
+    width = int(1000 / (26 * 0.52))
+    for line in text.split("\n"):
+        assert len(line) * size <= width * 26 + 1
+    assert "Jane Doe" in text and text.count("public domain") == 1
+
+
+def test_off_era():
+    assert fm.off_era("Time-lapse images of Mount St. Helens dome growth 2004-2008.webm", 1980)
+    assert fm.off_era("GOLDEN GATE - The Nobility of Bridges (HD).webm", 1937)
+    assert not fm.off_era("Mount St. Helens--Legacies of the 1980 eruption", 1980)
+    assert not fm.off_era("Titanic Disaster - Genuine Footage (1911-1912)(enhanced).webm", 1912)
+    assert not fm.off_era("Artemis I Launch (KSC-20221116).webm", 2022)

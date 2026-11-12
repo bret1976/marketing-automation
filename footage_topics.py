@@ -96,7 +96,9 @@ TOPICS: List[dict] = [
         "hashtags": ["#Apollo11", "#NASA"], "mood": "cinematic",
         "match": r"\b(apollo|saturn v|moon landing|first man on the moon|armstrong)\b",
         "related": r"\b(nasa|moon|lunar|astronauts?|rocket)\b",
-        "require": r"apollo 11|saturn v|as-?506|apollo",
+        "require": r"apollo 11|apollo xi\b|as-?506|saturn v",
+        # other Apollo missions (e.g. "Apollo 13 Launch and Post-Launch") are not Apollo 11 footage
+        "exclude": r"\bapollo[ -]?(?!11\b|xi\b)(\d+|[ivx]+)\b|artemis|sls",
         "queries": {"nasa": ["Apollo 11 launch", "Saturn V launch Apollo 11"], "commons": ["Apollo 11 launch"],
                     "archive": ["Apollo 11 launch"]},
     },

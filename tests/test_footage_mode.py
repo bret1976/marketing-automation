@@ -500,3 +500,22 @@ def test_no_8_second_copy_left_in_footage_path():
     for mod in (fm, ft):
         src = inspect.getsource(mod)
         assert "cut to 8 seconds" not in src and "single_8s" not in src and "TOTAL_SECONDS = 8" not in src
+
+
+def test_apollo11_rejects_other_apollo_missions():
+    t = ft.BY_KEY["apollo11-1969"]
+    cands = [{"provider": "wikimedia_commons", "kind": "video", "id": i, "title": title, "description": "Apollo 11 launch"}
+             for i, title in enumerate(["Apollo 13 Launch and Post-Launch (KSC-19700411-MH-NAS01-0001).webm",
+                                        "Apollo 8 Saturn V liftoff.webm",
+                                        "Apollo 11 launch, video of engines at 500 fps (camera E-8).ogv",
+                                        "The Eagle Has Landed, The Flight of Apollo 11, 1969.webm"])]
+
+    def fake_get(*a, **k):
+        raise RuntimeError("offline")
+    import unittest.mock as um
+    with um.patch.object(fm, "search_nasa", lambda *a, **k: []), um.patch.object(fm, "search_archive", lambda *a, **k: []), \
+            um.patch.object(fm, "search_commons", lambda q, media="video", get=None: cands if media == "video" else []):
+        kept, _ = fm.gather_candidates(t, get=fake_get)
+    titles = [c["title"] for c in kept]
+    assert not any("Apollo 13" in x or "Apollo 8" in x for x in titles)
+    assert any("Apollo 11 launch" in x for x in titles) and any("Eagle Has Landed" in x for x in titles)

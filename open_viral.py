@@ -259,13 +259,16 @@ def find_viral(queries: Optional[List[str]] = None, subreddits: Optional[List[st
                 errors.append(f"youtube_api {q}: {exc}"[:220])
         if errors and not ids:
             sources["youtube_api"] = "failed"
-    dlp_ids: List[str] = []
+    dlp_hits: List[dict] = []
     for q in queries:
         try:
-            dlp_ids += [r["id"] for r in dlp_search(q)]
+            dlp_hits += dlp_search(q)
         except Exception as exc:
             errors.append(f"yt-dlp {q}: {exc}"[:220])
             sources["youtube_ytdlp"] = "failed"
+    # every hit is a today-upload: probe the most-viewed ones first (stable for equal views), not query order
+    dlp_hits.sort(key=lambda r: -int(r.get("views") or 0))
+    dlp_ids: List[str] = list(dict.fromkeys(r["id"] for r in dlp_hits))
     ids = list(dict.fromkeys(ids + dlp_ids))
 
     videos: Dict[str, dict] = {}

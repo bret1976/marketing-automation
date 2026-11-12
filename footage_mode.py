@@ -231,12 +231,318 @@ def pick_topic(viral_items: List[dict], avoid_keys: Optional[set] = None, recent
 
 
 def todays_viral(queries: Optional[List[str]] = None) -> dict:
-    """Keyless (yt-dlp) last-24h finder from PR #23, steered at footage-friendly niches."""
+    """Keyless (yt-dlp) last-24h finder from PR #23 over a broad 'what's going viral today' query set
+    (FOOTAGE_VIRAL_QUERIES overrides). Only titles/view counts are read; no viral video is downloaded."""
     import open_viral
-    qs = queries or [q.strip() for q in (os.environ.get("FOOTAGE_VIRAL_QUERIES") or
-                                          "ww2 footage|history documentary|nasa|rocket launch|titanic|volcano eruption|engineering").split("|")
+    qs = queries or [q.strip() for q in (os.environ.get("FOOTAGE_VIRAL_QUERIES") or "|".join(BROAD_VIRAL_QUERIES)).split("|")
                      if q.strip()]
-    return open_viral.find_viral(queries=qs, subreddits=[], top_n=40, niche=False, max_seconds=900)
+    os.environ.setdefault("VIRAL_OPEN_PROBE_LIMIT", os.environ.get("FOOTAGE_VIRAL_PROBE_LIMIT", "80"))
+    return open_viral.find_viral(queries=qs, subreddits=[], top_n=60, niche=False, max_seconds=3600)
+
+
+# --------------------------------------------------------------------------- 1b. viral-first topic selection
+#
+# Bret 2026-11-12: the last-24h viral scan DETERMINES the video. The finder runs first over a broad
+# "what's going viral today" query set; each viral upload (ranked by views/hour) is resolved to the
+# real-world subject it is about (a Wikipedia article named in the title), and footage mode then looks
+# for public-domain / CC archival footage of THAT subject. The viral videos themselves are never
+# downloaded or recut. A subject without enough licensed on-topic footage for 31 s is skipped and the
+# next viral subject is tried; there is no fallback to a canned library topic.
+# The hand-written library (footage_topics.py) is only used as a better, fact-checked script when the
+# viral subject IS one of its topics.
+
+BROAD_VIRAL_QUERIES = ("#shorts", "viral", "trending", "documentary", "history", "space", "science", "nature",
+                       "wildlife", "disaster", "engineering", "footage", "ocean", "volcano", "earthquake", "storm",
+                       "tornado", "weather", "animals", "shark", "aviation", "aircraft", "train", "military",
+                       "rocket launch", "nasa", "ww2", "ancient", "archaeology", "shipwreck")
+WIKI_API = "https://en.wikipedia.org/w/api.php"
+TEXT_CREDIT = "Narration adapted from Wikipedia (CC BY-SA 4.0)"
+# subjects we can't (or shouldn't) build from archival footage: people in the news, media/IP, brands, politics
+SKIP_SUBJECT = re.compile(
+    r"\b(singer|rapper|actor|actress|comedian|musician|songwriter|dj|politician|youtuber|streamer|influencer|"
+    r"tiktoker|footballer|basketball|baseball|soccer|cricketer|athlete|player|wrestl\w*|boxer|fighter|ufc|model|"
+    r"businessman|businesswoman|entrepreneur|billionaire|television|tv series|sitcom|reality|film|movie|song|single|"
+    r"album|band|video game|game|franchise|anime|manga|cartoon|character|fictional|company|corporation|brand|"
+    r"website|app|software|podcast|election|political|politics|party|president|prime minister|senator|"
+    r"congress|parliament|club|team|league|season|episode|esports|toy|lego|minecraft|roblox|fortnite|meme|"
+    r"internet|social media|news|journalist|presenter|chef|restaurant|celebrity)\b", re.I)
+# living people (Wikipedia leads say "born ..."), plus countries/cities: far too broad to build one Short around
+SKIP_TEXT = re.compile(r"\bborn\b", re.I)
+SKIP_PLACE = re.compile(r"^(country|sovereign state|island country|transcontinental country|city|town|village|"
+                        r"municipality|capital|state of|province|region|continent|county)\b|\b(country|city) in\b", re.I)
+# abstract concepts / broad classes ("Snow", "Bird", "Evolution"): no specific thing to film
+SKIP_ABSTRACT = re.compile(r"^(change|process|concept|theory|form|state|class|type|kind|natural|precipitation|field|"
+                           r"study|branch|term|group|set|act|practice|phenomenon|property|quality|period|unit|measure|"
+                           r"list|aspect|method|system|means|activity|art|style|genre|condition|feeling|emotion)\b", re.I)
+# live streams, gaming, music, compilations: their view counts are real but there is no real-world subject to film
+SKIP_VIRAL = re.compile(r"\blive\b|\U0001F534|#?shortslive|\bstream(ing)?\b|\bgam(e|ing|er)\b|\bgta\b|roblox|minecraft|"
+                        r"fortnite|free ?fire|pubg|\bbgmi\b|\bmashup\b|\bmusic\b|\bsong\b|\blyrics?\b|\bdance\b|"
+                        r"\breaction\b|\bprank\b|\bunboxing\b|\basmr\b|\btutorial\b|\brecipe\b|\bvlog\b|\bmovie review\b|"
+                        r"\btrailer\b|\bpodcast\b|\bfilm\b|\bmovie\b|\bepisode\b|\bep \d+|\bs\d+e\d+\b", re.I)
+_TITLE_NOISE = re.compile(r"#\w+|\[[^\]]*\]|\([^)]*\)|[\U0001F000-\U0001FFFF\u2600-\u27BF]|"
+                          r"\b(real|rare|footage|viral|shorts?|official|video|full|hd|4k|live|new|today|watch|amazing|"
+                          r"incredible|insane|crazy|you won'?t believe|must see|part \d+|ep(isode)? ?\d+)\b", re.I)
+# scanned subjects match on a name, so homonyms need an extra guard (e.g. "Wolf" -> a wrestler "Chief Little Wolf")
+DYNAMIC_EXCLUDE = (r"\bvs\.?\b|versus|wrestl\w*|boxing|\bbout\b|\bmatch\b|football|rugby|soccer|cricket|\bteam\b|"
+                   r"\bclub\b|stadium|\bchief\b|\bmr\.?\b|\bmrs\.?\b|logo|mascot|\btoy\b|cartoon|comic|anime|\bfilm\b|"
+                   r"movie|trailer|\bsong\b|music|concert|album|parade|costume|statue|sculpture|painting|drawing|"
+                   r"illustration|stamp|coin|\bmap\b|diagram|\bchart\b|\bslide\b|lecture|conference|interview|"
+                   r"question\w*|hearing|testimony|testif\w*|committee|senat\w*|congress\w*|secretary|governor|mayor|"
+                   r"campaign|election|harris|pelosi|desantis|vance|rally|protest|press|briefing|statement|remarks|"
+                   r"silent|western|feature|starring|directed|actor|actress|episode|television|\btv\b|serial|"
+                   r"advert\w*|commercial")
+GENERIC = {"the", "a", "an", "of", "and", "in", "on", "at", "to", "for", "from", "with", "by", "disaster", "launch",
+           "attack", "battle", "eruption", "sinking", "landing", "mission", "flight", "first", "great", "big", "history",
+           "world", "war", "day", "night", "event", "explosion", "crash", "storm", "fire", "bridge", "dam", "ship",
+           "rocket", "space", "test", "new", "old", "most", "best", "last", "how", "why", "what", "this", "that"}
+_YEAR = re.compile(r"(?<![\d,.])(1[1-9]\d\d|20\d\d)(?!\d|,\d)")
+_ONES = "zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen".split()
+_TENS = "_ _ twenty thirty forty fifty sixty seventy eighty ninety".split()
+
+
+def _two(n: int) -> str:
+    if n < 20:
+        return _ONES[n]
+    return _TENS[n // 10] + ("" if n % 10 == 0 else "-" + _ONES[n % 10])
+
+
+def year_words(y: int) -> str:
+    """1912 -> 'nineteen twelve', 1903 -> 'nineteen oh three', 2000 -> 'two thousand', 2022 -> 'twenty twenty-two'."""
+    hi, lo = divmod(y, 100)
+    if y % 1000 == 0:
+        return _ONES[y // 1000] + " thousand"
+    if 2000 < y < 2010:
+        return "two thousand " + _ONES[lo]
+    if lo == 0:
+        return _two(hi) + " hundred"
+    return _two(hi) + (" oh " + _ONES[lo] if lo < 10 else " " + _two(lo))
+
+
+def spoken(text: str) -> str:
+    return _YEAR.sub(lambda m: year_words(int(m.group(1))), text)
+
+
+def clean_viral_title(title: str) -> str:
+    t = (title or "").split("|")[0]
+    t = _TITLE_NOISE.sub(" ", t)
+    t = re.sub(r"[^\w\s'.-]", " ", t)
+    return " ".join(t.split())
+
+
+def _tokens(s: str) -> List[str]:
+    return [w for w in re.findall(r"[a-z0-9]+", (s or "").lower()) if w]
+
+
+def named_in(article: str, title: str) -> bool:
+    """The article's subject is literally named in the viral title (all its significant words appear)."""
+    stop = {"the", "a", "an", "of", "and", "in", "on", "at", "to", "for", "from", "with", "by"}
+    words = [w for w in _tokens(re.sub(r"\([^)]*\)", "", article)) if w not in stop]
+    stem = lambda w: w[:-1] if len(w) > 4 and w.endswith("s") else w
+    have = {stem(w) for w in _tokens(title)}
+    words = [stem(w) for w in words]
+    distinct = [w for w in words if w not in GENERIC]
+    return bool(distinct) and all(w in have for w in words) and len("".join(distinct)) >= 4
+
+
+def _sentences(text: str) -> List[str]:
+    text = re.sub(r"\([^()]*\)", "", text or "")
+    text = re.sub(r"\[[^\]]*\]", "", text)
+    text = re.sub(r"\s+([,.;:])", r"\1", " ".join(text.split()))
+    out = re.split(r"(?<=[.!?])\s+(?=[A-Z0-9\"'])", text)
+    return [s.strip() for s in out if len(s.split()) >= 4 and "==" not in s]
+
+
+def _halve(c: str, limit: int) -> List[str]:
+    if len(c) <= limit:
+        return [c]
+    words = c.split()
+    cut = min(range(1, len(words)), key=lambda i: abs(len(" ".join(words[:i])) - len(c) / 2))
+    return _halve(" ".join(words[:cut]), limit) + _halve(" ".join(words[cut:]), limit)
+
+
+def _chunks(sentence: str, limit: int = 56) -> List[str]:
+    """Caption-sized pieces (<= limit chars): clauses (commas/semicolons, never inside a date like 'May 6, 1937')
+    packed greedily, then anything still too long halved at the most central word gap."""
+    parts, out = re.split(r"(?<=[,;:])\s+(?!\d)", sentence), []
+    cur = ""
+    for p in parts:
+        if cur and len(cur) + 1 + len(p) > limit:
+            out.append(cur)
+            cur = p
+        else:
+            cur = f"{cur} {p}".strip()
+    if cur:
+        out.append(cur)
+    return [x for c in out for x in _halve(c, limit) if x]
+
+
+def script_from_text(text: str, min_words: int = 60, max_words: int = 105) -> List[dict]:
+    """VO lines (spoken years, on-screen original) from a plain-text lead. [] if too thin for a 31 s clip."""
+    lines, words = [], 0
+    for s in _sentences(text):
+        n = len(s.split())
+        if words and words + n > max_words:
+            break
+        # one VO line per sentence (natural read, no mid-sentence pauses); captions step through its pieces
+        lines.append({"say": spoken(s), "show": s, "parts": _chunks(s)})
+        words += n
+    return lines if words >= min_words else []
+
+
+def wiki_subjects(title: str, get: Callable = _get, limit: int = 2) -> List[dict]:
+    """Up to `limit` Wikipedia subjects named in a viral title ("Lynx attacks wolf" -> Lynx, Wolf)."""
+    q = clean_viral_title(title)
+    if len(q) < 4:
+        return []
+    hits = (get(WIKI_API, {"action": "query", "list": "search", "srsearch": q, "srlimit": 8, "format": "json",
+                           "srnamespace": 0}).json().get("query") or {}).get("search", [])
+    named = [h["title"] for h in hits if named_in(h["title"], q)]
+    # shorter, distinct names from the title words themselves (search ranks long article titles first)
+    # "A vs B" / "A attacks B" titles name two subjects; take them from the title words themselves
+    duel = re.search(r"([A-Z][a-z]{3,})\s+(?:vs\.?|versus|attacks?|hunts?|fights?|meets?|against)\s+([A-Z][a-z]{3,})", q)
+    for w in (list(duel.groups()) if duel else []):
+        if w not in named:
+            named.append(w)
+    out = []
+    for pick in named:
+        if len(out) >= limit:
+            break
+        subj = _wiki_page(pick, get)
+        if subj and named_in(subj["title"], q):
+            out.append(subj)
+    return out
+
+
+def wiki_subject(title: str, get: Callable = _get) -> Optional[dict]:
+    """The Wikipedia article a viral title is about (named in it), with its plain-text lead. None if none fits."""
+    subs = wiki_subjects(title, get, limit=1)
+    return subs[0] if subs else None
+
+
+def _wiki_page(pick: str, get: Callable = _get) -> Optional[dict]:
+    data = get(WIKI_API, {"action": "query", "prop": "extracts|pageprops|description", "explaintext": 1,
+                          "exsectionformat": "plain", "redirects": 1, "titles": pick, "format": "json"}).json()
+    page = next(iter(((data.get("query") or {}).get("pages") or {}).values()), {})
+    if not page or "missing" in page or "disambiguation" in (page.get("pageprops") or {}):
+        return None
+    full = page.get("extract") or ""
+    lead = full.split("\n\n\n")[0]
+    cat = ""
+    qid = (page.get("pageprops") or {}).get("wikibase_item")
+    if qid:  # the subject's curated Wikimedia Commons category (Wikidata P373): far better relevance than a name search
+        try:
+            claims = get("https://www.wikidata.org/w/api.php", {"action": "wbgetclaims", "entity": qid, "property": "P373",
+                                                                 "format": "json"}).json().get("claims", {}).get("P373", [])
+            cat = ((claims[0].get("mainsnak") or {}).get("datavalue") or {}).get("value") or "" if claims else ""
+        except Exception:
+            cat = ""
+    return {"title": page.get("title") or pick, "description": page.get("description") or "", "lead": lead,
+            "commons_category": cat,
+            "text": full[:6000], "url": f"https://en.wikipedia.org/wiki/{(page.get('title') or pick).replace(' ', '_')}"}
+
+
+def subject_ok(subj: dict) -> Tuple[bool, str]:
+    """Skip people in the news, media/IP, brands, politics: not legally/plausibly sourceable as archival footage."""
+    head = f"{subj.get('title')} | {subj.get('description')}"
+    if SKIP_SUBJECT.search(subj.get("description") or "") or TALKING_HEAD.search(subj.get("title") or ""):
+        return False, f"subject type: {head[:120]}"
+    if SKIP_TEXT.search((subj.get("lead") or "")[:300]) or SKIP_TEXT.search(subj.get("description") or ""):
+        return False, f"living person: {head[:120]}"
+    if SKIP_ABSTRACT.search(subj.get("description") or ""):
+        return False, f"too abstract: {head[:120]}"
+    if SKIP_PLACE.search(subj.get("description") or ""):
+        return False, f"too broad (country/city): {head[:120]}"
+    return True, ""
+
+
+def topic_from_subject(subj: dict) -> Optional[dict]:
+    """A footage topic (same shape as footage_topics.TOPICS) for a viral subject, scripted from its Wikipedia lead."""
+    title = re.sub(r"\s*\([^)]*\)$", "", subj["title"]).strip()
+    vo = script_from_text(subj.get("lead") or "") or script_from_text(subj.get("text") or "")
+    if not vo:
+        return None
+    years = [int(y) for y in _YEAR.findall(" ".join(v["show"] for v in vo[:3])) if int(y) <= datetime.now().year]
+    year = years[0] if years else None
+    words = [w for w in _tokens(title) if w not in GENERIC] or _tokens(title)
+    phrase = r"\W+".join(re.escape(w) for w in _tokens(title))
+    def plural(w: str) -> str:
+        return rf"\b{re.escape(w)}(s|es)?\b" + (rf"|\b{re.escape(w[:-1])}ves\b" if w.endswith("f") else "")
+    require = "|".join([phrase] + [plural(w) for w in words if len(w) >= 4])
+    hook_title = title.upper() if len(title) <= 22 else " ".join(title.split()[:3]).upper()
+    lower = (title + " " + subj.get("description", "")).lower()
+    mood = ("dark_build" if re.search(r"disaster|attack|war|battle|eruption|explosion|crash|sinking|storm|fire", lower)
+            else "cinematic" if re.search(r"space|rocket|launch|nasa|moon|mars|orbit|satellite|flight|aircraft", lower)
+            else "reveal")
+    tag = "#" + re.sub(r"[^A-Za-z0-9]", "", title.title())[:28]
+    space = bool(re.search(r"nasa|space|rocket|moon|mars|apollo|shuttle|satellite|orbit|launch|astronaut|telescope", lower))
+    return {
+        "key": "viral-" + re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:48],
+        "topic": title, "title_line": f"{title}: Real Footage",
+        "on_screen_hook": f"{hook_title} · {year}" if year else hook_title,
+        "hook": vo[0]["show"], "vo": vo,
+        "lines": [f"Real archival footage: {title}."],
+        "hashtags": [tag], "mood": mood, "match": phrase, "related": None,
+        "require": require, "exclude": DYNAMIC_EXCLUDE,
+        # with a curated Commons category, search only inside it (a name search drags in homonyms:
+        # "Wolf Creek Falls Trail", "Wolf Lowry (1917)"); otherwise fall back to a strict name search
+        "queries": ({"commons": [], "archive": [], "nasa": [title] if space else [],
+                     "commons_cat": [subj["commons_category"]]} if subj.get("commons_category") else
+                    {"commons": [title, f"{title} footage"], "archive": [title], "nasa": [title] if space else []}),
+        "stills": [f'incategory:"{subj["commons_category"]}"'] if subj.get("commons_category") else [title], "source": "viral_scan", "title_only": True, "max_per_source": 2, "wikipedia": subj["url"], "text_credit": TEXT_CREDIT,
+    }
+
+
+def viral_topics(viral_items: List[dict], avoid_keys: Optional[set] = None, recent_topics: Optional[List[str]] = None,
+                 limit: int = 6, get: Callable = _get, log: Optional[List[str]] = None) -> List[dict]:
+    """Viral uploads (best views/hour first) -> distinct footage topics, in viral order.
+    A viral title naming a library subject uses the hand-checked library script; anything else is resolved
+    to its Wikipedia subject. Never returns a topic that no viral title asked for."""
+    log = log if log is not None else []
+    avoid = avoid_keys or set()
+    recent = " | ".join(recent_topics or []).lower()
+    out, seen = [], set()
+    items = sorted(viral_items or [], key=lambda it: -(float(it.get("views_per_hour") or it.get("score") or 0)))
+    for it in items:
+        if len(out) >= limit:
+            break
+        title = it.get("title") or ""
+        vph = float(it.get("views_per_hour") or it.get("score") or 0)
+        matched = {"title": title[:120], "url": it.get("url"), "views": it.get("views"), "views_per_hour": it.get("views_per_hour")}
+        if SKIP_VIRAL.search(title) or (TALKING_HEAD.search(title) and
+                                         not any(re.search(t["match"], title, re.I) for t in footage_topics.TOPICS)):
+            log.append(f"viral skip (news/politics/talk/live/game/music): {title[:80]}")
+            continue
+        topic = next((t for t in footage_topics.TOPICS if re.search(t["match"], title, re.I)), None)
+        reason = "viral_match_library_script"
+        if topic is None:
+            try:
+                subs = wiki_subjects(title, get)
+            except Exception as exc:
+                log.append(f"viral resolve error {title[:60]}: {exc}"[:200])
+                continue
+            if not subs:
+                log.append(f"viral skip (no named real-world subject): {title[:80]}")
+                continue
+            topics = []
+            for subj in subs:
+                ok, why = subject_ok(subj)
+                if not ok:
+                    log.append(f"viral skip ({why})")
+                    continue
+                t = topic_from_subject(subj)
+                if not t:
+                    log.append(f"viral skip (too little to say for 31 s): {subj['title']}")
+                    continue
+                topics.append(t)
+            reason = "viral_subject"
+        else:
+            topics = [topic]
+        for topic in topics:
+            if topic["key"] in seen or topic["key"] in avoid or topic["topic"].lower() in recent:
+                continue
+            seen.add(topic["key"])
+            out.append({"topic": topic, "score": round(vph, 1), "matched": [matched], "reason": reason})
+    return out[:limit]
 
 
 # --------------------------------------------------------------------------- 2. script / concept (templates, no LLM)
@@ -248,7 +554,9 @@ def build_concept(topic: dict, sources: List[dict], viral_pick: Optional[dict] =
         if label and label not in orgs:
             orgs.append(label)
     credit = "Footage: " + "; ".join(orgs) if orgs else ""
-    lines = list(topic.get("lines") or [])[:1] + ([credit] if credit else [])
+    lines = (list(topic.get("lines") or [])[:1] + ([credit] if credit else [])
+             + ([topic["text_credit"] + (f": {topic['wikipedia']}" if topic.get("wikipedia") else "")]
+                if topic.get("text_credit") else []))
     tags = list(dict.fromkeys(topic.get("hashtags", []) + footage_topics.FOOTAGE_HASHTAGS))[:5]
     return {
         "topic": topic["topic"], "topic_key": topic["key"].replace("-", " "),
@@ -257,6 +565,8 @@ def build_concept(topic: dict, sources: List[dict], viral_pick: Optional[dict] =
         "linkedin_angle": "Real archival footage, re-edited for 9:16 and 16:9. No AI generation, no paid APIs.",
         "comment_question": "Which moment in history should we cut next?",
         "vo": topic["vo"], "concept_source": "footage_template", "footage_credit": credit,
+        "topic_source": topic.get("source") or "library", "wikipedia": topic.get("wikipedia"),
+        "text_credit": topic.get("text_credit"),
         "viral_match": {"score": (viral_pick or {}).get("score"), "reason": (viral_pick or {}).get("reason"),
                         "matched": (viral_pick or {}).get("matched", [])[:5]},
     }
@@ -456,6 +766,10 @@ def gather_candidates(topic: dict, get: Callable = _get) -> Tuple[List[dict], Li
         jobs.append((f"commons video {q}", lambda q=q: search_commons(q, "video", get)))
     for q in qs.get("archive", []):
         jobs.append((f"archive {q}", lambda q=q: search_archive(q, get)))
+    for cat in qs.get("commons_cat", []):  # files filed directly in the subject's Commons category are on-topic
+        jobs.append((f"commons category {cat}", lambda cat=cat: [dict(c, curated=True) for c in
+                                                                 search_commons(f'incategory:"{cat}"', "video", get)]))
+        jobs.append((f"commons deepcat {cat}", lambda cat=cat: search_commons(f'deepcat:"{cat}"', "video", get, limit=40)))
     for q in (qs.get("nasa") or qs.get("commons") or [topic["topic"]])[:1]:
         jobs.append((f"pexels {q}", lambda q=q: search_pexels(q, get)))
         jobs.append((f"pixabay {q}", lambda q=q: search_pixabay(q, get)))
@@ -483,12 +797,18 @@ def gather_candidates(topic: dict, get: Callable = _get) -> Tuple[List[dict], Li
         seen.add(k)
         if excl and excl.search(c.get("title") or ""):
             continue
+        if topic.get("title_only") and not c.get("curated") and re.search(r"\(\d{4}\)|\bby [A-Z][a-z]+ [A-Z]\.?", c.get("title") or ""):
+            continue  # "Wolf Lowry (1917) by William S. Hart": a film or artwork that only shares the name
+        if excl and topic.get("title_only") and excl.search(c.get("description") or ""):
+            continue  # scanned subjects: the file page's description must not say it's a film, match, speech...
         seen_titles.add(tkey)
         text = f"{c.get('title')} {c.get('description')}"
-        c["relevant"] = bool(req.search(text))
-        c["title_match"] = bool(req.search(c.get("title") or ""))
+        c["relevant"] = bool(c.get("curated") or req.search(text))
+        c["title_match"] = bool(c.get("curated") or req.search(c.get("title") or ""))
         c["talking_head"] = bool(TALKING_HEAD.search(c.get("title") or ""))
         c["off_era"] = off_era(c.get("title") or "", era)
+        if topic.get("title_only") and not c["title_match"]:  # scanned subjects: the clip itself must be named for it
+            continue
         if c["relevant"] and not c["talking_head"] and not c["off_era"]:
             kept.append(c)
     if sum(1 for c in kept if c["title_match"]) >= 2:  # enough on-topic titles: drop description-only matches
@@ -751,7 +1071,14 @@ def synth_vo(lines: List[dict], workdir: str, max_total: float = MAX_SECONDS - V
         t = start
         for ln, c in zip(lines, clips):
             d = len(c) / sr
-            caps.append({"text": ln["show"], "start": round(t, 3), "end": round(t + d + 0.1, 3)})
+            pieces = ln.get("parts") or [ln["show"]]
+            total_chars = sum(len(x) for x in pieces) or 1
+            pt = t
+            for j, piece in enumerate(pieces):  # long sentences: caption pieces timed by length
+                pd = d * len(piece) / total_chars
+                caps.append({"text": piece, "start": round(pt, 3),
+                             "end": round(pt + pd + (0.1 if j == len(pieces) - 1 else 0.0), 3)})
+                pt += pd
             parts += [c.astype(np.float32), silence]
             t += d + gap
         wav = os.path.join(workdir, "vo.wav")
@@ -1007,7 +1334,7 @@ def plan_shots(cands: List[dict], need: int, workdir: str, log: List[str],
                resolve_nasa_fn=resolve_nasa, resolve_archive_fn=resolve_archive,
                segment_fn=None, probe_fn=None, crop_fn=None, pins: Optional[Dict[str, List[float]]] = None,
                seg_len: float = SEGMENT_SECONDS, min_need: Optional[int] = None,
-               localize_fn=None) -> List[Tuple[dict, dict]]:
+               localize_fn=None, max_per_source: Optional[int] = None) -> List[Tuple[dict, dict]]:
     """Probe up to FOOTAGE_MAX_SOURCES relevant videos, score every candidate segment (exposure, contrast,
     motion, sharpness, no cuts inside), weight by source resolution, then take the best segments globally
     (max 2 per source while others are available, then more per source). Stills (Ken Burns) only fill what
@@ -1074,7 +1401,8 @@ def plan_shots(cands: List[dict], need: int, workdir: str, log: List[str],
     pool.sort(key=lambda x: x[0], reverse=True)
     ordered: List[Tuple[dict, str, float]] = []
     per_src: Dict[str, int] = {}
-    for cap in ((need,) if any(sc >= 900 for sc, *_ in pool) else (2, need)):  # diversity first unless pinned; stills last
+    caps = ((need,) if any(sc >= 900 for sc, *_ in pool) else (max_per_source,) if max_per_source else (2, need))
+    for cap in caps:  # diversity first unless pinned; stills last
         for sc, c, src, t in pool:
             if any(x[1] == src and abs(x[2] - t) < 1e-6 for x in ordered) or per_src.get(src, 0) >= cap:
                 continue
@@ -1115,13 +1443,17 @@ def produce_footage(out_dir: str, viral: Optional[dict] = None, avoid_keys: Opti
         if viral is None and not topic_key:
             viral = todays_viral()
         items = (viral or {}).get("top") or []
-        ranked = [] if topic_key else [r for r in score_topics(items) if r["topic"]["key"] not in (avoid_keys or set())]
+        attempts = int(os.environ.get("FOOTAGE_TOPIC_ATTEMPTS", 4))
+        # viral-first: the scan picks the subject; no canned library topic fills the slot when nothing qualifies
         order = ([pick_topic(items, forced=topic_key)] if topic_key else
-                 [r for r in ranked if r["score"] > 0] + [r for r in ranked if r["score"] <= 0])
+                 viral_topics(items, avoid_keys=avoid_keys, recent_topics=recent_topics, limit=attempts, log=log))
+        log.append(f"viral scan: {len(items)} uploads -> topics {[(p['topic']['topic'], p['score']) for p in order]}")
+        if not order:
+            raise RuntimeError(f"no viral subject today that can be built from licensed archival footage; "
+                               f"not falling back to a library topic; log={log[-8:]}")
         last_err = None
-        for attempt, pick in enumerate(order[:3]):  # 3-topic cap per slot
+        for attempt, pick in enumerate(order[:attempts]):
             topic = pick["topic"]
-            pick.setdefault("reason", "viral_match" if pick.get("score") else "no viral match today; next library topic")
             try:
                 cands, errs = gather_candidates(topic)
                 log += errs
@@ -1132,7 +1464,8 @@ def produce_footage(out_dir: str, viral: Optional[dict] = None, avoid_keys: Opti
                 planned = plan_total(float(vo_info.get("seconds") or 0.0))
                 pins = {p["title"]: p["near"] for p in topic.get("pinned", [])}
                 cands.sort(key=lambda c: (c.get("title") not in pins,))
-                shots = plan_shots(cands, shot_count(planned), workdir, log, pins=pins, min_need=min_shots())
+                shots = plan_shots(cands, shot_count(planned), workdir, log, pins=pins, min_need=min_shots(),
+                                   max_per_source=topic.get("max_per_source"))
                 total = fit_total(planned, len(shots))
                 n = shot_count(total) if len(shots) >= shot_count(total) else len(shots)
                 shots = shots[:n]
@@ -1168,6 +1501,8 @@ def produce_footage(out_dir: str, viral: Optional[dict] = None, avoid_keys: Opti
             "duration_s": round(float(pv["duration"]), 2), "length_rule_s": [MIN_SECONDS, MAX_SECONDS],
             "cost_usd": 0.0, "cost": {"cap": 0.0, "total": 0.0, "items": []},
             "concept_source": "footage_template (no LLM)", "topic_key": topic["key"],
+            "topic_source": topic.get("source") or "library", "topic_reason": pick.get("reason"),
+            "wikipedia": topic.get("wikipedia"),
             "viral_match": concept["viral_match"], "footage_sources": sources,
             "music": {k: music[k] for k in ("title", "author", "source", "license", "license_url", "bpm")},
             "cuts_s": cuts, "voiceover": vo_info, "captions": captions,

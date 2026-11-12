@@ -3,6 +3,8 @@ import os
 import shutil
 import subprocess
 
+import re
+
 import pytest
 
 os.environ.setdefault("ADMIN_PASSWORD", "test-password")
@@ -519,3 +521,141 @@ def test_apollo11_rejects_other_apollo_missions():
     titles = [c["title"] for c in kept]
     assert not any("Apollo 13" in x or "Apollo 8" in x for x in titles)
     assert any("Apollo 11 launch" in x for x in titles) and any("Eagle Has Landed" in x for x in titles)
+
+
+# --------------------------------------------------------------------------- viral-first topic selection (Bret 2026-11-12)
+
+class _Resp:
+    def __init__(self, data):
+        self._d = data
+
+    def json(self):
+        return self._d
+
+
+_LEAD = ("The Hindenburg disaster was an airship accident that occurred on May 6, 1937, in Manchester Township, New Jersey. "
+         "The German passenger airship LZ 129 Hindenburg caught fire and was destroyed during its attempt to dock with its "
+         "mooring mast at Naval Air Station Lakehurst. There were 97 people on board, and 36 of them died, along with one "
+         "worker on the ground. The disaster was the subject of newsreel coverage, photographs and Herbert Morrison's recorded "
+         "radio eyewitness reports from the landing field, which were broadcast the next day. A variety of theories have been "
+         "put forward for both the cause of ignition and the initial fuel for the ensuing fire. The event shattered public "
+         "confidence in the giant, passenger-carrying rigid airship and marked the abrupt end of the airship era.")
+
+
+def _fake_wiki(pages):
+    def get(url, params=None, **k):
+        assert "wikipedia.org" in url
+        if params.get("list") == "search":
+            q = params["srsearch"].lower()
+            return _Resp({"query": {"search": [{"title": t} for t in pages if any(w in q for w in t.lower().split())]}})
+        t = params["titles"]
+        p = pages[t]
+        return _Resp({"query": {"pages": {"1": {"title": t, "description": p[0], "extract": p[1]}}}})
+    return get
+
+
+def test_year_words_and_spoken():
+    assert fm.year_words(1912) == "nineteen twelve" and fm.year_words(1903) == "nineteen oh three"
+    assert fm.year_words(2022) == "twenty twenty-two" and fm.year_words(2000) == "two thousand"
+    assert fm.spoken("On May 6, 1937, 36 died.") == "On May 6, nineteen thirty-seven, 36 died."
+
+
+def test_script_from_text_is_long_enough_and_caption_sized():
+    vo = fm.script_from_text(_LEAD)
+    assert 60 <= sum(len(v["show"].split()) for v in vo) <= 110
+    assert all(len(x) <= 60 for v in vo for x in v["parts"]) and "(" not in " ".join(v["show"] for v in vo)
+    assert fm.script_from_text("Too short. Not enough here to narrate.") == []
+
+
+def test_viral_scan_determines_topic_not_the_library():
+    pages = {"Chernobyl disaster": ("1986 nuclear accident in the Soviet Union", _LEAD.replace("Hindenburg", "Chernobyl")),
+             "MrBeast": ("American YouTuber (born 1998)", "Jimmy Donaldson (born May 7, 1998) is an American YouTuber.")}
+    items = [{"title": "I Gave Away 100 Cars | MrBeast", "views_per_hour": 900000},
+             {"title": "Trump speech reaction LIVE", "views_per_hour": 500000},
+             {"title": "Chernobyl disaster: rare footage #shorts", "views_per_hour": 40000},
+             {"title": "Titanic wreck new scan", "views_per_hour": 1000}]
+    log = []
+    picks = fm.viral_topics(items, get=_fake_wiki(pages), log=log)
+    keys = [p["topic"]["key"] for p in picks]
+    assert keys[0] == "viral-chernobyl-disaster"  # most-viewed usable viral subject wins
+    assert picks[0]["reason"] == "viral_subject" and picks[0]["topic"]["source"] == "viral_scan"
+    assert "titanic-1912" in keys  # a library topic only when a viral title names it (better script)
+    assert not any("mrbeast" in k or "trump" in k for k in keys)
+    assert any("news/politics" in l for l in log)
+    t = picks[0]["topic"]
+    assert re.search(t["require"], "Chernobyl Nuclear Power Plant 1986.webm", re.I)
+    assert t["text_credit"] and t["wikipedia"].startswith("https://en.wikipedia.org/wiki/")
+
+
+def test_no_viral_subject_means_no_canned_fallback(monkeypatch, tmp_path):
+    monkeypatch.setattr(fm, "wiki_subjects", lambda title, get=None, limit=2: [])
+    monkeypatch.setattr(fm, "gather_candidates", lambda t: (_ for _ in ()).throw(AssertionError("no library fallback")))
+    with pytest.raises(RuntimeError, match="not falling back"):
+        fm.produce_footage(str(tmp_path), viral={"top": [{"title": "Cute cat compilation", "views_per_hour": 5}]},
+                           workdir=str(tmp_path / "w"))
+
+
+def test_thin_viral_topic_is_skipped_for_the_next_viral_topic(monkeypatch, tmp_path):
+    tried = []
+    a = {**ft.BY_KEY["titanic-1912"]}
+    b = {**ft.BY_KEY["hindenburg-1937"]}
+    monkeypatch.setattr(fm, "viral_topics", lambda items, **k: [{"topic": a, "score": 9.0, "matched": []},
+                                                                {"topic": b, "score": 5.0, "matched": []}])
+    monkeypatch.setattr(fm, "gather_candidates", lambda t: (tried.append(t["key"]) or [], []))
+    monkeypatch.setattr(fm, "synth_vo", lambda lines, wd, max_total=None: (None, [], {"seconds": 40.0}))
+    rec = {"provider": "wikimedia_commons", "credit_short": "Wikimedia Commons (public domain)"}
+
+    def plan(c, need, wd, log, min_need=None, **k):
+        if len(tried) == 1:
+            raise RuntimeError("only 2 usable on-topic shots")
+        return [({"path": "p", "kind": "video", "dur": 7.0}, dict(rec)) for _ in range(need)]
+    monkeypatch.setattr(fm, "plan_shots", plan)
+    monkeypatch.setattr(fm, "focus_x", lambda *a: 0.5)
+    monkeypatch.setattr(fm, "render", lambda shots, *a, **k: {"duration": round(sum(s["dur"] for s in shots), 3)})
+    v, l, concept, info = fm.produce_footage(str(tmp_path), viral={"top": [{"title": "x"}]}, workdir=str(tmp_path / "w"))
+    assert tried == ["titanic-1912", "hindenburg-1937"] and info["topic_key"] == "hindenburg-1937"
+    assert fm.length_ok(info["duration_s"])
+
+
+def test_vo_with_caption_parts_times_each_piece(monkeypatch, tmp_path):
+    import numpy as np
+
+    class FakeKokoro:
+        def get_voice_style(self, name):
+            return np.ones(4, dtype=np.float32)
+
+        def create(self, text, voice, speed, lang):
+            return np.full(24000 * 3, 0.2, dtype=np.float32), 24000
+
+    monkeypatch.setattr(fm, "_kokoro", lambda: FakeKokoro())
+    lines = [{"say": "a b c", "show": "aaaa bbbb", "parts": ["aaaa", "bbbb"]}, {"say": "d", "show": "dd"}]
+    wav, caps, info = fm.synth_vo(lines, str(tmp_path))
+    assert wav and [c["text"] for c in caps] == ["aaaa", "bbbb", "dd"]
+    assert caps[0]["end"] == pytest.approx(caps[1]["start"]) and caps[1]["end"] < caps[2]["start"]
+
+
+def test_scanned_subject_rejects_homonym_clips():
+    t = fm.topic_from_subject({"title": "Wolf", "description": "Species of canine", "url": "https://en.wikipedia.org/wiki/Wolf",
+                               "lead": _LEAD.replace("Hindenburg", "wolf")})
+    ex = re.compile(t["exclude"], re.I)
+    assert ex.search("Chief Little Wolf vs Fred Atkins, Sydney, 1947.webm") and ex.search("Kamala Harris questions Chad Wolf.webm")
+    assert t["title_only"]
+    assert not ex.search("Gray wolf pack in Yellowstone.webm") and re.search(t["require"], "Gray wolf pack in Yellowstone.webm", re.I)
+
+
+def test_scanned_subject_searches_its_commons_category_only():
+    t = fm.topic_from_subject({"title": "Cheetah", "description": "Species of large cat", "commons_category": "Acinonyx jubatus",
+                               "url": "https://en.wikipedia.org/wiki/Cheetah", "lead": _LEAD.replace("Hindenburg", "cheetah")})
+    assert t["queries"]["commons_cat"] == ["Acinonyx jubatus"] and t["queries"]["commons"] == [] and t["queries"]["archive"] == []
+    assert t["max_per_source"] == 2 and re.search(t["require"], "Juvenile Cheetahs at a kill.webm", re.I)
+
+
+def test_scanned_subject_caps_clips_per_source(tmp_path):
+    cands = [{"provider": "wikimedia_commons", "kind": "video", "title": "Cheetah run", "url": "https://x/1.webm",
+              "page": "p", "author": "a", "license": "Public domain", "credit_short": "Wikimedia Commons (public domain)"}]
+    kw = dict(probe_fn=lambda src: {"width": 1280, "height": 720, "duration": 600.0}, crop_fn=lambda *a: None,
+              segment_fn=lambda src, dur, need, shot_len, crop=None: [(10.0 + 30 * k, 5.0) for k in range(need)],
+              localize_fn=lambda c, src, start, dur, workdir, i: {"path": "p", "kind": "video", "start": 0.0, "dur": dur})
+    assert len(fm.plan_shots(cands, 11, str(tmp_path), [], min_need=1, **kw)) == 11  # library topics: unchanged
+    with pytest.raises(RuntimeError, match="usable on-topic shots"):
+        fm.plan_shots(cands, 11, str(tmp_path), [], min_need=fm.min_shots(), max_per_source=2, **kw)

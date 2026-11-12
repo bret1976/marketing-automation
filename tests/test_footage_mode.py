@@ -3,6 +3,8 @@ import os
 import shutil
 import subprocess
 
+import re
+
 import pytest
 
 os.environ.setdefault("ADMIN_PASSWORD", "test-password")
@@ -27,8 +29,12 @@ def test_topic_library_is_complete():
         keys.add(t["key"])
         for f in ("topic", "title_line", "on_screen_hook", "hook", "vo", "lines", "hashtags", "match", "require", "queries"):
             assert t.get(f), (t["key"], f)
-        assert 2 <= len(t["vo"]) <= 3 and all(v["say"] and v["show"] for v in t["vo"])
-        assert sum(len(v["say"].split()) for v in t["vo"]) <= 20  # fits the 8 s formula
+        assert 7 <= len(t["vo"]) <= 14 and all(v["say"] and v["show"] for v in t["vo"])
+        # long enough to carry a 31-55 s Short at an unhurried read (~2.3 words/s), short enough to fit 55 s
+        words = sum(len(v["say"].split()) for v in t["vo"])
+        assert 70 <= words <= 125, (t["key"], words)
+        assert all(len(v["show"]) <= 60 for v in t["vo"]), t["key"]
+        assert not any("8 second" in x or "8-second" in x for x in t["lines"] + [t["hook"]])
 
 
 def test_score_topics_uses_views_per_hour():
@@ -63,6 +69,11 @@ def test_music_manifest_is_cc0_with_beats():
         assert t["license"] == "CC0 1.0" and "freesound.org" in t["source"]
         assert os.path.exists(os.path.join(fm.MUSIC_DIR, t["file"]))
         assert len([b for b in t["beats"] if b < 8]) >= 8
+        # beds cover the longest allowed clip without looping
+        dur = float(subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0",
+                                    os.path.join(fm.MUSIC_DIR, t["file"])], capture_output=True, text=True).stdout or 0)
+        assert dur >= fm.MAX_SECONDS and t["seconds"] >= fm.MAX_SECONDS
+        assert t["beats"][-1] >= 40
 
 
 @pytest.mark.parametrize("name,ok", [("Public domain", True), ("CC0", True), ("CC BY 2.0", True), ("CC BY 4.0", True),
@@ -177,7 +188,7 @@ def test_render_is_capcut_and_meta_safe(tmp_path):
     shots.append({"path": still, "kind": "image", "start": 0.0, "dur": 0.0})
     music = fm.load_music("cinematic")
     cuts = fm.beat_cuts(music["beats"])
-    bounds = [0.0] + cuts + [fm.TOTAL_SECONDS]
+    bounds = [0.0] + cuts + [8.0]
     for s, a, b in zip(shots, bounds, bounds[1:]):
         s["dur"] = round(b - a, 3)
     caps = [{"text": "June 6, 1944.", "start": 0.35, "end": 2.6}, {"text": "One day.", "start": 2.8, "end": 4.0}]
@@ -240,7 +251,7 @@ def test_produce_uses_footage_engine_without_gemini(monkeypatch, tmp_path):
     monkeypatch.setenv("VIDEO_ENGINE", "footage")
     vert, land = str(tmp_path / "g2_footage_x.mp4"), str(tmp_path / "g2_footage_x_16x9.mp4")
     concept = fm.build_concept(ft.BY_KEY["titanic-1912"], [{"credit_short": "Wikimedia Commons (public domain)"}])
-    info = {"media_source": "archival_footage", "format": "single_8s", "landscape_path": land, "cost_usd": 0.0}
+    info = {"media_source": "archival_footage", "format": "footage_short", "landscape_path": land, "cost_usd": 0.0}
 
     def fake_produce(out_dir, **kw):
         return vert, land, dict(concept), dict(info)
@@ -288,10 +299,10 @@ def test_vertical_is_full_bleed_not_padded(tmp_path):
     for band in (img[:250], img[-250:]):
         assert detail(band) > 0.4 * mid
     assert img[:40].mean() > 30 and img[-40:].mean() > 30  # no black letterbox
-    # exactly 8.0 s at 30 fps
+    # exactly sum(dur) = 8.0 s at 30 fps
     n = subprocess.run(["ffprobe", "-v", "error", "-count_frames", "-select_streams", "v:0", "-show_entries",
                         "stream=nb_read_frames", "-of", "csv=p=0", out], capture_output=True, text=True).stdout.strip()
-    assert int(n) == int(fm.TOTAL_SECONDS * fm.FPS)
+    assert int(n) == int(8.0 * fm.FPS)
 
 
 def test_focus_x_reads_local_files(tmp_path):
@@ -341,3 +352,348 @@ def test_off_era():
     assert not fm.off_era("Mount St. Helens--Legacies of the 1980 eruption", 1980)
     assert not fm.off_era("Titanic Disaster - Genuine Footage (1911-1912)(enhanced).webm", 1912)
     assert not fm.off_era("Artemis I Launch (KSC-20221116).webm", 2022)
+
+
+# --------------------------------------------------------------------------- 31-55 s length rule (Bret 2026-11-12)
+
+def test_length_constants():
+    assert fm.MIN_SECONDS == 31.0 and fm.MAX_SECONDS == 55.0
+    assert fm.MIN_SECONDS <= fm.TARGET_SECONDS <= fm.MAX_SECONDS
+    assert fm.length_ok(31.0) and fm.length_ok(45) and fm.length_ok(55.0)
+    assert not fm.length_ok(8.0) and not fm.length_ok(30.99) and not fm.length_ok(55.01) and not fm.length_ok(None)
+
+
+def test_target_ignores_stale_8s_setting_and_is_clamped(monkeypatch):
+    monkeypatch.delenv("FOOTAGE_TARGET_SECONDS", raising=False)
+    monkeypatch.setenv("AUTONOMOUS_VIDEO_DURATION", "8")
+    assert fm.target_seconds() == 45.0
+    for raw, want in (("8", 31.0), ("120", 55.0), ("40", 40.0), ("junk", 45.0)):
+        monkeypatch.setenv("FOOTAGE_TARGET_SECONDS", raw)
+        assert fm.target_seconds() == want
+
+
+@pytest.mark.parametrize("vo,want", [(0.0, 45.0), (8.0, 45.0), (20.0, 45.0), (43.4, 45.0), (46.0, 47.6), (60.0, 55.0)])
+def test_plan_total_covers_vo_within_bounds(monkeypatch, vo, want):
+    monkeypatch.delenv("FOOTAGE_TARGET_SECONDS", raising=False)
+    assert fm.plan_total(vo) == pytest.approx(want)
+    assert fm.length_ok(fm.plan_total(vo))
+
+
+def test_fit_total_fails_instead_of_shipping_short():
+    assert fm.fit_total(45.0, 11) == 45.0
+    assert fm.fit_total(45.0, 5) == pytest.approx(min(45.0, 5 * fm.MAX_SHOT_SECONDS))
+    with pytest.raises(RuntimeError, match="31"):
+        fm.fit_total(45.0, 4)  # 4 x 6.5 s = 26 s < 31 s
+    with pytest.raises(RuntimeError):
+        fm.fit_total(45.0, 0)
+
+
+@pytest.mark.parametrize("total", [31.0, 38.2, 45.0, 48.37, 55.0])
+def test_shot_durations_sum_exactly_and_respect_shot_limits(total):
+    music = fm.load_music("emotional")
+    n = fm.shot_count(total)
+    cuts, durs = fm.shot_durations(fm.music_beats(music, total), n, total)
+    assert len(durs) == n and sum(durs) == pytest.approx(total, abs=1e-6)
+    assert all(fm.MIN_SHOT_SECONDS - 1e-6 <= d <= fm.MAX_SHOT_SECONDS + 1e-6 for d in durs), durs
+    beats = set(fm.music_beats(music, total))
+    assert sum(c in beats for c in cuts) >= len(cuts) - 1  # cut on the beat
+
+
+def test_short_bed_is_looped_on_a_bar():
+    music = {"beats": [round(i * 0.5, 3) for i in range(20)], "seconds": 10.0}
+    assert fm.loop_seconds(music) == 8.0  # 16 beats = 4 bars
+    grid = fm.music_beats(music, 45.0)
+    assert grid[-1] > 44 and 8.0 in grid and 16.5 in grid
+
+
+def test_vo_is_never_sped_up_and_drops_trailing_lines(monkeypatch, tmp_path):
+    import numpy as np
+    speeds = []
+
+    class FakeKokoro:
+        def get_voice_style(self, name):
+            return np.ones(4, dtype=np.float32)
+
+        def create(self, text, voice, speed, lang):
+            speeds.append(speed)
+            return np.full(int(24000 * 0.2 * len(text.split())), 0.2, dtype=np.float32), 24000
+
+    monkeypatch.setattr(fm, "_kokoro", lambda: FakeKokoro())
+    lines = [{"say": "one two three four five six seven eight nine ten", "show": f"line {i}"} for i in range(30)]
+    wav, caps, info = fm.synth_vo(lines, str(tmp_path))
+    assert set(speeds) == {fm.VO_SPEED} and fm.VO_SPEED <= 1.0
+    assert info["seconds"] <= fm.MAX_SECONDS - fm.VO_TAIL
+    assert 0 < len(caps) < 30 and caps[-1]["end"] <= fm.MAX_SECONDS
+
+
+def test_plan_shots_returns_what_exists_and_fails_below_minimum(tmp_path):
+    cands = [{"provider": "wikimedia_commons", "kind": "video", "title": f"Titanic reel {i}", "url": f"https://x/{i}.webm",
+              "page": "p", "author": "a", "license": "Public domain", "credit_short": "Wikimedia Commons (public domain)"}
+             for i in range(3)]
+    probe_fn = lambda src: {"width": 1280, "height": 720, "duration": 300.0}
+    segs = lambda src, dur, need, shot_len, crop=None: [(10.0 + 20 * k, 5.0 - k * 0.1) for k in range(need)]
+    loc = lambda c, src, start, dur, workdir, i: {"path": f"{src}@{start}", "kind": "video", "start": 0.0, "dur": dur}
+    kw = dict(probe_fn=probe_fn, segment_fn=segs, crop_fn=lambda *a: None, localize_fn=loc)
+    got = fm.plan_shots(cands, 11, str(tmp_path), [], min_need=fm.min_shots(), **kw)
+    assert len(got) == 11 and all(s["dur"] == fm.SEGMENT_SECONDS for s, _ in got)
+    with pytest.raises(RuntimeError, match="usable on-topic shots"):
+        fm.plan_shots(cands[:1], 11, str(tmp_path), [], min_need=fm.min_shots(),
+                      **{**kw, "segment_fn": lambda *a, **k: [(10.0, 5.0), (40.0, 4.0)]})
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg not installed")
+def test_render_long_clip_both_orientations_in_bounds(tmp_path):
+    """A real ffmpeg render of a planned 45 s footage clip: both files measure 31-55 s with ffprobe."""
+    total = fm.plan_total(40.0)
+    n = fm.shot_count(total)
+    shots = []
+    for i in range(n):
+        p = str(tmp_path / f"s{i}.mp4")
+        subprocess.run(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", f"testsrc2=size=640x360:rate=25",
+                        "-t", f"{fm.SEGMENT_SECONDS + 0.4}", "-pix_fmt", "yuv420p", p], check=True)
+        shots.append({"path": p, "kind": "video", "start": 0.0, "dur": 0.0})
+    music = fm.load_music("dark_build")
+    _, durs = fm.shot_durations(fm.music_beats(music, total), n, total)
+    for s, d in zip(shots, durs):
+        s["dur"] = d
+    caps = [{"text": f"Line {i}", "start": 0.35 + 4 * i, "end": 3.9 + 4 * i} for i in range(10)]
+    for orient in ("vertical", "landscape"):
+        out = str(tmp_path / f"{orient}.mp4")
+        info = fm.render(shots, None, caps, music, "TITANIC · 1912", "Footage: test", out, orient, str(tmp_path))
+        assert fm.length_ok(info["duration"]) and abs(info["duration"] - total) < 0.1, info["duration"]
+        a = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=duration",
+                            "-of", "csv=p=0", out], capture_output=True, text=True).stdout.strip()
+        assert abs(float(a) - total) < 0.15  # music covers the whole clip
+
+
+def test_produce_footage_rejects_out_of_bounds_render(monkeypatch, tmp_path):
+    topic = ft.BY_KEY["titanic-1912"]
+    rec = {"provider": "wikimedia_commons", "credit_short": "Wikimedia Commons (public domain)"}
+    monkeypatch.setattr(fm, "gather_candidates", lambda t: ([{"title": "x"}], []))
+    monkeypatch.setattr(fm, "synth_vo", lambda lines, wd, max_total=None: (None, [], {"seconds": 40.0}))
+    monkeypatch.setattr(fm, "plan_shots", lambda c, need, wd, log, **k: [({"path": "p", "kind": "video", "dur": 7.0}, dict(rec))
+                                                                       for _ in range(need)])
+    monkeypatch.setattr(fm, "focus_x", lambda *a: 0.5)
+    seen = {}
+
+    def fake_render(shots, *a, **k):
+        seen["total"] = sum(s["dur"] for s in shots)
+        return {"duration": 8.0}
+    monkeypatch.setattr(fm, "render", fake_render)
+    with pytest.raises(RuntimeError, match="outside 31-55"):
+        fm.produce_footage(str(tmp_path), topic_key=topic["key"], workdir=str(tmp_path / "w"))
+    assert seen["total"] == pytest.approx(45.0)
+
+
+def test_produce_footage_fails_when_footage_too_thin(monkeypatch, tmp_path):
+    monkeypatch.setattr(fm, "gather_candidates", lambda t: ([], []))
+    monkeypatch.setattr(fm, "synth_vo", lambda lines, wd, max_total=None: (None, [], {"seconds": 40.0}))
+
+    def thin(c, need, wd, log, min_need=None, **k):
+        raise RuntimeError(f"only 2 usable on-topic shots (need {min_need} for 31s)")
+    monkeypatch.setattr(fm, "plan_shots", thin)
+    monkeypatch.setattr(fm, "render", lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not render")))
+    with pytest.raises(RuntimeError, match="no usable footage"):
+        fm.produce_footage(str(tmp_path), topic_key="titanic-1912", workdir=str(tmp_path / "w"))
+
+
+def test_no_8_second_copy_left_in_footage_path():
+    import inspect
+    for mod in (fm, ft):
+        src = inspect.getsource(mod)
+        assert "cut to 8 seconds" not in src and "single_8s" not in src and "TOTAL_SECONDS = 8" not in src
+
+
+def test_apollo11_rejects_other_apollo_missions():
+    t = ft.BY_KEY["apollo11-1969"]
+    cands = [{"provider": "wikimedia_commons", "kind": "video", "id": i, "title": title, "description": "Apollo 11 launch"}
+             for i, title in enumerate(["Apollo 13 Launch and Post-Launch (KSC-19700411-MH-NAS01-0001).webm",
+                                        "Apollo 8 Saturn V liftoff.webm",
+                                        "Apollo 11 launch, video of engines at 500 fps (camera E-8).ogv",
+                                        "The Eagle Has Landed, The Flight of Apollo 11, 1969.webm"])]
+
+    def fake_get(*a, **k):
+        raise RuntimeError("offline")
+    import unittest.mock as um
+    with um.patch.object(fm, "search_nasa", lambda *a, **k: []), um.patch.object(fm, "search_archive", lambda *a, **k: []), \
+            um.patch.object(fm, "search_commons", lambda q, media="video", get=None: cands if media == "video" else []):
+        kept, _ = fm.gather_candidates(t, get=fake_get)
+    titles = [c["title"] for c in kept]
+    assert not any("Apollo 13" in x or "Apollo 8" in x for x in titles)
+    assert any("Apollo 11 launch" in x for x in titles) and any("Eagle Has Landed" in x for x in titles)
+
+
+# --------------------------------------------------------------------------- viral-first topic selection (Bret 2026-11-12)
+
+class _Resp:
+    def __init__(self, data):
+        self._d = data
+
+    def json(self):
+        return self._d
+
+
+_LEAD = ("The Hindenburg disaster was an airship accident that occurred on May 6, 1937, in Manchester Township, New Jersey. "
+         "The German passenger airship LZ 129 Hindenburg caught fire and was destroyed during its attempt to dock with its "
+         "mooring mast at Naval Air Station Lakehurst. There were 97 people on board, and 36 of them died, along with one "
+         "worker on the ground. The disaster was the subject of newsreel coverage, photographs and Herbert Morrison's recorded "
+         "radio eyewitness reports from the landing field, which were broadcast the next day. A variety of theories have been "
+         "put forward for both the cause of ignition and the initial fuel for the ensuing fire. The event shattered public "
+         "confidence in the giant, passenger-carrying rigid airship and marked the abrupt end of the airship era.\n\n\n"
+         "Flight\n"
+         "The Hindenburg left Frankfurt on the evening of May 3, 1937. "
+         "Strong headwinds slowed the crossing of the Atlantic. "
+         "Storms over the landing field delayed the arrival by several hours. "
+         "At 7:25 p.m., the airship caught fire and quickly became engulfed in flames. "
+         "The tail struck the ground first, followed by the burning hull. "
+         "Ground crew and survivors ran from the wreck as the frame collapsed. "
+         "Within a minute, the giant ship lay burning on the field. "
+         "Newsreel cameras recorded the whole fire from start to finish.")
+
+
+def _fake_wiki(pages):
+    def get(url, params=None, **k):
+        assert "wikipedia.org" in url
+        if params.get("list") == "search":
+            q = params["srsearch"].lower()
+            return _Resp({"query": {"search": [{"title": t} for t in pages if any(w in q for w in t.lower().split())]}})
+        t = params["titles"]
+        p = pages[t]
+        return _Resp({"query": {"pages": {"1": {"title": t, "description": p[0], "extract": p[1]}}}})
+    return get
+
+
+def test_year_words_and_spoken():
+    assert fm.year_words(1912) == "nineteen twelve" and fm.year_words(1903) == "nineteen oh three"
+    assert fm.year_words(2022) == "twenty twenty-two" and fm.year_words(2000) == "two thousand"
+    assert fm.spoken("On May 6, 1937, 36 died.") == "On May 6, nineteen thirty-seven, 36 died."
+
+
+def test_script_from_text_is_long_enough_and_caption_sized():
+    vo = fm.script_from_text(_LEAD, name="Hindenburg disaster")
+    shows = [v["show"] for v in vo]
+    assert 60 <= sum(len(v.split()) for v in shows) <= 100
+    # every caption is one whole, tightened sentence that fits on screen; no headings, no "p.m." split, no asides
+    assert all(v["parts"] == [v["show"]] and len(v["show"]) <= fm.CAPTION_MAX_CHARS for v in vo)
+    assert all(s.endswith(".") and s[0].isupper() for s in shows) and "(" not in " ".join(shows)
+    assert "Hindenburg" in shows[0] and not any(s.startswith("Flight") for s in shows)
+    assert "At 7:25 pm, the airship caught fire and quickly became engulfed in flames." in shows
+    assert fm.script_from_text("Too short. Not enough here to narrate.") == []
+
+
+def test_viral_scan_determines_topic_not_the_library():
+    pages = {"Chernobyl disaster": ("1986 nuclear accident in the Soviet Union", _LEAD.replace("Hindenburg", "Chernobyl")),
+             "MrBeast": ("American YouTuber (born 1998)", "Jimmy Donaldson (born May 7, 1998) is an American YouTuber.")}
+    items = [{"title": "I Gave Away 100 Cars | MrBeast", "views_per_hour": 900000},
+             {"title": "Trump speech reaction LIVE", "views_per_hour": 500000},
+             {"title": "Chernobyl disaster: rare footage #shorts", "views_per_hour": 40000},
+             {"title": "Titanic wreck new scan", "views_per_hour": 1000}]
+    log = []
+    picks = fm.viral_topics(items, get=_fake_wiki(pages), log=log)
+    keys = [p["topic"]["key"] for p in picks]
+    assert keys[0] == "viral-chernobyl-disaster"  # most-viewed usable viral subject wins
+    assert picks[0]["reason"] == "viral_subject" and picks[0]["topic"]["source"] == "viral_scan"
+    assert "titanic-1912" in keys  # a library topic only when a viral title names it (better script)
+    assert not any("mrbeast" in k or "trump" in k for k in keys)
+    assert any("news/politics" in l for l in log)
+    t = picks[0]["topic"]
+    assert re.search(t["require"], "Chernobyl Nuclear Power Plant 1986.webm", re.I)
+    assert t["text_credit"] and t["wikipedia"].startswith("https://en.wikipedia.org/wiki/")
+
+
+def test_no_viral_subject_means_no_canned_fallback(monkeypatch, tmp_path):
+    monkeypatch.setattr(fm, "wiki_subjects", lambda title, get=None, limit=2: [])
+    monkeypatch.setattr(fm, "gather_candidates", lambda t: (_ for _ in ()).throw(AssertionError("no library fallback")))
+    with pytest.raises(RuntimeError, match="not falling back"):
+        fm.produce_footage(str(tmp_path), viral={"top": [{"title": "Cute cat compilation", "views_per_hour": 5}]},
+                           workdir=str(tmp_path / "w"))
+
+
+def test_thin_viral_topic_is_skipped_for_the_next_viral_topic(monkeypatch, tmp_path):
+    tried = []
+    a = {**ft.BY_KEY["titanic-1912"]}
+    b = {**ft.BY_KEY["hindenburg-1937"]}
+    monkeypatch.setattr(fm, "viral_topics", lambda items, **k: [{"topic": a, "score": 9.0, "matched": []},
+                                                                {"topic": b, "score": 5.0, "matched": []}])
+    monkeypatch.setattr(fm, "gather_candidates", lambda t: (tried.append(t["key"]) or [], []))
+    monkeypatch.setattr(fm, "synth_vo", lambda lines, wd, max_total=None: (None, [], {"seconds": 40.0}))
+    rec = {"provider": "wikimedia_commons", "credit_short": "Wikimedia Commons (public domain)"}
+
+    def plan(c, need, wd, log, min_need=None, **k):
+        if len(tried) == 1:
+            raise RuntimeError("only 2 usable on-topic shots")
+        return [({"path": "p", "kind": "video", "dur": 7.0}, dict(rec)) for _ in range(need)]
+    monkeypatch.setattr(fm, "plan_shots", plan)
+    monkeypatch.setattr(fm, "focus_x", lambda *a: 0.5)
+    monkeypatch.setattr(fm, "render", lambda shots, *a, **k: {"duration": round(sum(s["dur"] for s in shots), 3)})
+    v, l, concept, info = fm.produce_footage(str(tmp_path), viral={"top": [{"title": "x"}]}, workdir=str(tmp_path / "w"))
+    assert tried == ["titanic-1912", "hindenburg-1937"] and info["topic_key"] == "hindenburg-1937"
+    assert fm.length_ok(info["duration_s"])
+
+
+def test_vo_with_caption_parts_times_each_piece(monkeypatch, tmp_path):
+    import numpy as np
+
+    class FakeKokoro:
+        def get_voice_style(self, name):
+            return np.ones(4, dtype=np.float32)
+
+        def create(self, text, voice, speed, lang):
+            return np.full(24000 * 3, 0.2, dtype=np.float32), 24000
+
+    monkeypatch.setattr(fm, "_kokoro", lambda: FakeKokoro())
+    lines = [{"say": "a b c", "show": "aaaa bbbb", "parts": ["aaaa", "bbbb"]}, {"say": "d", "show": "dd"}]
+    wav, caps, info = fm.synth_vo(lines, str(tmp_path))
+    assert wav and [c["text"] for c in caps] == ["aaaa", "bbbb", "dd"]
+    assert caps[0]["end"] == pytest.approx(caps[1]["start"]) and caps[1]["end"] < caps[2]["start"]
+
+
+def test_scanned_subject_rejects_homonym_clips():
+    t = fm.topic_from_subject({"title": "Wolf", "description": "Species of canine", "url": "https://en.wikipedia.org/wiki/Wolf",
+                               "lead": _LEAD.replace("Hindenburg", "wolf")})
+    ex = re.compile(t["exclude"], re.I)
+    assert ex.search("Chief Little Wolf vs Fred Atkins, Sydney, 1947.webm") and ex.search("Kamala Harris questions Chad Wolf.webm")
+    assert t["title_only"]
+    assert not ex.search("Gray wolf pack in Yellowstone.webm") and re.search(t["require"], "Gray wolf pack in Yellowstone.webm", re.I)
+
+
+def test_scanned_subject_searches_its_commons_category_only():
+    t = fm.topic_from_subject({"title": "Cheetah", "description": "Species of large cat", "commons_category": "Acinonyx jubatus",
+                               "url": "https://en.wikipedia.org/wiki/Cheetah", "lead": _LEAD.replace("Hindenburg", "cheetah")})
+    assert t["queries"]["commons_cat"] == ["Acinonyx jubatus"] and t["queries"]["commons"] == [] and t["queries"]["archive"] == []
+    assert t["max_per_source"] == 2 and re.search(t["require"], "Juvenile Cheetahs at a kill.webm", re.I)
+
+
+def test_scanned_subject_caps_clips_per_source(tmp_path):
+    cands = [{"provider": "wikimedia_commons", "kind": "video", "title": "Cheetah run", "url": "https://x/1.webm",
+              "page": "p", "author": "a", "license": "Public domain", "credit_short": "Wikimedia Commons (public domain)"}]
+    kw = dict(probe_fn=lambda src: {"width": 1280, "height": 720, "duration": 600.0}, crop_fn=lambda *a: None,
+              segment_fn=lambda src, dur, need, shot_len, crop=None: [(10.0 + 30 * k, 5.0) for k in range(need)],
+              localize_fn=lambda c, src, start, dur, workdir, i: {"path": "p", "kind": "video", "start": 0.0, "dur": dur})
+    assert len(fm.plan_shots(cands, 11, str(tmp_path), [], min_need=1, **kw)) == 11  # library topics: unchanged
+    with pytest.raises(RuntimeError, match="usable on-topic shots"):
+        fm.plan_shots(cands, 11, str(tmp_path), [], min_need=fm.min_shots(), max_per_source=2, **kw)
+
+
+def test_tighten_keeps_main_clause():
+    assert fm.tighten("The wolf, also known as the grey wolf or gray wolf, is a canine native to Eurasia.") == \
+        "The wolf is a canine native to Eurasia."
+    assert fm.tighten("More than thirty subspecies have been recognized, including the dog and dingo, though grey "
+                      "wolves include only wild subspecies.") == "More than thirty subspecies have been recognized."
+
+
+def test_scanned_subject_copy_matches_its_kind_not_history():
+    lead = _LEAD.replace("Hindenburg disaster was an airship accident", "cheetah is a large cat").replace("Hindenburg", "cheetah")
+    t = fm.topic_from_subject({"title": "Cheetah", "description": "Large cat species", "commons_category": "Acinonyx jubatus",
+                               "url": "https://en.wikipedia.org/wiki/Cheetah", "lead": lead, "text": lead})
+    assert t["kind"] == "wildlife" and "·" not in t["on_screen_hook"]
+    c = fm.build_concept(t, [{"credit_short": "Wikimedia Commons (CC BY 4.0)"}])
+    assert "#History" not in c["hashtags"] and "#Wildlife" in c["hashtags"] and "history" not in c["comment_question"].lower()
+    assert len(c["lines"]) == 2 and "Wikipedia (CC BY-SA 4.0)" in c["lines"][0] and len(c["lines"][0]) <= 110
+    lib = fm.build_concept(fm.footage_topics.TOPICS[0], [])
+    assert "#History" in lib["hashtags"]
+
+
+def test_fit_caption_three_lines_for_long_sentence():
+    text, size = fm.fit_caption("The global cheetah population was estimated at 6,517 mature individuals in 2021.", 26, 56)
+    assert text.count("\n") == 2 and size >= 48

@@ -117,6 +117,8 @@ after @6framestudios was spam-filtered. Other networks are unchanged.
 
 ## Autopilot format (2026-10-19)
 
+**Footage mode (`VIDEO_ENGINE=footage`, live since 2026-11-11):** the Short is a **31–55 second** edit of real public-domain/CC archival footage (target ~45 s) with a local Kokoro voiceover, and no generation API. Its length never follows `autonomous_video_duration`. See `docs/FOOTAGE_MODE.md`. The rest of this section describes the Veo generation path used when footage mode is off.
+
 Default Short = **one 8-second Veo 3.1 Lite clip** (science/physics "wow" lane, concrete visual title line such as
 "Trapped Lightning In Acrylic"), the format that performed best on TikTok. The stitched 20s multi-shot format
 (`stitched_shorts.py`) is kept but off; turn it back on with `AUTOPILOT_FORMAT=stitched` (or `STITCHED_SHORTS=1`,

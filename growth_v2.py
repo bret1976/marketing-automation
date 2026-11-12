@@ -1405,7 +1405,8 @@ async def produce(settings: dict, state: dict) -> Tuple[str, dict, dict]:
 
 
 def produce_footage(settings: dict, state: dict) -> Tuple[str, dict, dict]:
-    """VIDEO_ENGINE=footage (footage_mode.py): today's viral topic -> template script -> real public-domain /
+    """VIDEO_ENGINE=footage (footage_mode.py): the last-24h viral scan picks the subject -> script (library or
+    Wikipedia lead) -> real public-domain /
     CC footage -> beat-cut edit + local Kokoro VO + captions. 9:16 for Shorts/Reels/TikTok/Facebook, a 16:9
     twin (info["landscape_path"]) for LinkedIn/X. No Gemini, no paid API."""
     recent = [t for t in recent_post_topics(state) if t]

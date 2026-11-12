@@ -44,7 +44,19 @@ MUSIC_DIR = os.path.join(HERE, "footage_assets", "music")
 TALKING_HEAD = re.compile(r"\b(interview|briefing|press conference|fireside|reflect\w*|lecture|chat|podcast|panel|"
                           r"q ?& ?a|conference|news|webinar|town hall|remarks|speech|explained|reaction|trailer|animation|animated|"
                           r"game|minecraft|simulator|simulation|model|toy|lego|recreation|cgi|ai|ceremony|anniversary|commemorat\w*|"
-                          r"cemetery|museum|address|social|honou?rs?|memorial|tribute|wikimania|engineering facts)\b", re.I)
+                          r"cemetery|museum|address|social|honou?rs?|memorial|tribute|wikimania|engineering facts|remembrance|reporters?|"
+                          r"white house|oval office|president trump|trump|biden|obama|putin|zelensk\w*|iran|gaza|ukraine)\b", re.I)
+TITLE_YEAR = re.compile(r"(?<!\d)(1[89]\d\d|20[0-4]\d)(?!\d)")
+MODERN_MARK = re.compile(r"\b(hd|4k|8k|uhd|drone|gopro|dji)\b", re.I)
+
+
+def off_era(title: str, era: Optional[int]) -> bool:
+    """True when a clip is clearly from long after the event (a later year in the title, or modern-camera markers)."""
+    if not era:
+        return False
+    if any(int(y) >= era + 10 for y in TITLE_YEAR.findall(title or "")):
+        return True
+    return era < 1990 and bool(MODERN_MARK.search(title or ""))
 VIDEO_EXT = (".mp4", ".webm", ".ogv", ".mov", ".m4v", ".mpeg", ".mpg")
 IMAGE_EXT = (".jpg", ".jpeg", ".png", ".tif", ".tiff")
 
@@ -357,6 +369,24 @@ def search_pixabay(query: str, get: Callable = _get) -> List[dict]:  # UNVERIFIE
     return out
 
 
+def topic_year(topic: dict) -> Optional[int]:
+    """Year the topic is about (from its on-screen hook), so modern clips can't stand in for archival footage."""
+    m = re.search(r"\b(1[89]\d\d|20\d\d)\b", topic.get("on_screen_hook") or topic.get("hook") or "")
+    return int(m.group(1)) if m else None
+
+
+def screen_credit(credit: str, width: int, size: int) -> Tuple[str, int]:
+    """On-screen credit that always fits the frame: merge repeated '(public domain)' and wrap/shrink like captions."""
+    if not credit:
+        return "", size
+    body = credit[len("Footage: "):] if credit.startswith("Footage: ") else credit
+    parts = [x.strip() for x in body.split(";") if x.strip()]
+    pd = [x[:-len(" (public domain)")] for x in parts if x.endswith(" (public domain)")]
+    other = [x for x in parts if not x.endswith(" (public domain)")]
+    segs = ([", ".join(pd) + " (public domain)"] if pd else []) + other
+    return fit_caption("Footage: " + "; ".join(segs), width, size)
+
+
 def gather_candidates(topic: dict, get: Callable = _get) -> Tuple[List[dict], List[str]]:
     """Search every free source for the topic. Never raises; returns (candidates, errors)."""
     qs = topic.get("queries") or {}
@@ -384,6 +414,7 @@ def gather_candidates(topic: dict, get: Callable = _get) -> Tuple[List[dict], Li
             errors.append(f"{label}: {exc}"[:200])
     req = re.compile(topic.get("require") or ".", re.I)
     excl = re.compile(topic["exclude"], re.I) if topic.get("exclude") else None
+    era = topic_year(topic)
     seen, seen_titles, kept = set(), set(), []
     for c in cands:
         k = (c["provider"], c["id"])
@@ -400,7 +431,8 @@ def gather_candidates(topic: dict, get: Callable = _get) -> Tuple[List[dict], Li
         c["relevant"] = bool(req.search(text))
         c["title_match"] = bool(req.search(c.get("title") or ""))
         c["talking_head"] = bool(TALKING_HEAD.search(c.get("title") or ""))
-        if c["relevant"] and not c["talking_head"]:
+        c["off_era"] = off_era(c.get("title") or "", era)
+        if c["relevant"] and not c["talking_head"] and not c["off_era"]:
             kept.append(c)
     if sum(1 for c in kept if c["title_match"]) >= 2:  # enough on-topic titles: drop description-only matches
         kept = [c for c in kept if c["title_match"]]
@@ -792,7 +824,10 @@ def render(shots: List[dict], vo_wav: Optional[str], captions: List[dict], music
         text, size = fit_caption(c["text"], wrap_cap, cap_size)
         draws.append(_draw(workdir, text, font, size, cap_y, c["start"], min(c["end"], TOTAL_SECONDS), border=3, plate=True))
     if credit:
-        draws.append(_draw(workdir, credit[:90], _font(False) or font, cred_size, cred_y, 0.0, TOTAL_SECONDS,
+        ctext, csize = screen_credit(credit, int((1000 if vertical else 1800) / (cred_size * 0.52)), cred_size)
+        if "\n" in ctext and not vertical:
+            cred_y = f"h-{58 + int(csize * 1.2)}"
+        draws.append(_draw(workdir, ctext, _font(False) or font, csize, cred_y, 0.0, TOTAL_SECONDS,
                            alpha=0.7, border=2, fade=0.01))
     fc.append(f"[base]{','.join(draws)},fade=t=out:st={TOTAL_SECONDS - 0.35}:d=0.35[v]")
     # audio: CC0 music bed (starts on a downbeat), ducked under the Kokoro VO, loudness-normalised

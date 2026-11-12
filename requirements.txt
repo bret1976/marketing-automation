@@ -9,3 +9,4 @@ python-multipart==0.0.32
 pydantic==2.10.6
 yt-dlp[default,curl-cffi]
 reportlab==4.2.5
+kokoro-onnx==0.6.1

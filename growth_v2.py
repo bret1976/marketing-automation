@@ -44,6 +44,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
+import footage_mode
 import stitched_shorts
 import viral_research
 import x_policy
@@ -1317,6 +1318,8 @@ async def produce(settings: dict, state: dict) -> Tuple[str, dict, dict]:
     with backoff, walking the Lite->Fast ladder. The transform/repost fallback only runs if
     AUTOPILOT_TRANSFORM_FALLBACK=1 is set explicitly (off by default)."""
     loop = asyncio.get_running_loop()
+    if footage_mode.enabled():  # VIDEO_ENGINE=footage: real archival footage, no generation API, $0
+        return await loop.run_in_executor(None, produce_footage, settings, state)
     if stitched_shorts.enabled(settings):
         return await loop.run_in_executor(None, produce_stitched, settings, state)
     errors: List[str] = []
@@ -1401,6 +1404,19 @@ async def produce(settings: dict, state: dict) -> Tuple[str, dict, dict]:
     raise RuntimeError(f"All {len(errors)} original video attempts failed: " + " | ".join(errors)[-1500:])
 
 
+def produce_footage(settings: dict, state: dict) -> Tuple[str, dict, dict]:
+    """VIDEO_ENGINE=footage (footage_mode.py): today's viral topic -> template script -> real public-domain /
+    CC footage -> beat-cut edit + local Kokoro VO + captions. 9:16 for Shorts/Reels/TikTok/Facebook, a 16:9
+    twin (info["landscape_path"]) for LinkedIn/X. No Gemini, no paid API."""
+    recent = [t for t in recent_post_topics(state) if t]
+    avoid = {t["key"] for t in footage_mode.footage_topics.TOPICS if any(topics_similar(t["topic"], r) for r in recent)}
+    if len(avoid) >= len(footage_mode.footage_topics.TOPICS):
+        avoid = set()
+    out, landscape, concept, info = footage_mode.produce_footage(_main().GENERATED_DIR, avoid_keys=avoid, recent_topics=recent)
+    concept["title_line"] = pick_title(concept, past_titles(state))
+    return out, concept, info
+
+
 def produce_stitched(settings: dict, state: dict) -> Tuple[str, dict, dict]:
     """Stitched 20-30s Short (stitched_shorts.py): AI-filmmaking niche, originals only.
     Never falls back to a downloaded clip; per-shot retries and the cost cap live in the module."""
@@ -1471,7 +1487,7 @@ def build_staggered_posts(post: dict, info: dict, platforms: List[str], start: O
 
 def origin_of(media_source: Any) -> str:
     src = str(media_source or "").lower()
-    if src == "ai_generated":
+    if src in ("ai_generated", "archival_footage"):
         return "original"
     if src in {"transformed_repost", "original_download", "hosted_fallback", "repost"} or "download" in src or "repost" in src:
         return "repost"
@@ -1487,7 +1503,10 @@ def build_post(abs_video: str, concept: dict, info: dict, platforms: List[str]) 
     if info.get("format") == "stitched_short":
         captions.update(stitched_platform_captions(info, list(captions)))
     hook = clean_hook(concept["hook"])
+    landscape = info.get("landscape_path")
+    extra = {"landscape_video_path": f"/static/assets/generated/{os.path.basename(landscape)}"} if landscape else {}
     return {
+        **extra,
         "id": str(uuid.uuid4()),
         "platform": ",".join(platforms) if platforms else "none",
         "text": captions["linkedin"],
@@ -2206,7 +2225,8 @@ def health() -> dict:
         out["autopilot_format"] = stitched_shorts.autopilot_format(settings)
         out["shorts_cost_cap_usd"] = stitched_shorts.cost_cap(settings)
         out["single_cost_cap_usd"] = single_cost_cap(settings)
-        out["video_engines"] = engine_ladder()
+        out["video_engines"] = ["footage"] if footage_mode.enabled() else engine_ladder()
+        out["footage_mode"] = footage_mode.status()
         out["platforms"] = resolve_platforms(settings)[0]
     except Exception as exc:
         out["platforms_error"] = str(exc)[:200]

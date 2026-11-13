@@ -251,6 +251,7 @@ def test_produce_uses_footage_engine_without_gemini(monkeypatch, tmp_path):
     import asyncio
     import growth_v2
     monkeypatch.setenv("VIDEO_ENGINE", "footage")
+    monkeypatch.setenv("VIRAL_SCAN", "youtube")  # legacy finder path; the X path is covered in test_x_viral_scan.py
     vert, land = str(tmp_path / "g2_footage_x.mp4"), str(tmp_path / "g2_footage_x_16x9.mp4")
     concept = fm.build_concept(ft.BY_KEY["titanic-1912"], [{"credit_short": "Wikimedia Commons (public domain)"}])
     info = {"media_source": "archival_footage", "format": "footage_short", "landscape_path": land, "cost_usd": 0.0}

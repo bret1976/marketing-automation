@@ -800,7 +800,7 @@ def build_concept(topic: dict, sources: List[dict], viral_pick: Optional[dict] =
     if topic.get("text_credit"):
         first = [" ".join(x.rstrip(".") + "." for x in first + [topic["text_credit"]])]
     lines = first + ([credit] if credit else [])
-    base = [] if topic.get("source") == "viral_scan" else footage_topics.FOOTAGE_HASHTAGS
+    base = [] if topic.get("source") in ("viral_scan", "x_recreate") else footage_topics.FOOTAGE_HASHTAGS
     tags = list(dict.fromkeys(topic.get("hashtags", []) + base))[:5]
     return {
         "topic": topic["topic"], "topic_key": topic["key"].replace("-", " "),
@@ -1759,21 +1759,28 @@ def plan_shots(cands: List[dict], need: int, workdir: str, log: List[str],
 
 def produce_footage(out_dir: str, viral: Optional[dict] = None, avoid_keys: Optional[set] = None,
                     recent_topics: Optional[List[str]] = None, topic_key: Optional[str] = None,
-                    workdir: Optional[str] = None, name: Optional[str] = None) -> Tuple[str, str, dict, dict]:
-    """Returns (vertical_mp4, landscape_mp4, concept, info). Raises if no usable footage."""
+                    workdir: Optional[str] = None, name: Optional[str] = None,
+                    topic: Optional[dict] = None, viral_pick: Optional[dict] = None) -> Tuple[str, str, dict, dict]:
+    """Returns (vertical_mp4, landscape_mp4, concept, info). Raises if no usable footage.
+    topic + viral_pick (X viral scan, x_viral_scan.py): build exactly that recreate topic for that X post; the
+    YouTube scan is not run and no other topic is tried."""
     t0 = time.time()
     own_tmp = workdir is None
     workdir = workdir or tempfile.mkdtemp(prefix="footage_")
     os.makedirs(workdir, exist_ok=True)
     log: List[str] = []
     try:
-        if viral is None and not topic_key:
+        if viral is None and not topic_key and topic is None:
             viral = todays_viral()
         items = (viral or {}).get("top") or []
         attempts = int(os.environ.get("FOOTAGE_TOPIC_ATTEMPTS", 4))
         # viral-first: the scan picks the subject; no canned library topic fills the slot when nothing qualifies
-        order = ([pick_topic(items, forced=topic_key)] if topic_key else
-                 viral_topics(items, avoid_keys=avoid_keys, recent_topics=recent_topics, limit=attempts, log=log))
+        if topic is not None:
+            order = [dict(viral_pick or {}, topic=topic)]
+            attempts = 1
+        else:
+            order = ([pick_topic(items, forced=topic_key)] if topic_key else
+                     viral_topics(items, avoid_keys=avoid_keys, recent_topics=recent_topics, limit=attempts, log=log))
         log.append(f"viral scan: {len(items)} uploads -> topics {[(p['topic']['topic'], p['score']) for p in order]}")
         if not order:
             raise brand_gate.BrandGateSkip(

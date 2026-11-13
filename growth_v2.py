@@ -120,6 +120,7 @@ def save_approval_package(post: dict, concept: dict, info: dict, slot: Optional[
         "approve": f"POST {base}/api/approval-queue/{post.get('id')}/approve",
         "reject": f"POST {base}/api/approval-queue/{post.get('id')}/reject",
         "note": "Held for Bret's approval. Nothing posts unless the approve call is made; reject or no answer = never posts.",
+        "x_scan": info.get("x_scan"), "recreation": info.get("recreation"),
     }
     d = os.path.join(approvals_dir(), re.sub(r"[^A-Za-z0-9_.-]", "_", slot or post.get("id") or "manual"))
     os.makedirs(d, exist_ok=True)
@@ -1464,12 +1465,49 @@ def produce_footage(settings: dict, state: dict) -> Tuple[str, dict, dict]:
     Wikipedia lead) -> real public-domain /
     CC footage -> beat-cut edit + local Kokoro VO + captions. 9:16 for Shorts/Reels/TikTok/Facebook, a 16:9
     twin (info["landscape_path"]) for LinkedIn/X. No Gemini, no paid API."""
+    if x_scan_enabled():
+        return produce_x_recreate(settings, state)
     recent = [t for t in recent_post_topics(state) if t]
     avoid = {t["key"] for t in footage_mode.footage_topics.TOPICS if any(topics_similar(t["topic"], r) for r in recent)}
     if len(avoid) >= len(footage_mode.footage_topics.TOPICS):
         avoid = set()
     out, landscape, concept, info = footage_mode.produce_footage(_main().GENERATED_DIR, avoid_keys=avoid, recent_topics=recent)
     concept["title_line"] = pick_title(concept, past_titles(state))
+    return out, concept, info
+
+
+def x_scan_enabled() -> bool:
+    """Bret 2026-11-13 (t752u): the viral scan is the X scan (last 24 h, top 10 viral AI videos, easiest to
+    recreate). Default ON in footage mode; VIRAL_SCAN=youtube restores the old YouTube/open finder."""
+    return (os.environ.get("VIRAL_SCAN") or "x").strip().lower() != "youtube"
+
+
+def produce_x_recreate(settings: dict, state: dict, scan: Optional[dict] = None, out_dir: Optional[str] = None,
+                       name: Optional[str] = None) -> Tuple[str, dict, dict]:
+    """X scan -> top 10 -> easiest-to-recreate pick -> its $0 recipe rendered by footage_mode. Skips the slot
+    (BrandGateSkip) when X can't be read or nothing in the top 10 is recreatable at $0. Never publishes."""
+    import x_recreate_recipes
+    import x_viral_scan
+    if scan is None:
+        scan = x_viral_scan.run_scan(settings=settings, bearer_fetcher=getattr(_main(), "fetch_twitter_bearer_token", None))
+    best = scan.get("pick_item")
+    summary = {k: scan.get(k) for k in ("version", "scanned_at", "window_hours", "source", "posts_seen", "rubric", "top", "pick")}
+    if not best:
+        raise brand_gate.BrandGateSkip(
+            "SKIP: none of the top 10 viral AI videos on X (last 24 h) is recreatable at $0 "
+            f"(real people / copyrighted IP / no free recipe): {[(t['author'], t['recreate_score'], t['blocks']) for t in scan.get('top') or []]}")
+    topic = x_recreate_recipes.build_topic(best["recreate"]["recipe"], best)
+    prov = x_viral_scan.provenance(best)
+    pick = {"score": prov["views_per_hour"], "matched": [prov], "reason": f"x_recreate:{best['recreate']['recipe']}"}
+    out, landscape, concept, info = footage_mode.produce_footage(out_dir or _main().GENERATED_DIR, topic=topic, viral_pick=pick,
+                                                                 name=name)
+    concept["title_line"] = topic["title_line"]
+    info["x_scan"] = summary
+    info["recreation"] = {
+        "source_post": prov, "recipe": best["recreate"]["recipe"], "score": best["recreate"],
+        "method": "free footage pipeline (public-domain / CC archival footage + photos, local Kokoro voice, ffmpeg); "
+                  "NOT AI-generated - the app has no free AI video generator",
+        "cost_usd": 0.0}
     return out, concept, info
 
 

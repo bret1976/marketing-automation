@@ -3577,6 +3577,36 @@ def reject_post(post_id: str):
     raise HTTPException(status_code=404, detail="Post not found in approval queue.")
 
 # ==========================================================================
+# X VIRAL SCAN (Bret 2026-11-13 t752u): top 10 viral AI videos on X in the last 24 h -> easiest to recreate.
+# Reading X needs X_BEARER_TOKEN (none on the live app as of 2026-11-13). Without it, a fresh snapshot of the
+# same X API v2 responses can be uploaded here; X_SCAN_INGEST_TOKEN must be set and sent as X-Scan-Token.
+# ==========================================================================
+
+@app.post("/api/x-scan/snapshot")
+async def upload_x_scan_snapshot(request: Request):
+    import x_viral_scan
+    token = os.environ.get("X_SCAN_INGEST_TOKEN", "")
+    if not token or not hmac.compare_digest(request.headers.get("x-scan-token", ""), token):
+        raise HTTPException(status_code=403, detail="X scan snapshot upload is disabled or the token is wrong.")
+    snap = await request.json()
+    if not isinstance(snap, dict) or not snap.get("fetched_at") or not isinstance(snap.get("post_payloads"), list):
+        raise HTTPException(status_code=400, detail="Snapshot needs fetched_at and post_payloads (X API v2 responses).")
+    write_json_file(x_viral_scan.snapshot_path(), snap)
+    return {"status": "SUCCESS", "path": x_viral_scan.snapshot_path()}
+
+
+@app.get("/api/x-scan/preview")
+def preview_x_scan():
+    """Read-only: runs the X scan now and returns the top 10 with recreate scores and the pick. Renders and posts nothing."""
+    import x_viral_scan
+    try:
+        res = x_viral_scan.run_scan(settings=load_settings(), bearer_fetcher=fetch_twitter_bearer_token)
+    except x_viral_scan.XScanUnavailable as exc:
+        return {"ok": False, "skip_reason": str(exc)}
+    res.pop("pick_item", None)
+    return {"ok": True, **res}
+
+# ==========================================================================
 # ANALYTICS FEEDBACK LOOP — tracks real Twitter engagement on published posts
 # and surfaces a data-driven recommended posting hour. LinkedIn metrics are
 # not available: personal-profile posts aren't exposed by LinkedIn's API

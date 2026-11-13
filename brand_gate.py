@@ -109,6 +109,8 @@ def check_viral_item(it: dict, now: Optional[datetime] = None, max_age: float = 
             "author": it.get("author"), "published_at": it.get("published_at"), "views": it.get("views"),
             "views_per_hour": it.get("views_per_hour"), "likes": it.get("likes"), "comments": it.get("comments")}
     body = title_text(title)
+    if str(it.get("platform") or "").upper() == "X":  # X viral scan (x_viral_scan.py, Bret 2026-11-13 t752u)
+        return _check_x_item(it, prov, body, now, max_age)
     if not GENRE_RE.search(body):
         why = "AI-filmmaking tag only in hashtags" if GENRE_RE.search(title) or re.search(r"#ai\w*", title, re.I) else "off-genre"
         return False, f"{why}: {title[:80]}", prov
@@ -123,6 +125,34 @@ def check_viral_item(it: dict, now: Optional[datetime] = None, max_age: float = 
         return False, f"not within {max_age:.0f}h ({age:.1f}h old): {title[:80]}", prov
     if not it.get("url") or not int(it.get("views") or 0):
         return False, f"no url/engagement recorded: {title[:80]}", prov
+    return True, "", prov
+
+
+X_PROMPT_SHARING = re.compile(r"\bprompts?\b|\bprompting\b|\bprompted\b", re.I)
+X_GENRE_EVIDENCE = re.compile(r"\bai\b|\bai-generated\b|@imagine|grok ?imagine|veo|sora|kling|seedance|runway|higgsfield", re.I)
+
+
+def _check_x_item(it: dict, prov: dict, body: str, now: datetime, max_age: float) -> Tuple[bool, str, dict]:
+    """An X post picked by the X viral scan: native video, genre evidence recorded (an X News story about an AI
+    video that clusters the post, or AI-video wording in the post), not prompt-sharing, <= max_age hours, url +
+    views recorded."""
+    prov.update(platform="X", genre_evidence=it.get("genre_evidence"), video_duration_s=it.get("video_duration_s"))
+    ev = it.get("genre_evidence") or ""
+    if not X_GENRE_EVIDENCE.search(ev):
+        return False, f"X post has no AI-video genre evidence: {it.get('url')}", prov
+    if X_PROMPT_SHARING.search(body):
+        return False, f"X prompt-sharing post (excluded): {it.get('url')}", prov
+    if not it.get("video_duration_s"):
+        return False, f"X post has no native video recorded: {it.get('url')}", prov
+    pub = _parse_iso(it.get("published_at"))
+    if not pub:
+        return False, f"no post time: {it.get('url')}", prov
+    age = (now - pub).total_seconds() / 3600.0
+    prov["age_hours_at_check"] = round(age, 2)
+    if age < 0 or age > max_age:
+        return False, f"not within {max_age:.0f}h ({age:.1f}h old): {it.get('url')}", prov
+    if not it.get("url") or not int(it.get("views") or 0):
+        return False, f"no url/views recorded: {it.get('url')}", prov
     return True, "", prov
 
 

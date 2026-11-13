@@ -8,7 +8,7 @@ Pipeline (all free, all local except the public archive searches):
                Wikimedia Commons (PD / CC0 / CC BY only), Internet Archive (public-domain / Prelinger).
                Pexels / Pixabay only when PEXELS_API_KEY / PIXABAY_API_KEY are set. Every clip's
                source page, author and license is recorded in info["footage_sources"].
-  4. edit    - ~8-12 shots (2.2-6.5 s each) cut on the music beat (CC0 Freesound beds, pre-analysed beat grid),
+  4. edit    - ~4-6 shots (2.2-11 s each) cut on the music beat (CC0 Freesound beds, pre-analysed beat grid),
                denoise + sharpen + desaturated cinematic grade + grain, Ken Burns only on stills,
                Kokoro (local ONNX) voiceover, burned-in hook + VO captions + source credit.
   5. output  - 1080x1920 (YouTube Shorts / Instagram / TikTok / Facebook) and 1920x1080 (LinkedIn / X),
@@ -40,13 +40,13 @@ import footage_topics
 
 logger = logging.getLogger(__name__)
 MARKER = "FOOTAGE_MODE"
-VERSION = "2026-11-12.3"
+VERSION = "2026-11-12.4"
 MIN_SECONDS = 31.0  # hard floor for every output file (Bret 2026-11-12)
 MAX_SECONDS = 55.0  # hard ceiling for every output file (still a Short everywhere)
 TARGET_SECONDS = 45.0  # aim here when enough good on-topic footage exists
 MIN_SHOT_SECONDS = 2.2
-MAX_SHOT_SECONDS = 6.5  # longest single shot; more shots are used rather than holding one too long
-SHOT_SECONDS = 4.2  # typical shot length the plan aims for
+MAX_SHOT_SECONDS = 11.0  # 3 good archival shots can fill the 31s floor; still a multi-shot short
+SHOT_SECONDS = 8.0  # typical shot length the plan aims for
 SEGMENT_SECONDS = MAX_SHOT_SECONDS + 0.5  # every shot is cut this long so beat-snapped lengths always fit
 VO_SPEED = 0.95  # natural, unhurried read; never raised to squeeze lines in
 VO_LEAD = 0.35
@@ -1019,13 +1019,13 @@ def _gray_frames(src: str, start: float, seconds: float = 2.4, fps: float = 3.0,
                  crop: Optional[str] = None) -> List[bytes]:
     vf = (f"crop={crop}," if crop else "") + f"fps={fps},scale={w}:{h},format=gray"
     data = b""
-    for attempt in range(2):
+    for attempt in range(3):
         res = subprocess.run([_bin("ffmpeg"), "-v", "error", *_ua(src), "-ss", f"{start:.2f}", "-i", src, "-t", f"{seconds:.2f}",
                               "-vf", vf, "-f", "rawvideo", "-"], capture_output=True, timeout=120)
         data = res.stdout or b""
         if data or b"429" not in (res.stderr or b""):
             break
-        time.sleep(4)
+        time.sleep(8 * (attempt + 1))
     n = w * h
     return [data[i:i + n] for i in range(0, len(data) - n + 1, n)]
 
@@ -1130,7 +1130,19 @@ def choose_segments(src: str, duration: float, need: int, shot_len: float, max_p
             picked.append((s, t))
         if len(picked) >= need:
             break
-    return [(t, s) for s, t in picked]
+    if picked:
+        return [(t, s) for s, t in picked]
+    # Quality probes often return nothing when Wikimedia 429s the frame reads.
+    # A duration already accepted as HD still yields evenly spaced mid-film cuts
+    # rather than discarding the whole source.
+    fallback = []
+    nfb = max(need, 3)
+    span = max(hi - lo, 0.0)
+    for i in range(nfb):
+        t = lo + span * (i + 0.5) / nfb if span else 0.0
+        if t >= 0 and t + shot_len <= duration:
+            fallback.append((round(t, 3), 0.0))
+    return fallback
 
 
 # --------------------------------------------------------------------------- 4. music / beats
@@ -1507,6 +1519,11 @@ def render(shots: List[dict], vo_wav: Optional[str], captions: List[dict], music
     return probe(out_path)
 
 
+def _is_http_429(exc: BaseException) -> bool:
+    text = str(exc).lower()
+    return "429" in text or "too many requests" in text
+
+
 def localize(c: dict, src: str, start: float, dur: float, workdir: str, idx: int) -> dict:
     """Cut just the needed seconds (HTTP range reads) into a local mezzanine; stills are downloaded."""
     if c["kind"] == "image":
@@ -1520,7 +1537,8 @@ def localize(c: dict, src: str, start: float, dur: float, workdir: str, idx: int
     dest = os.path.join(workdir, f"shot{idx}.mp4")
     vf = ["-vf", f"crop={c['crop']}"] if c.get("crop") else []
     err = None
-    for attempt in range(3):  # Wikimedia/Archive rate-limit (429) or drop long range reads: back off and retry
+    attempts = 5  # Wikimedia 429s can last well past a 3-9s backoff
+    for attempt in range(attempts):
         try:
             _run([_bin("ffmpeg"), "-y", "-v", "error", *_ua(src), "-ss", f"{start:.3f}", "-i", src, "-t", f"{dur + 0.4:.3f}",
                   *vf, "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "12", "-pix_fmt", "yuv420p", dest], timeout=600)
@@ -1530,7 +1548,9 @@ def localize(c: dict, src: str, start: float, dur: float, workdir: str, idx: int
             err = RuntimeError(f"cut too short ({got:.2f}s < {dur:.2f}s)")
         except Exception as exc:
             err = exc
-        time.sleep(3 * (attempt + 1))
+        if attempt < attempts - 1:
+            delay = 15 * (attempt + 1) if (err is not None and _is_http_429(err)) else 3 * (attempt + 1)
+            time.sleep(delay)
     raise err
 
 
@@ -1677,6 +1697,8 @@ def produce_footage(out_dir: str, viral: Optional[dict] = None, avoid_keys: Opti
         for attempt, pick in enumerate(order[:attempts]):
             topic = pick["topic"]
             try:
+                logger.info("%s trying topic %s score=%s attempt=%s/%s",
+                            MARKER, topic["key"], pick.get("score"), attempt + 1, len(order[:attempts]))
                 cands, errs = gather_candidates(topic)
                 log += errs
                 log.append(f"topic {topic['key']} (viral score {pick.get('score')}): {len(cands)} relevant candidates")
@@ -1703,7 +1725,8 @@ def produce_footage(out_dir: str, viral: Optional[dict] = None, avoid_keys: Opti
                 last_err = exc
                 log.append(f"topic {topic['key']} failed: {exc}"[:220])
         else:
-            raise RuntimeError(f"no usable footage for any topic: {last_err}; log={log[-6:]}")
+            logger.error("%s no usable footage for any topic: %s | log=%s", MARKER, last_err, log)
+            raise RuntimeError(f"no usable footage for any topic: {last_err}; log={log}")
         sources = [rec for _, rec in shots]
         concept = build_concept(topic, sources, pick)
         name = name or f"g2_footage_{uuid.uuid4().hex}"

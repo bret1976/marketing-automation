@@ -382,8 +382,9 @@ def test_plan_total_covers_vo_within_bounds(monkeypatch, vo, want):
 def test_fit_total_fails_instead_of_shipping_short():
     assert fm.fit_total(45.0, 11) == 45.0
     assert fm.fit_total(45.0, 5) == pytest.approx(min(45.0, 5 * fm.MAX_SHOT_SECONDS))
+    assert fm.fit_total(45.0, 3) == pytest.approx(min(45.0, 3 * fm.MAX_SHOT_SECONDS))  # 3 x 11 s = 33 s
     with pytest.raises(RuntimeError, match="31"):
-        fm.fit_total(45.0, 4)  # 4 x 6.5 s = 26 s < 31 s
+        fm.fit_total(45.0, 2)  # 2 x 11 s = 22 s < 31 s
     with pytest.raises(RuntimeError):
         fm.fit_total(45.0, 0)
 
@@ -398,6 +399,40 @@ def test_shot_durations_sum_exactly_and_respect_shot_limits(total):
     beats = set(fm.music_beats(music, total))
     assert sum(c in beats for c in cuts) >= len(cuts) - 1  # cut on the beat
 
+def test_three_long_shots_can_fill_the_31s_floor():
+    assert fm.min_shots() <= 3
+    assert 3 * fm.MAX_SHOT_SECONDS >= fm.MIN_SECONDS
+    assert fm.VERSION == "2026-11-12.4"
+
+
+def test_choose_segments_falls_back_when_quality_probes_return_nothing(monkeypatch):
+    monkeypatch.setattr(fm, "segment_score", lambda *a, **k: None)
+    monkeypatch.setattr(fm, "_gray_frames", lambda *a, **k: [])
+    got = fm.choose_segments("https://example/film.webm", 296.0, need=5, shot_len=11.5)
+    assert len(got) >= 3
+    starts = [t for t, _ in got]
+    assert min(starts) >= 0 and max(starts) + 11.5 <= 296.0
+
+
+def test_localize_retries_longer_on_429(monkeypatch, tmp_path):
+    sleeps = []
+    monkeypatch.setattr(fm.time, "sleep", lambda s: sleeps.append(s))
+    calls = {"n": 0}
+
+    def boom(*a, **k):
+        calls["n"] += 1
+        raise RuntimeError("ffmpeg failed rc=8: stderr=Server returned 429 Too Many Requests")
+
+    monkeypatch.setattr(fm, "_run", boom)
+    c = {"kind": "video", "crop": None, "title": "x"}
+    try:
+        fm.localize(c, "https://upload.wikimedia.org/x.webm", 10.0, 11.0, str(tmp_path), 0)
+    except RuntimeError as exc:
+        assert "429" in str(exc)
+    else:
+        raise AssertionError("expected localize to raise")
+    assert calls["n"] == 5
+    assert sleeps == [15, 30, 45, 60]
 
 def test_short_bed_is_looped_on_a_bar():
     music = {"beats": [round(i * 0.5, 3) for i in range(20)], "seconds": 10.0}

@@ -40,7 +40,7 @@ import footage_topics
 
 logger = logging.getLogger(__name__)
 MARKER = "FOOTAGE_MODE"
-VERSION = "2026-11-12.5"
+VERSION = "2026-11-12.6"
 MIN_SECONDS = 31.0  # hard floor for every output file (Bret 2026-11-12)
 MAX_SECONDS = 55.0  # hard ceiling for every output file (still a Short everywhere)
 TARGET_SECONDS = 45.0  # aim here when enough good on-topic footage exists
@@ -346,20 +346,32 @@ def pick_topic(viral_items: List[dict], avoid_keys: Optional[set] = None, recent
     return best
 
 
-def todays_viral(queries: Optional[List[str]] = None) -> dict:
-    """Keyless (yt-dlp) last-24h finder from PR #23 over a broad 'what's going viral today' query set
-    (FOOTAGE_VIRAL_QUERIES overrides). Only titles/view counts are read; no viral video is downloaded."""
+def genre_queries(queries: Optional[List[str]] = None) -> List[str]:
+    """Search terms for the footage viral scan, always inside 6Frame Studio's genre (AI filmmaking).
+    An override (argument or FOOTAGE_VIRAL_QUERIES) keeps only its in-genre terms; a broad sweep
+    ('#shorts', 'viral', 'history', 'science' ...) is dropped, and if nothing in-genre is left the
+    genre defaults are used. Bret 2026-11-12: the viral scan must stay within the brand."""
     import open_viral
-    qs = queries or [q.strip() for q in (os.environ.get("FOOTAGE_VIRAL_QUERIES") or "|".join(BROAD_VIRAL_QUERIES)).split("|")
-                     if q.strip()]
+    raw = queries or [q.strip() for q in (os.environ.get("FOOTAGE_VIRAL_QUERIES") or "").split("|") if q.strip()]
+    kept = [q for q in raw if open_viral.NICHE_RE.search(q)]
+    return kept or list(GENRE_VIRAL_QUERIES)
+
+
+def todays_viral(queries: Optional[List[str]] = None) -> dict:
+    """Keyless (yt-dlp) last-24h finder from PR #23, limited to 6Frame Studio's genre: in-genre queries
+    AND the niche title filter (open_viral.NICHE_RE) forced on. Only titles/view counts are read;
+    no viral video is downloaded."""
+    import open_viral
+    qs = genre_queries(queries)
     os.environ.setdefault("VIRAL_OPEN_PROBE_LIMIT", os.environ.get("FOOTAGE_VIRAL_PROBE_LIMIT", "80"))
-    return open_viral.find_viral(queries=qs, subreddits=[], top_n=60, niche=False, max_seconds=3600)
+    return open_viral.find_viral(queries=qs, subreddits=[], top_n=60, niche=True, max_seconds=3600)
 
 
 # --------------------------------------------------------------------------- 1b. viral-first topic selection
 #
-# Bret 2026-11-12: the last-24h viral scan DETERMINES the video. The finder runs first over a broad
-# "what's going viral today" query set; each viral upload (ranked by views/hour) is resolved to the
+# Bret 2026-11-12: the last-24h viral scan DETERMINES the video, and it stays inside 6Frame Studio's genre
+# (AI filmmaking: AI short films, Veo / Sora / Kling / Runway / Seedance videos). Only uploads whose title is
+# in-genre (open_viral.NICHE_RE) count; each one (ranked by views/hour) is resolved to the
 # real-world subject it is about (a Wikipedia article named in the title), and footage mode then looks
 # for public-domain / CC archival footage of THAT subject. The viral videos themselves are never
 # downloaded or recut. A subject without enough licensed on-topic footage for 31 s is skipped and the
@@ -367,10 +379,16 @@ def todays_viral(queries: Optional[List[str]] = None) -> dict:
 # The hand-written library (footage_topics.py) is only used as a better, fact-checked script when the
 # viral subject IS one of its topics.
 
-BROAD_VIRAL_QUERIES = ("#shorts", "viral", "trending", "documentary", "history", "space", "science", "nature",
-                       "wildlife", "disaster", "engineering", "footage", "ocean", "volcano", "earthquake", "storm",
-                       "tornado", "weather", "animals", "shark", "aviation", "aircraft", "train", "military",
-                       "rocket launch", "nasa", "ww2", "ancient", "archaeology", "shipwreck")
+# in-genre only (every term matches open_viral.NICHE_RE); the old broad sweep picked a psychology "Mood" topic
+GENRE_VIRAL_QUERIES = ("ai short film", "ai film", "ai movie", "ai video", "ai generated video", "ai cinematic",
+                       "veo 3", "veo 3 short film", "sora ai video", "kling ai", "runway ai film", "seedance",
+                       "hailuo ai", "ai film history", "ai film documentary", "ai animation short film")
+# genre words stripped from an in-genre title before resolving what the film is ABOUT
+# ("TITANIC | AI Short Film made with Veo 3" -> "TITANIC")
+GENRE_WORDS = re.compile(r"\bai[ -]?(short ?film|film|movie|video|animation|generated|cinema|cinematic|art)\b|"
+                         r"\b(veo ?\d(\.\d)?|seedance|kling( ai)?|sora( ?2)?|runway( ml| gen-?\d)?|hailuo|midjourney|wan ?2(\.\d)?|"
+                         r"ltx|comfyui|stable diffusion|google flow)\b|#\w+|\b(made|created|generated)\s+(with|using|by|in)\b|"
+                         r"\b(ai|a\.i\.|short ?film|cinematic|cinema|film|movie|generated|text[ -]to[ -]video|prompt\w*)\b", re.I)
 WIKI_API = "https://en.wikipedia.org/w/api.php"
 TEXT_CREDIT = "Narration adapted from Wikipedia (CC BY-SA 4.0)"
 # subjects we can't (or shouldn't) build from archival footage: people in the news, media/IP, brands, politics
@@ -390,8 +408,17 @@ SKIP_PLACE = re.compile(r"^(country|sovereign state|island country|transcontinen
 SKIP_ABSTRACT = re.compile(r"^(change|process|concept|theory|form|state|class|type|kind|natural|precipitation|field|"
                            r"study|branch|term|group|set|act|practice|phenomenon|property|quality|period|unit|measure|"
                            r"list|aspect|method|system|means|activity|art|style|genre|condition|feeling|emotion)\b", re.I)
+# abstract anywhere in the description or the lead's first sentence ("In psychology, a mood is an affective state")
+SKIP_ABSTRACT_ANY = re.compile(r"\b(in psychology|psycholog\w*|affective|mental state|state of mind|emotion\w*|feelings?|"
+                               r"mood|cognit\w*|in philosophy|philosoph\w*|concept|abstract|in mathematics|in linguistics|"
+                               r"linguistic\w*|sociolog\w*|personality|behaviou?r(al)?|attitude|belief|ideology)\b", re.I)
+# shots that look like junk on a 6Frame post: watermarked news, broadcasters, talking heads, screen recordings
+JUNK_FOOTAGE = re.compile(r"\bvoa\b|voa ?news|voaafrica|voa ?africa|voice of america|\bbbc\b|\bcnn\b|\bnbc\b|\bcbs\b|"
+                          r"\babc news\b|al ?jazeera|\breuters\b|associated press|\bap news\b|euronews|dw news|\bcgtn\b|"
+                          r"\brt news\b|\bnews\b|newscast|news broadcast|bulletin|headlines|anchor(man|woman)?\b|correspondent|reporter|"
+                          r"\bwatermark\w*|\blogo\b|\w+\.(com|org|net|tv)\b|screen ?(recording|capture|shot)|vlog|selfie", re.I)
 # live streams, gaming, music, compilations: their view counts are real but there is no real-world subject to film
-SKIP_VIRAL = re.compile(r"\blive\b|\U0001F534|#?shortslive|\bstream(ing)?\b|\bgam(e|ing|er)\b|\bgta\b|roblox|minecraft|"
+SKIP_VIRAL = re.compile(r"\bwwe\b|\baew\b|wrestl\w*|\bnba\b|\bnfl\b|\bufc\b|\blive\b|\U0001F534|#?shortslive|\bstream(ing)?\b|\bgam(e|ing|er)\b|\bgta\b|roblox|minecraft|"
                         r"fortnite|free ?fire|pubg|\bbgmi\b|\bmashup\b|\bmusic\b|\bsong\b|\blyrics?\b|\bdance\b|"
                         r"\breaction\b|\bprank\b|\bunboxing\b|\basmr\b|\btutorial\b|\brecipe\b|\bvlog\b|\bmovie review\b|"
                         r"\btrailer\b|\bpodcast\b|\bfilm\b|\bmovie\b|\bepisode\b|\bep \d+|\bs\d+e\d+\b", re.I)
@@ -604,7 +631,8 @@ def subject_ok(subj: dict) -> Tuple[bool, str]:
         return False, f"subject type: {head[:120]}"
     if SKIP_TEXT.search((subj.get("lead") or "")[:300]) or SKIP_TEXT.search(subj.get("description") or ""):
         return False, f"living person: {head[:120]}"
-    if SKIP_ABSTRACT.search(subj.get("description") or ""):
+    first = re.split(r"(?<=[.!?])\s", (subj.get("lead") or "").strip(), maxsplit=1)[0][:300]
+    if SKIP_ABSTRACT.search(subj.get("description") or "") or SKIP_ABSTRACT_ANY.search(f"{subj.get('description') or ''} {first}"):
         return False, f"too abstract: {head[:120]}"
     if SKIP_PLACE.search(subj.get("description") or ""):
         return False, f"too broad (country/city): {head[:120]}"
@@ -680,6 +708,15 @@ def topic_from_subject(subj: dict) -> Optional[dict]:
     }
 
 
+def genre_subject(title: str) -> str:
+    """What an in-genre viral title is about, with the AI-filmmaking words removed."""
+    for part in (title or "").split("|"):  # "AI Short Film | TITANIC" and "TITANIC | AI Short Film" both -> "TITANIC"
+        t = " ".join(re.sub(r"[:\-–—]+", " ", GENRE_WORDS.sub(" ", part)).split()).strip(" .,'!?")
+        if len(t) >= 4:
+            return t
+    return ""
+
+
 def viral_topics(viral_items: List[dict], avoid_keys: Optional[set] = None, recent_topics: Optional[List[str]] = None,
                  limit: int = 6, get: Callable = _get, log: Optional[List[str]] = None) -> List[dict]:
     """Viral uploads (best views/hour first) -> distinct footage topics, in viral order.
@@ -690,12 +727,20 @@ def viral_topics(viral_items: List[dict], avoid_keys: Optional[set] = None, rece
     recent = " | ".join(recent_topics or []).lower()
     out, seen = [], set()
     items = sorted(viral_items or [], key=lambda it: -(float(it.get("views_per_hour") or it.get("score") or 0)))
+    import open_viral
     for it in items:
         if len(out) >= limit:
             break
-        title = it.get("title") or ""
+        full_title = it.get("title") or ""
+        if not open_viral.NICHE_RE.search(full_title):  # brand gate: never a topic from an off-genre upload
+            log.append(f"viral skip (off-genre, not AI filmmaking): {full_title[:80]}")
+            continue
+        title = genre_subject(full_title)
+        if len(title) < 4:
+            log.append(f"viral skip (in-genre but names no real-world subject): {full_title[:80]}")
+            continue
         vph = float(it.get("views_per_hour") or it.get("score") or 0)
-        matched = {"title": title[:120], "url": it.get("url"), "views": it.get("views"), "views_per_hour": it.get("views_per_hour")}
+        matched = {"title": full_title[:120], "url": it.get("url"), "views": it.get("views"), "views_per_hour": it.get("views_per_hour")}
         if SKIP_VIRAL.search(title) or (TALKING_HEAD.search(title) and
                                          not any(re.search(t["match"], title, re.I) for t in footage_topics.TOPICS)):
             log.append(f"viral skip (news/politics/talk/live/game/music): {title[:80]}")
@@ -989,14 +1034,23 @@ def gather_candidates(topic: dict, get: Callable = _get) -> Tuple[List[dict], Li
         seen.add(k)
         if excl and excl.search(c.get("title") or ""):
             continue
+        junk_text = f"{c.get('title') or ''} {c.get('author') or ''}" + (f" {c.get('description') or ''}" if topic.get("title_only") else "")
+        if JUNK_FOOTAGE.search(junk_text):
+            continue  # watermarked news / broadcaster / talking-head material never ships
         if topic.get("title_only") and not c.get("curated") and re.search(r"\(\d{4}\)|\bby [A-Z][a-z]+ [A-Z]\.?", c.get("title") or ""):
             continue  # "Wolf Lowry (1917) by William S. Hart": a film or artwork that only shares the name
         if excl and topic.get("title_only") and excl.search(c.get("description") or ""):
             continue  # scanned subjects: the file page's description must not say it's a film, match, speech...
         seen_titles.add(tkey)
         text = f"{c.get('title')} {c.get('description')}"
-        c["relevant"] = bool(c.get("curated") or req.search(text))
-        c["title_match"] = bool(c.get("curated") or req.search(c.get("title") or ""))
+        # scanned subjects: a file filed in the subject's category must still name the subject (or its
+        # category) in its title/description; category trees hold unrelated news clips and street scenes
+        cat_re = (re.compile(r"\b" + re.escape(topic["queries"]["commons_cat"][0]) + r"\b", re.I)
+                  if topic.get("title_only") and (topic.get("queries") or {}).get("commons_cat") else None)
+        on_subject = bool(req.search(text) or (cat_re and cat_re.search(text)))
+        curated_ok = bool(c.get("curated") and (on_subject or not topic.get("title_only")))
+        c["relevant"] = bool(curated_ok or req.search(text))
+        c["title_match"] = bool(curated_ok or req.search(c.get("title") or ""))
         c["talking_head"] = bool(TALKING_HEAD.search(c.get("title") or ""))
         c["off_era"] = off_era(c.get("title") or "", era)
         if topic.get("title_only") and not c["title_match"]:  # scanned subjects: the clip itself must be named for it
@@ -1589,12 +1643,14 @@ def plan_shots(cands: List[dict], need: int, workdir: str, log: List[str],
                resolve_nasa_fn=resolve_nasa, resolve_archive_fn=resolve_archive,
                segment_fn=None, probe_fn=None, crop_fn=None, pins: Optional[Dict[str, List[float]]] = None,
                seg_len: float = SEGMENT_SECONDS, min_need: Optional[int] = None,
-               localize_fn=None, max_per_source: Optional[int] = None) -> List[Tuple[dict, dict]]:
+               localize_fn=None, max_per_source: Optional[int] = None, strict: bool = False) -> List[Tuple[dict, dict]]:
     """Probe up to FOOTAGE_MAX_SOURCES relevant videos, score every candidate segment (exposure, contrast,
     motion, sharpness, no cuts inside), weight by source resolution, then take the best segments globally
     (max 2 per source while others are available, then more per source). Stills (Ken Burns) only fill what
     video can't. Every shot is cut `seg_len` long (the edit trims it to its beat-snapped length).
-    Returns up to `need` shots; raises if fewer than `min_need` (default: need) are usable."""
+    Returns up to `need` shots; raises if fewer than `min_need` (default: need) are usable.
+    strict (scanned viral subjects): only segments that passed the quality gate are used; the blind
+    mid-film fallback (score 0, used when quality probes 429) is dropped, so the topic is skipped instead."""
     segment_fn = segment_fn or choose_segments
     probe_fn = probe_fn or probe
     crop_fn = crop_fn or detect_crop
@@ -1646,6 +1702,11 @@ def plan_shots(cands: List[dict], need: int, workdir: str, log: List[str],
                 segs += [(t, sc) for t, sc in extra if all(abs(t - p) > max(durs) for p, _ in segs)]
             else:
                 segs = segment_fn(src, dur_s, need, max(durs), crop=c["crop"])
+                if strict:
+                    blind = [s for s in segs if not s[1] or s[1] <= 0]
+                    segs = [s for s in segs if s[1] and s[1] > 0]
+                    if blind:
+                        log.append(f"strict: dropped {len(blind)} unchecked segments of {c['title'][:50]}")
             res_w = 1.0 if pinned else min(1.0, (height / 1080.0)) ** 0.5
             log.append(f"{c['provider']} {c['title'][:60]} {c.get('width')}x{height} {dur_s:.0f}s -> "
                        f"segments {[(round(t, 1), s) for t, s in segs]}")
@@ -1722,7 +1783,7 @@ def produce_footage(out_dir: str, viral: Optional[dict] = None, avoid_keys: Opti
                 pins = {p["title"]: p["near"] for p in topic.get("pinned", [])}
                 cands.sort(key=lambda c: (c.get("title") not in pins,))
                 shots = plan_shots(cands, shot_count(planned), workdir, log, pins=pins, min_need=min_shots(),
-                                   max_per_source=topic.get("max_per_source"))
+                                   max_per_source=topic.get("max_per_source"), strict=bool(topic.get("title_only")))
                 total = fit_total(planned, len(shots))
                 n = shot_count(total) if len(shots) >= shot_count(total) else len(shots)
                 shots = shots[:n]

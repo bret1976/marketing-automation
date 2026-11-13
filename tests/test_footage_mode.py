@@ -428,7 +428,7 @@ def test_synth_vo_skips_a_hung_line_and_keeps_the_rest(monkeypatch, tmp_path):
 def test_three_long_shots_can_fill_the_31s_floor():
     assert fm.min_shots() <= 3
     assert 3 * fm.MAX_SHOT_SECONDS >= fm.MIN_SECONDS
-    assert fm.VERSION == "2026-11-12.5"
+    assert fm.VERSION == "2026-11-12.6"
 
 
 def test_choose_segments_falls_back_when_quality_probes_return_nothing(monkeypatch):
@@ -645,10 +645,10 @@ def test_script_from_text_is_long_enough_and_caption_sized():
 def test_viral_scan_determines_topic_not_the_library():
     pages = {"Chernobyl disaster": ("1986 nuclear accident in the Soviet Union", _LEAD.replace("Hindenburg", "Chernobyl")),
              "MrBeast": ("American YouTuber (born 1998)", "Jimmy Donaldson (born May 7, 1998) is an American YouTuber.")}
-    items = [{"title": "I Gave Away 100 Cars | MrBeast", "views_per_hour": 900000},
-             {"title": "Trump speech reaction LIVE", "views_per_hour": 500000},
-             {"title": "Chernobyl disaster: rare footage #shorts", "views_per_hour": 40000},
-             {"title": "Titanic wreck new scan", "views_per_hour": 1000}]
+    items = [{"title": "I Gave Away 100 Cars | MrBeast AI video", "views_per_hour": 900000},
+             {"title": "Trump speech reaction LIVE | AI video", "views_per_hour": 500000},
+             {"title": "Chernobyl disaster | AI Short Film made with Veo 3", "views_per_hour": 40000},
+             {"title": "Titanic wreck new scan #aifilm", "views_per_hour": 1000}]
     log = []
     picks = fm.viral_topics(items, get=_fake_wiki(pages), log=log)
     keys = [p["topic"]["key"] for p in picks]
@@ -805,3 +805,138 @@ def test_run_names_sigkill_when_returncode_is_negative(monkeypatch, tmp_path):
     monkeypatch.setattr(fm.subprocess, "run", lambda *a, **k: Fake())
     with pytest.raises(RuntimeError, match=r"rc=-9 \(SIGKILL\)"):
         fm._run(["ffmpeg", "-y"], fail_log=str(tmp_path / "fail.log"))
+
+
+# --------------------------------------------------------------------------- brand gate (Bret 2026-11-12)
+# A 45 s catch-up post shipped on Wikipedia psychology "Mood" with a VOA news clip, a boat and street scenes,
+# because footage mode swept general trends (#shorts, history, science ...) with the niche filter off.
+
+_MOOD = ("Relatively long-lasting emotional state",
+         "In psychology, a mood is an affective state. In contrast to emotions or feelings, moods are less specific, "
+         "less intense and less likely to be provoked or instantiated by a particular stimulus or event. " * 3)
+
+
+def test_footage_viral_scan_is_limited_to_the_ai_filmmaking_genre(monkeypatch):
+    import open_viral
+    seen = {}
+    monkeypatch.setattr(open_viral, "find_viral", lambda **k: seen.update(k) or {"top": []})
+    monkeypatch.delenv("FOOTAGE_VIRAL_QUERIES", raising=False)
+    fm.todays_viral()
+    assert seen["niche"] is True and seen["queries"]
+    assert all(open_viral.NICHE_RE.search(q) for q in seen["queries"]), seen["queries"]
+    for broad in ("#shorts", "viral", "trending", "history", "science", "nature", "documentary"):
+        assert broad not in seen["queries"]
+    assert not hasattr(fm, "BROAD_VIRAL_QUERIES")
+    # a stale broad override on Railway can't widen the scan: off-genre terms are dropped
+    monkeypatch.setenv("FOOTAGE_VIRAL_QUERIES", "#shorts|history|veo 3|science")
+    fm.todays_viral()
+    assert seen["queries"] == ["veo 3"] and seen["niche"] is True
+    monkeypatch.setenv("FOOTAGE_VIRAL_QUERIES", "#shorts|viral|trending")
+    fm.todays_viral()
+    assert seen["queries"] == list(fm.GENRE_VIRAL_QUERIES)
+
+
+def test_off_genre_viral_titles_never_become_footage_topics():
+    def no_wiki(*a, **k):
+        raise AssertionError("an off-genre title must not even be resolved")
+    items = [{"title": "Mood #shorts", "views_per_hour": 9e6},
+             {"title": "GTA 6 trailer leak #shorts", "views_per_hour": 8e6},
+             {"title": "WWE Raw: Roman Reigns returns", "views_per_hour": 7e6},
+             {"title": "Titanic wreck new scan #shorts", "views_per_hour": 6e6},  # library subject, but not in-genre
+             {"title": "#shorts viral trending", "views_per_hour": 5e6}]
+    log = []
+    assert fm.viral_topics(items, get=no_wiki, log=log) == []
+    assert sum("off-genre" in l for l in log) == len(items)
+
+
+def test_in_genre_titles_about_games_wrestling_or_nothing_are_skipped():
+    def no_wiki(*a, **k):
+        raise AssertionError("must be skipped before Wikipedia")
+    items = [{"title": "GTA 6 but it's an AI movie | Veo 3", "views_per_hour": 9e5},
+             {"title": "WWE wrestlers as AI short film | Sora 2", "views_per_hour": 8e5},
+             {"title": "My new AI film #aivideo", "views_per_hour": 7e5}]
+    log = []
+    assert fm.viral_topics(items, get=no_wiki, log=log) == []
+
+
+def test_psychology_mood_subject_is_rejected_even_from_an_in_genre_title():
+    ok, why = fm.subject_ok({"title": "Mood (psychology)", "description": _MOOD[0], "lead": _MOOD[1]})
+    assert not ok and "abstract" in why
+    ok, why = fm.subject_ok({"title": "Mood", "description": "", "lead": _MOOD[1]})  # lead alone is enough
+    assert not ok and "abstract" in why
+    log = []
+    picks = fm.viral_topics([{"title": "MOOD | AI Short Film made with Kling", "views_per_hour": 9e5}],
+                            get=_fake_wiki({"Mood": _MOOD}), log=log)
+    assert picks == [] and any("too abstract" in l for l in log), log
+    # a real, filmable subject from an in-genre title still works
+    assert fm.subject_ok({"title": "Hindenburg disaster", "description": "1937 airship accident", "lead": _LEAD})[0]
+
+
+def test_in_genre_title_resolves_to_what_the_ai_film_is_about():
+    pages = {"Chernobyl disaster": ("1986 nuclear accident in the Soviet Union", _LEAD.replace("Hindenburg", "Chernobyl"))}
+    picks = fm.viral_topics([{"title": "AI Short Film | Chernobyl Disaster (Veo 3) #aifilm", "views_per_hour": 5e4}],
+                            get=_fake_wiki(pages))
+    assert [p["topic"]["key"] for p in picks] == ["viral-chernobyl-disaster"]
+    assert picks[0]["matched"][0]["title"].startswith("AI Short Film")
+
+
+def _scanned(cat=None):
+    subj = {"title": "Hindenburg disaster", "description": "1937 airship accident", "lead": _LEAD,
+            "url": "https://en.wikipedia.org/wiki/Hindenburg_disaster"}
+    if cat:
+        subj["commons_category"] = cat
+    return fm.topic_from_subject(subj)
+
+
+def test_watermarked_news_and_off_subject_category_files_are_rejected(monkeypatch):
+    v = lambda i, title, desc="", author="US Navy", curated=False: {
+        "provider": "wikimedia_commons", "kind": "video", "id": i, "title": title, "description": desc, "author": author,
+        "height": 1080, "license": "Public domain", **({"curated": True} if curated else {})}
+    cat_files = [v("1", "Hindenburg disaster newsreel 1937.webm", curated=True),
+                 v("2", "Ethiopia election day.webm", "VOA Africa report, VOAafrica.com", "VOA", curated=True),
+                 v("3", "Port of San Francisco boat 1930s.webm", curated=True),
+                 v("4", "Street scene, New York.webm", curated=True),
+                 v("5", "Hindenburg burning at Lakehurst.webm", curated=True),
+                 v("6", "Hindenburg crash - BBC News report.webm", curated=True)]
+    monkeypatch.setattr(fm, "search_commons", lambda q, media="video", get=None, limit=15:
+                        [dict(c) for c in cat_files] if media == "video" and q.startswith("incategory") else [])
+    for f in ("search_nasa", "search_archive"):
+        monkeypatch.setattr(fm, f, lambda *a, **k: [])
+    monkeypatch.setattr(fm, "search_pexels", lambda *a, **k: [])
+    monkeypatch.setattr(fm, "search_pixabay", lambda *a, **k: [])
+    kept, _ = fm.gather_candidates(_scanned("Hindenburg disaster"))
+    assert sorted(c["id"] for c in kept) == ["1", "5"]
+    assert fm.JUNK_FOOTAGE.search("VOAafrica.com") and fm.JUNK_FOOTAGE.search("CNN news anchor")
+    assert not fm.JUNK_FOOTAGE.search("Hindenburg disaster newsreel 1937.webm")
+
+
+def test_scanned_topic_is_skipped_instead_of_blind_cuts_when_probes_fail(monkeypatch, tmp_path):
+    monkeypatch.setattr(fm, "segment_score", lambda *a, **k: None)  # every quality probe 429'd
+    monkeypatch.setattr(fm, "_gray_frames", lambda *a, **k: [])
+    cands = [{"provider": "wikimedia_commons", "kind": "video", "title": f"Hindenburg reel {i}", "url": f"https://x/{i}.webm",
+              "page": "p", "author": "a", "license": "Public domain", "credit_short": "Wikimedia Commons (public domain)"}
+             for i in range(3)]
+    kw = dict(probe_fn=lambda src: {"width": 1280, "height": 720, "duration": 300.0}, crop_fn=lambda *a: None,
+              localize_fn=lambda c, src, start, dur, workdir, i: {"path": "p", "kind": "video", "start": 0.0, "dur": dur})
+    # library topics (hand-checked) keep the blind mid-film fallback
+    assert len(fm.plan_shots(cands, 4, str(tmp_path), [], min_need=fm.min_shots(), **kw)) == 4
+    log = []
+    with pytest.raises(RuntimeError, match="usable on-topic shots"):
+        fm.plan_shots(cands, 4, str(tmp_path), log, min_need=fm.min_shots(), strict=True, **kw)
+    assert any("strict: dropped" in l for l in log)
+
+
+def test_produce_footage_plans_scanned_topics_strictly(monkeypatch, tmp_path):
+    seen = {}
+    topic = _scanned()
+    monkeypatch.setattr(fm, "viral_topics", lambda items, **k: [{"topic": topic, "score": 9.0, "matched": []}])
+    monkeypatch.setattr(fm, "gather_candidates", lambda t: ([], []))
+    monkeypatch.setattr(fm, "synth_vo", lambda lines, wd, max_total=None: (None, [], {"seconds": 40.0}))
+
+    def plan(c, need, wd, log, **k):
+        seen.update(k)
+        raise RuntimeError("only 0 usable on-topic shots")
+    monkeypatch.setattr(fm, "plan_shots", plan)
+    with pytest.raises(RuntimeError, match="no usable footage"):
+        fm.produce_footage(str(tmp_path), viral={"top": [{"title": "x"}]}, workdir=str(tmp_path / "w"))
+    assert seen["strict"] is True

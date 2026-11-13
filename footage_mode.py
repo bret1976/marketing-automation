@@ -36,11 +36,12 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import requests
 
+import brand_gate
 import footage_topics
 
 logger = logging.getLogger(__name__)
 MARKER = "FOOTAGE_MODE"
-VERSION = "2026-11-12.6"
+VERSION = "2026-11-13.1"
 MIN_SECONDS = 31.0  # hard floor for every output file (Bret 2026-11-12)
 MAX_SECONDS = 55.0  # hard ceiling for every output file (still a Short everywhere)
 TARGET_SECONDS = 45.0  # aim here when enough good on-topic footage exists
@@ -704,6 +705,7 @@ def topic_from_subject(subj: dict) -> Optional[dict]:
         "queries": ({"commons": [], "archive": [], "nasa": [title] if space else [],
                      "commons_cat": [subj["commons_category"]]} if subj.get("commons_category") else
                     {"commons": [title, f"{title} footage"], "archive": [title], "nasa": [title] if space else []}),
+        "subject_description": subj.get("description") or "",
         "stills": [f'incategory:"{subj["commons_category"]}"'] if subj.get("commons_category") else [title], "source": "viral_scan", "title_only": True, "max_per_source": 2, "wikipedia": subj["url"], "text_credit": TEXT_CREDIT,
     }
 
@@ -718,7 +720,8 @@ def genre_subject(title: str) -> str:
 
 
 def viral_topics(viral_items: List[dict], avoid_keys: Optional[set] = None, recent_topics: Optional[List[str]] = None,
-                 limit: int = 6, get: Callable = _get, log: Optional[List[str]] = None) -> List[dict]:
+                 limit: int = 6, get: Callable = _get, log: Optional[List[str]] = None,
+                 now: Optional[datetime] = None) -> List[dict]:
     """Viral uploads (best views/hour first) -> distinct footage topics, in viral order.
     A viral title naming a library subject uses the hand-checked library script; anything else is resolved
     to its Wikipedia subject. Never returns a topic that no viral title asked for."""
@@ -727,20 +730,22 @@ def viral_topics(viral_items: List[dict], avoid_keys: Optional[set] = None, rece
     recent = " | ".join(recent_topics or []).lower()
     out, seen = [], set()
     items = sorted(viral_items or [], key=lambda it: -(float(it.get("views_per_hour") or it.get("score") or 0)))
-    import open_viral
     for it in items:
         if len(out) >= limit:
             break
         full_title = it.get("title") or ""
-        if not open_viral.NICHE_RE.search(full_title):  # brand gate: never a topic from an off-genre upload
-            log.append(f"viral skip (off-genre, not AI filmmaking): {full_title[:80]}")
+        # brand gate (Bret 2026-11-13): an AI-filmmaking upload (marker in the title text, not a hashtag pile),
+        # a film rather than a tool/tutorial/skit, uploaded within the last 24 h, with url + engagement on record
+        ok_item, why_item, prov = brand_gate.check_viral_item(it, now=now)
+        if not ok_item:
+            log.append(f"viral skip ({why_item})"[:200])
             continue
-        title = genre_subject(full_title)
+        title = genre_subject(brand_gate.title_text(full_title))
         if len(title) < 4:
             log.append(f"viral skip (in-genre but names no real-world subject): {full_title[:80]}")
             continue
         vph = float(it.get("views_per_hour") or it.get("score") or 0)
-        matched = {"title": full_title[:120], "url": it.get("url"), "views": it.get("views"), "views_per_hour": it.get("views_per_hour")}
+        matched = dict(prov, title=full_title[:120])
         if SKIP_VIRAL.search(title) or (TALKING_HEAD.search(title) and
                                          not any(re.search(t["match"], title, re.I) for t in footage_topics.TOPICS)):
             log.append(f"viral skip (news/politics/talk/live/game/music): {title[:80]}")
@@ -759,6 +764,8 @@ def viral_topics(viral_items: List[dict], avoid_keys: Optional[set] = None, rece
             topics = []
             for subj in subs:
                 ok, why = subject_ok(subj)
+                if ok:
+                    ok, why = brand_gate.check_subject(subj, title, subject_kind(subj))
                 if not ok:
                     log.append(f"viral skip ({why})")
                     continue
@@ -793,7 +800,7 @@ def build_concept(topic: dict, sources: List[dict], viral_pick: Optional[dict] =
     if topic.get("text_credit"):
         first = [" ".join(x.rstrip(".") + "." for x in first + [topic["text_credit"]])]
     lines = first + ([credit] if credit else [])
-    base = [] if topic.get("source") == "viral_scan" else footage_topics.FOOTAGE_HASHTAGS
+    base = [] if topic.get("source") in ("viral_scan", "x_recreate") else footage_topics.FOOTAGE_HASHTAGS
     tags = list(dict.fromkeys(topic.get("hashtags", []) + base))[:5]
     return {
         "topic": topic["topic"], "topic_key": topic["key"].replace("-", " "),
@@ -1056,7 +1063,11 @@ def gather_candidates(topic: dict, get: Callable = _get) -> Tuple[List[dict], Li
         if topic.get("title_only") and not c["title_match"]:  # scanned subjects: the clip itself must be named for it
             continue
         if c["relevant"] and not c["talking_head"] and not c["off_era"]:
-            kept.append(c)
+            # per-clip match against the narration (brand_gate.check_clip): homonyms, unrelated stills,
+            # news / watermark / talking-head material never reach the edit
+            c["clip_check"] = brand_gate.check_clip(c, topic, pinned_titles=[p["title"] for p in topic.get("pinned", [])])
+            if c["clip_check"]["ok"]:
+                kept.append(c)
     if sum(1 for c in kept if c["title_match"]) >= 2:  # enough on-topic titles: drop description-only matches
         kept = [c for c in kept if c["title_match"]]
     kept.sort(key=lambda c: (c["kind"] != "video", not c["title_match"], not str(c.get("license", "")).lower().startswith("public"),
@@ -1737,7 +1748,7 @@ def plan_shots(cands: List[dict], need: int, workdir: str, log: List[str],
             log.append(f"localize failed {c['provider']} {c['title'][:50]} @{start:.1f}s: {exc}"[:220])
             continue
         rec = {k: c.get(k) for k in ("provider", "kind", "title", "page", "author", "license", "license_url", "credit_short",
-                                     "width", "height", "duration", "crop")}
+                                     "width", "height", "duration", "crop", "clip_check")}
         rec.update({"file_url": src, "segment_start_s": round(start, 2), "segment_seconds": round(dur, 2),
                     "ken_burns": c["kind"] == "image"})
         shots.append((local, rec))
@@ -1748,25 +1759,33 @@ def plan_shots(cands: List[dict], need: int, workdir: str, log: List[str],
 
 def produce_footage(out_dir: str, viral: Optional[dict] = None, avoid_keys: Optional[set] = None,
                     recent_topics: Optional[List[str]] = None, topic_key: Optional[str] = None,
-                    workdir: Optional[str] = None, name: Optional[str] = None) -> Tuple[str, str, dict, dict]:
-    """Returns (vertical_mp4, landscape_mp4, concept, info). Raises if no usable footage."""
+                    workdir: Optional[str] = None, name: Optional[str] = None,
+                    topic: Optional[dict] = None, viral_pick: Optional[dict] = None) -> Tuple[str, str, dict, dict]:
+    """Returns (vertical_mp4, landscape_mp4, concept, info). Raises if no usable footage.
+    topic + viral_pick (X viral scan, x_viral_scan.py): build exactly that recreate topic for that X post; the
+    YouTube scan is not run and no other topic is tried."""
     t0 = time.time()
     own_tmp = workdir is None
     workdir = workdir or tempfile.mkdtemp(prefix="footage_")
     os.makedirs(workdir, exist_ok=True)
     log: List[str] = []
     try:
-        if viral is None and not topic_key:
+        if viral is None and not topic_key and topic is None:
             viral = todays_viral()
         items = (viral or {}).get("top") or []
         attempts = int(os.environ.get("FOOTAGE_TOPIC_ATTEMPTS", 4))
         # viral-first: the scan picks the subject; no canned library topic fills the slot when nothing qualifies
-        order = ([pick_topic(items, forced=topic_key)] if topic_key else
-                 viral_topics(items, avoid_keys=avoid_keys, recent_topics=recent_topics, limit=attempts, log=log))
+        if topic is not None:
+            order = [dict(viral_pick or {}, topic=topic)]
+            attempts = 1
+        else:
+            order = ([pick_topic(items, forced=topic_key)] if topic_key else
+                     viral_topics(items, avoid_keys=avoid_keys, recent_topics=recent_topics, limit=attempts, log=log))
         log.append(f"viral scan: {len(items)} uploads -> topics {[(p['topic']['topic'], p['score']) for p in order]}")
         if not order:
-            raise RuntimeError(f"no viral subject today that can be built from licensed archival footage; "
-                               f"not falling back to a library topic; log={log[-8:]}")
+            raise brand_gate.BrandGateSkip(
+                f"SKIP: no AI-filmmaking upload from the last 24h names a filmable subject with on-subject "
+                f"licensed footage; not falling back to any other topic; log={log[-8:]}")
         last_err = None
         for attempt, pick in enumerate(order[:attempts]):
             topic = pick["topic"]
@@ -1783,7 +1802,7 @@ def produce_footage(out_dir: str, viral: Optional[dict] = None, avoid_keys: Opti
                 pins = {p["title"]: p["near"] for p in topic.get("pinned", [])}
                 cands.sort(key=lambda c: (c.get("title") not in pins,))
                 shots = plan_shots(cands, shot_count(planned), workdir, log, pins=pins, min_need=min_shots(),
-                                   max_per_source=topic.get("max_per_source"), strict=bool(topic.get("title_only")))
+                                   max_per_source=topic.get("max_per_source"), strict=True)
                 total = fit_total(planned, len(shots))
                 n = shot_count(total) if len(shots) >= shot_count(total) else len(shots)
                 shots = shots[:n]
@@ -1800,8 +1819,22 @@ def produce_footage(out_dir: str, viral: Optional[dict] = None, avoid_keys: Opti
                 log.append(f"topic {topic['key']} failed: {exc}"[:220])
         else:
             logger.error("%s no usable footage for any topic: %s | log=%s", MARKER, last_err, log)
-            raise RuntimeError(f"no usable footage for any topic: {last_err}; log={log}")
+            raise brand_gate.BrandGateSkip(f"SKIP: no usable footage (on-subject) for any in-genre viral topic: {last_err}; log={log}")
         sources = [rec for _, rec in shots]
+        # brand gate record (checked again by growth_v2.run_autopilot right before any publish)
+        gate = {
+            "gate_version": brand_gate.GATE_VERSION, "brand": brand_gate.brand_profile(),
+            "viral_item": (pick.get("matched") or [{}])[0], "topic": topic["topic"], "topic_key": topic["key"],
+            "topic_reason": pick.get("reason"), "wikipedia": topic.get("wikipedia"),
+            "clips": brand_gate.shot_narration(
+                [dict(rec.get("clip_check") or {"ok": False, "reason": "clip was never checked"},
+                      clip=rec.get("title"), provider=rec.get("provider")) for rec in sources],
+                captions, cuts, durs),
+        }
+        log.append(f"brand gate: viral={gate['viral_item'].get('url')} at {gate['viral_item'].get('published_at')} "
+                   f"clips_ok={sum(1 for c in gate['clips'] if c.get('ok'))}/{len(gate['clips'])}")
+        if not topic_key:  # fail fast before the render (forced library topics are blocked at publish time instead)
+            brand_gate.publish_gate({}, {"brand_gate": gate}, min_shots=min_shots())
         concept = build_concept(topic, sources, pick)
         name = name or f"g2_footage_{uuid.uuid4().hex}"
         vertical = os.path.join(out_dir, f"{name}.mp4")
@@ -1825,7 +1858,7 @@ def produce_footage(out_dir: str, viral: Optional[dict] = None, avoid_keys: Opti
             "concept_source": "footage_template (no LLM)", "topic_key": topic["key"],
             "topic_source": topic.get("source") or "library", "topic_reason": pick.get("reason"),
             "wikipedia": topic.get("wikipedia"),
-            "viral_match": concept["viral_match"], "footage_sources": sources,
+            "viral_match": concept["viral_match"], "footage_sources": sources, "brand_gate": gate,
             "music": {k: music[k] for k in ("title", "author", "source", "license", "license_url", "bpm")},
             "cuts_s": cuts, "voiceover": vo_info, "captions": captions,
             "vertical": pv, "landscape": pl, "landscape_path": landscape, "log": log[-40:],

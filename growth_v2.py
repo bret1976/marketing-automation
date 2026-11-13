@@ -44,6 +44,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
+import brand_gate
 import footage_mode
 import stitched_shorts
 import viral_research
@@ -84,6 +85,61 @@ def enabled() -> bool:
 
 def paused() -> bool:
     return _truthy(os.environ.get("AUTOPILOT_PAUSE"))
+
+
+def approval_required(settings: Optional[dict] = None) -> bool:
+    """Bret 2026-11-13: "send me the video so I can approve of it before you post it". MANDATORY on every
+    Autopilot path (scheduled slot, catch-up, manual trigger, legacy hour trigger, any engine or fallback):
+    the rendered video is held as AWAITING_APPROVAL and only POST /api/approval-queue/{id}/approve publishes it.
+    No setting or env var turns this off, and nothing ever auto-publishes a held post (no timeout)."""
+    return True
+
+
+def approvals_dir() -> str:
+    return os.path.join(_state_dir(), "approvals")
+
+
+def save_approval_package(post: dict, concept: dict, info: dict, slot: Optional[str] = None) -> dict:
+    """Everything Bret needs to judge the video, saved next to the app state (served by GET /api/approvals)."""
+    gate = info.get("brand_gate") or {}
+    try:
+        base = (_main().load_settings().get("public_base_url") or "").rstrip("/")
+    except Exception:
+        base = ""
+    pkg = {
+        "slot": slot, "post_id": post.get("id"), "status": "AWAITING_APPROVAL", "saved_at": _utcnow().isoformat(),
+        "topic": concept.get("topic"), "title_line": concept.get("title_line"), "on_screen_hook": concept.get("on_screen_hook"),
+        "platforms": post.get("platform"), "caption": post.get("text"), "platform_captions": post.get("platform_captions"),
+        "viral_source": gate.get("viral_item"), "brand": gate.get("brand"), "wikipedia": gate.get("wikipedia"),
+        "script": [v.get("say") for v in (concept.get("vo") or [])],
+        "captions": (info.get("captions") or []), "clip_checks": gate.get("clips"),
+        "footage_sources": [{k: s.get(k) for k in ("provider", "title", "author", "license", "page")}
+                            for s in info.get("footage_sources") or []],
+        "video_url": base + (post.get("vertical_video_path") or ""),
+        "video_16x9_url": base + post["landscape_video_path"] if post.get("landscape_video_path") else None,
+        "approve": f"POST {base}/api/approval-queue/{post.get('id')}/approve",
+        "reject": f"POST {base}/api/approval-queue/{post.get('id')}/reject",
+        "note": "Held for Bret's approval. Nothing posts unless the approve call is made; reject or no answer = never posts.",
+        "x_scan": info.get("x_scan"), "recreation": info.get("recreation"),
+    }
+    d = os.path.join(approvals_dir(), re.sub(r"[^A-Za-z0-9_.-]", "_", slot or post.get("id") or "manual"))
+    os.makedirs(d, exist_ok=True)
+    with open(os.path.join(d, "approval.json"), "w", encoding="utf-8") as fh:
+        json.dump(pkg, fh, indent=1, default=str)
+    post["approval_package"] = os.path.relpath(os.path.join(d, "approval.json"), _state_dir())
+    return pkg
+
+
+def list_approval_packages() -> List[dict]:
+    out = []
+    root = approvals_dir()
+    for name in sorted(os.listdir(root)) if os.path.isdir(root) else []:
+        try:
+            with open(os.path.join(root, name, "approval.json"), encoding="utf-8") as fh:
+                out.append(json.load(fh))
+        except (OSError, ValueError):
+            continue
+    return out
 
 
 def transform_fallback_enabled() -> bool:
@@ -1409,12 +1465,49 @@ def produce_footage(settings: dict, state: dict) -> Tuple[str, dict, dict]:
     Wikipedia lead) -> real public-domain /
     CC footage -> beat-cut edit + local Kokoro VO + captions. 9:16 for Shorts/Reels/TikTok/Facebook, a 16:9
     twin (info["landscape_path"]) for LinkedIn/X. No Gemini, no paid API."""
+    if x_scan_enabled():
+        return produce_x_recreate(settings, state)
     recent = [t for t in recent_post_topics(state) if t]
     avoid = {t["key"] for t in footage_mode.footage_topics.TOPICS if any(topics_similar(t["topic"], r) for r in recent)}
     if len(avoid) >= len(footage_mode.footage_topics.TOPICS):
         avoid = set()
     out, landscape, concept, info = footage_mode.produce_footage(_main().GENERATED_DIR, avoid_keys=avoid, recent_topics=recent)
     concept["title_line"] = pick_title(concept, past_titles(state))
+    return out, concept, info
+
+
+def x_scan_enabled() -> bool:
+    """Bret 2026-11-13 (t752u): the viral scan is the X scan (last 24 h, top 10 viral AI videos, easiest to
+    recreate). Default ON in footage mode; VIRAL_SCAN=youtube restores the old YouTube/open finder."""
+    return (os.environ.get("VIRAL_SCAN") or "x").strip().lower() != "youtube"
+
+
+def produce_x_recreate(settings: dict, state: dict, scan: Optional[dict] = None, out_dir: Optional[str] = None,
+                       name: Optional[str] = None) -> Tuple[str, dict, dict]:
+    """X scan -> top 10 -> easiest-to-recreate pick -> its $0 recipe rendered by footage_mode. Skips the slot
+    (BrandGateSkip) when X can't be read or nothing in the top 10 is recreatable at $0. Never publishes."""
+    import x_recreate_recipes
+    import x_viral_scan
+    if scan is None:
+        scan = x_viral_scan.run_scan(settings=settings, bearer_fetcher=getattr(_main(), "fetch_twitter_bearer_token", None))
+    best = scan.get("pick_item")
+    summary = {k: scan.get(k) for k in ("version", "scanned_at", "window_hours", "source", "posts_seen", "rubric", "top", "pick")}
+    if not best:
+        raise brand_gate.BrandGateSkip(
+            "SKIP: none of the top 10 viral AI videos on X (last 24 h) is recreatable at $0 "
+            f"(real people / copyrighted IP / no free recipe): {[(t['author'], t['recreate_score'], t['blocks']) for t in scan.get('top') or []]}")
+    topic = x_recreate_recipes.build_topic(best["recreate"]["recipe"], best)
+    prov = x_viral_scan.provenance(best)
+    pick = {"score": prov["views_per_hour"], "matched": [prov], "reason": f"x_recreate:{best['recreate']['recipe']}"}
+    out, landscape, concept, info = footage_mode.produce_footage(out_dir or _main().GENERATED_DIR, topic=topic, viral_pick=pick,
+                                                                 name=name)
+    concept["title_line"] = topic["title_line"]
+    info["x_scan"] = summary
+    info["recreation"] = {
+        "source_post": prov, "recipe": best["recreate"]["recipe"], "score": best["recreate"],
+        "method": "free footage pipeline (public-domain / CC archival footage + photos, local Kokoro voice, ffmpeg); "
+                  "NOT AI-generated - the app has no free AI video generator",
+        "cost_usd": 0.0}
     return out, concept, info
 
 
@@ -1570,7 +1663,7 @@ def inspect_publish_errors(state: dict, post: dict, errors: List[str]) -> None:
             add_alert("youtube_upload_deleted", f"YouTube reported the upload as deleted/removed: {str(err)[:300]}", post.get("id"), state)
 
 
-async def run_autopilot(settings: dict, dry_run: bool = False) -> dict:
+async def run_autopilot(settings: dict, dry_run: bool = False, slot: Optional[str] = None) -> dict:
     m = _main()
     state = load_state()
     platforms, notes = resolve_platforms(settings, state)
@@ -1580,6 +1673,11 @@ async def run_autopilot(settings: dict, dry_run: bool = False) -> dict:
         if not dry_run and state.get("failed_source_urls"):
             save_state(state)  # remember dead fallback sources so the next slot skips them
         raise
+    # Bret 2026-11-13: nothing publishes (any engine, any trigger) unless it comes from an AI-filmmaking upload
+    # of the last 24 h and every shot matches the narration; otherwise the slot is skipped with the reason.
+    info["brand_gate"] = brand_gate.publish_gate(concept, info, min_shots=footage_mode.min_shots())
+    logger.info("%s brand gate passed: viral=%s (%s) clips=%s", MARKER, (info["brand_gate"].get("viral_item") or {}).get("url"),
+                (info["brand_gate"].get("viral_item") or {}).get("published_at"), len(info["brand_gate"].get("clips") or []))
     post = build_post(abs_video, concept, info, platforms)
     post["platform_notes"] = notes
     if dry_run:
@@ -1591,9 +1689,10 @@ async def run_autopilot(settings: dict, dry_run: bool = False) -> dict:
     posts = m.load_scheduled_posts()
     if info.get("format") == "stitched_short" and len(platforms) > 1:
         staggered = build_staggered_posts(post, info, platforms)
-        if settings.get("require_autopilot_approval", False):
+        if approval_required(settings):
             for p in staggered:
                 p["status"] = "AWAITING_APPROVAL"
+            save_approval_package(post, concept, info, slot)
             posts.extend(staggered)
             m.save_scheduled_posts(posts)
             record_history(state, post)
@@ -1603,8 +1702,9 @@ async def run_autopilot(settings: dict, dry_run: bool = False) -> dict:
         posts.extend(staggered)
         m.save_scheduled_posts(posts)
         logger.info("%s stitched Short staggered: %s", MARKER, {p["platform"]: p["scheduled_time"] for p in staggered})
-    elif settings.get("require_autopilot_approval", False):
+    elif approval_required(settings):
         post["status"] = "AWAITING_APPROVAL"
+        save_approval_package(post, concept, info, slot)
         posts.append(post)
         m.save_scheduled_posts(posts)
         record_history(state, post)
@@ -1730,7 +1830,7 @@ def due_slot(now: datetime, settings: dict, state: dict) -> Optional[str]:
     if slot_succeeded(slot):
         return None
     info = state.get("slots", {}).get(slot) or {}
-    if info.get("status") in {"gave_up", "published", "awaiting_approval"}:
+    if info.get("status") in {"gave_up", "published", "awaiting_approval", "skipped"}:
         return None
     if int(info.get("attempts") or 0) >= max_slot_attempts():
         return None
@@ -1749,10 +1849,19 @@ async def run_slot(slot: str, settings: dict) -> bool:
     logger.info("Autonomous autoposting slot %s reached. Initiating pipeline... (%s attempt %s/%s)", slot, MARKER, attempt, max_slot_attempts())
     error, ok, result = "", False, {}
     try:
-        result = await run_autopilot(settings)
+        result = await run_autopilot(settings, slot=slot)
         ok = bool(result.get("ok"))
         if not ok:
             error = "; ".join(result.get("errors") or []) or "publish returned no successes"
+    except brand_gate.BrandGateSkip as exc:  # brand/genre/24h/footage rule not met: skip, never fill the slot
+        state = load_state()
+        info = state.setdefault("slots", {}).setdefault(slot, {"attempts": attempt})
+        info["status"] = "skipped"
+        info["skip_reason"] = info["last_error"] = str(exc)[-600:]
+        add_alert("autopilot_slot_skipped", f"Slot {slot} skipped by the brand gate (nothing posted): {str(exc)[-400:]}", None, state)
+        save_state(state)
+        logger.warning("%s slot %s SKIPPED by brand gate: %s", MARKER, slot, str(exc)[-500:])
+        return False
     except Exception as exc:
         error = str(exc)
         logger.exception("%s slot %s crashed", MARKER, slot)

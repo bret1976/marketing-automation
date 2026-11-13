@@ -3201,7 +3201,7 @@ async def execute_autonomous_autopost(settings: dict, forced_trend: Optional[dic
         "posted_at": None
     }
 
-    require_approval = settings.get("require_autopilot_approval", True)
+    require_approval = True  # Bret 2026-11-13: every Autopilot video waits for his explicit approval (no setting turns it off)
     if require_approval:
         log_post["status"] = "AWAITING_APPROVAL"
         posts = load_scheduled_posts()
@@ -3519,6 +3519,27 @@ def edit_approval_post(post_id: str, req: ApprovalEditRequest):
             return {"status": "SUCCESS", "message": "Draft updated."}
     raise HTTPException(status_code=404, detail="Post not found in approval queue.")
 
+@app.get("/api/approvals")
+def list_approvals(status: Optional[str] = None):
+    """Approval packages (video URL, topic, viral source with time + engagement, script, captions, per-shot checks).
+    Read-only. Status is refreshed from the post queue."""
+    by_id = {p.get("id"): p.get("status") for p in load_scheduled_posts()}
+    out = []
+    for pkg in growth_v2.list_approval_packages():
+        pkg["status"] = by_id.get(pkg.get("post_id"), pkg.get("status"))
+        if not status or str(pkg["status"]).upper() == status.upper():
+            out.append(pkg)
+    return out
+
+
+@app.get("/api/approvals/{post_id}")
+def get_approval(post_id: str):
+    pkg = next((p for p in list_approvals() if p.get("post_id") == post_id), None)
+    if not pkg:
+        raise HTTPException(status_code=404, detail="No approval package for that post.")
+    return pkg
+
+
 @app.post("/api/approval-queue/{post_id}/approve")
 async def approve_post(post_id: str):
     posts = load_scheduled_posts()
@@ -3554,6 +3575,36 @@ def reject_post(post_id: str):
             save_scheduled_posts(posts)
             return {"status": "SUCCESS", "message": "Post rejected."}
     raise HTTPException(status_code=404, detail="Post not found in approval queue.")
+
+# ==========================================================================
+# X VIRAL SCAN (Bret 2026-11-13 t752u): top 10 viral AI videos on X in the last 24 h -> easiest to recreate.
+# Reading X needs X_BEARER_TOKEN (none on the live app as of 2026-11-13). Without it, a fresh snapshot of the
+# same X API v2 responses can be uploaded here; X_SCAN_INGEST_TOKEN must be set and sent as X-Scan-Token.
+# ==========================================================================
+
+@app.post("/api/x-scan/snapshot")
+async def upload_x_scan_snapshot(request: Request):
+    import x_viral_scan
+    token = os.environ.get("X_SCAN_INGEST_TOKEN", "")
+    if not token or not hmac.compare_digest(request.headers.get("x-scan-token", ""), token):
+        raise HTTPException(status_code=403, detail="X scan snapshot upload is disabled or the token is wrong.")
+    snap = await request.json()
+    if not isinstance(snap, dict) or not snap.get("fetched_at") or not isinstance(snap.get("post_payloads"), list):
+        raise HTTPException(status_code=400, detail="Snapshot needs fetched_at and post_payloads (X API v2 responses).")
+    write_json_file(x_viral_scan.snapshot_path(), snap)
+    return {"status": "SUCCESS", "path": x_viral_scan.snapshot_path()}
+
+
+@app.get("/api/x-scan/preview")
+def preview_x_scan():
+    """Read-only: runs the X scan now and returns the top 10 with recreate scores and the pick. Renders and posts nothing."""
+    import x_viral_scan
+    try:
+        res = x_viral_scan.run_scan(settings=load_settings(), bearer_fetcher=fetch_twitter_bearer_token)
+    except x_viral_scan.XScanUnavailable as exc:
+        return {"ok": False, "skip_reason": str(exc)}
+    res.pop("pick_item", None)
+    return {"ok": True, **res}
 
 # ==========================================================================
 # ANALYTICS FEEDBACK LOOP — tracks real Twitter engagement on published posts

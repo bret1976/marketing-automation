@@ -40,7 +40,7 @@ import footage_topics
 
 logger = logging.getLogger(__name__)
 MARKER = "FOOTAGE_MODE"
-VERSION = "2026-11-12.1"
+VERSION = "2026-11-12.2"
 MIN_SECONDS = 31.0  # hard floor for every output file (Bret 2026-11-12)
 MAX_SECONDS = 55.0  # hard ceiling for every output file (still a Short everywhere)
 TARGET_SECONDS = 45.0  # aim here when enough good on-topic footage exists
@@ -136,11 +136,107 @@ def _bin(name: str) -> str:
     return shutil.which(name) or name
 
 
-def _run(cmd: List[str], timeout: int = 300) -> subprocess.CompletedProcess:
-    res = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+def _decode_tail(blob: Optional[bytes], n: int = 800) -> str:
+    """Last n chars of a process stream, even when the tool wrote non-UTF8 or nothing."""
+    return (blob or b"").decode("utf-8", "replace")[-n:].strip()
+
+
+def _run(cmd: List[str], timeout: int = 300, fail_log: Optional[str] = None) -> subprocess.CompletedProcess:
+    # bytes, not text=True: a non-UTF8 ffmpeg line used to hide the real error (or raise UnicodeDecodeError)
+    res = subprocess.run(cmd, capture_output=True, timeout=timeout)
     if res.returncode != 0:
-        raise RuntimeError(f"{os.path.basename(cmd[0])} failed: {res.stderr[-600:]}")
+        err = _decode_tail(res.stderr)
+        out = _decode_tail(res.stdout, 400)
+        name = os.path.basename(cmd[0])
+        msg = f"{name} failed rc={res.returncode}: stderr={err or '(empty)'} stdout={out or '(empty)'}"
+        if fail_log:
+            try:
+                with open(fail_log, "w", encoding="utf-8") as fh:
+                    fh.write(msg + "\ncmd=" + " ".join(cmd[:12]) + (" ...\n" if len(cmd) > 12 else "\n"))
+                    fh.write(_decode_tail(res.stderr, 8000) + "\n")
+                    fh.write(_decode_tail(res.stdout, 2000) + "\n")
+            except OSError:
+                pass
+        raise RuntimeError(msg)
     return res
+
+
+RENDER_FREE_BYTES = 800 * 1024 * 1024  # ~800 MiB headroom for mezzanines + two 1080p outputs
+RENDER_KEEP_DAYS = 3
+
+
+def disk_free(path: str) -> int:
+    return shutil.disk_usage(path).free
+
+
+def _referenced_media_names(state_dir: str) -> set:
+    """Basenames still pointed at by the post queue, so a cleanup does not break a live post URL."""
+    keep: set = set()
+    posts_path = os.path.join(state_dir, "scheduled_posts.json")
+    try:
+        with open(posts_path, encoding="utf-8") as fh:
+            posts = json.load(fh)
+    except (OSError, ValueError, TypeError):
+        return keep
+    if not isinstance(posts, list):
+        return keep
+    keys = ("video_path", "vertical_video_path", "landscape_video_path", "thumbnail_path", "media_path")
+    for post in posts:
+        if not isinstance(post, dict):
+            continue
+        for k in keys:
+            v = post.get(k)
+            if v:
+                keep.add(os.path.basename(str(v)))
+    return keep
+
+
+def ensure_render_space(out_dir: str, log: List[str], need: int = RENDER_FREE_BYTES,
+                        keep_days: int = RENDER_KEEP_DAYS) -> None:
+    """If the output filesystem is tight, delete old unreferenced generated media. Never touch recent or queued files."""
+    os.makedirs(out_dir, exist_ok=True)
+    free0 = disk_free(out_dir)
+    log.append(f"disk free before cleanup {free0 / (1024 ** 3):.2f} GiB at {out_dir}")
+    if free0 >= need:
+        return
+    cutoff = time.time() - keep_days * 86400
+    state_dir = os.path.dirname(os.path.abspath(out_dir))
+    keep = _referenced_media_names(state_dir)
+    candidates = []
+    for name in os.listdir(out_dir):
+        path = os.path.join(out_dir, name)
+        if not os.path.isfile(path):
+            continue
+        if os.path.splitext(name)[1].lower() not in {".mp4", ".mov", ".webm", ".png", ".jpg", ".jpeg", ".wav", ".json"}:
+            continue
+        try:
+            st = os.stat(path)
+        except OSError:
+            continue
+        if st.st_mtime >= cutoff or name in keep:
+            continue
+        # keep the matching .sources.json if we keep the video; both go together when old
+        candidates.append((st.st_mtime, st.st_size, path, name))
+    candidates.sort()
+    freed = 0
+    removed = 0
+    for _mtime, size, path, name in candidates:
+        if disk_free(out_dir) >= need:
+            break
+        try:
+            os.remove(path)
+            freed += size
+            removed += 1
+        except OSError as exc:
+            log.append(f"could not remove {name}: {exc}")
+    free1 = disk_free(out_dir)
+    log.append(f"disk free after cleanup {free1 / (1024 ** 3):.2f} GiB (removed {removed} files, {freed / (1024 ** 2):.1f} MiB)")
+    logger.info("%s %s", MARKER, log[-1])
+    if free1 < need // 2:
+        raise RuntimeError(
+            f"not enough disk on {out_dir}: {free1 / (1024 ** 3):.2f} GiB free after cleanup; "
+            f"need {(need // 2) / (1024 ** 2):.0f} MiB to encode a 31-55s clip"
+        )
 
 
 def _get(url: str, params: Optional[dict] = None, timeout: int = 25, headers: Optional[dict] = None) -> requests.Response:
@@ -1369,12 +1465,16 @@ def render(shots: List[dict], vo_wav: Optional[str], captions: List[dict], music
                   f"aresample=44100,atrim=0:{total}[a]")
     else:
         fc.append(f"{music_chain},loudnorm=I=-14:TP=-1.5:LRA=9,aresample=44100,atrim=0:{total}[a]")
-    cmd += ["-filter_complex", ";".join(fc), "-map", "[v]", "-map", "[a]", "-t", f"{total}",
+    script = os.path.join(workdir, f"fc_{orientation}.txt")
+    with open(script, "w", encoding="utf-8") as fh:
+        fh.write(";".join(fc))
+    fail_log = os.path.join(os.path.dirname(os.path.abspath(out_path)), "footage_ffmpeg_last.log")
+    cmd += ["-filter_complex_script", script, "-map", "[v]", "-map", "[a]", "-t", f"{total}",
             "-r", str(FPS), "-c:v", "libx264", "-profile:v", "main", "-level:v", "4.0", "-pix_fmt", "yuv420p",
             "-preset", os.environ.get("FOOTAGE_X264_PRESET", "slow"), "-crf", "18", "-maxrate", "12M", "-bufsize", "24M",
             "-g", str(FPS * 2), "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2",
             "-movflags", "+faststart", out_path]
-    _run(cmd, timeout=900)
+    _run(cmd, timeout=900, fail_log=fail_log)
     return probe(out_path)
 
 
@@ -1584,6 +1684,9 @@ def produce_footage(out_dir: str, viral: Optional[dict] = None, avoid_keys: Opti
         for (loc, rec) in shots:
             loc["focus"] = rec["portrait_focus_x"] = round(focus_x(loc["path"], loc["kind"]), 3)
         credit = concept["footage_credit"]
+        ensure_render_space(out_dir, log)
+        logger.info("%s rendering %s topic=%s length=%.1fs shots=%s disk_free=%.2fGiB",
+                    MARKER, VERSION, topic["key"], total, n, disk_free(out_dir) / (1024 ** 3))
         pv = render(locals_, vo_wav, captions, music, topic["on_screen_hook"], credit, vertical, "vertical", workdir)
         pl = render(locals_, vo_wav, captions, music, topic["on_screen_hook"], credit, landscape, "landscape", workdir)
         for label, meta in (("9:16", pv), ("16:9", pl)):  # hard gate on the real files

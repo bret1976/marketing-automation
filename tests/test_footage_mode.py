@@ -399,10 +399,36 @@ def test_shot_durations_sum_exactly_and_respect_shot_limits(total):
     beats = set(fm.music_beats(music, total))
     assert sum(c in beats for c in cuts) >= len(cuts) - 1  # cut on the beat
 
+
+def test_synth_vo_skips_a_hung_line_and_keeps_the_rest(monkeypatch, tmp_path):
+    import numpy as np
+    import time as _time
+
+    class FakeKokoro:
+        def get_voice_style(self, name):
+            return np.ones(4, dtype=np.float32)
+
+        def create(self, text, voice, speed, lang):
+            if "HANG" in text:
+                _time.sleep(2.0)
+            return np.full(int(24000 * 0.2 * len(text.split())), 0.2, dtype=np.float32), 24000
+
+    monkeypatch.setattr(fm, "_kokoro", lambda: FakeKokoro())
+    monkeypatch.setenv("FOOTAGE_VO_LINE_TIMEOUT", "0.3")
+    lines = [
+        {"say": "one two three four five", "show": "one"},
+        {"say": "HANG this line", "show": "hang"},
+        {"say": "six seven eight nine ten", "show": "six"},
+    ]
+    wav, caps, info = fm.synth_vo(lines, str(tmp_path))
+    assert wav and info["lines_used"] == 2
+    assert [c["text"] for c in caps] == ["one", "six"]
+
+
 def test_three_long_shots_can_fill_the_31s_floor():
     assert fm.min_shots() <= 3
     assert 3 * fm.MAX_SHOT_SECONDS >= fm.MIN_SECONDS
-    assert fm.VERSION == "2026-11-12.4"
+    assert fm.VERSION == "2026-11-12.5"
 
 
 def test_choose_segments_falls_back_when_quality_probes_return_nothing(monkeypatch):

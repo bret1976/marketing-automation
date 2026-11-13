@@ -3201,7 +3201,7 @@ async def execute_autonomous_autopost(settings: dict, forced_trend: Optional[dic
         "posted_at": None
     }
 
-    require_approval = settings.get("require_autopilot_approval", True)
+    require_approval = True  # Bret 2026-11-13: every Autopilot video waits for his explicit approval (no setting turns it off)
     if require_approval:
         log_post["status"] = "AWAITING_APPROVAL"
         posts = load_scheduled_posts()
@@ -3518,6 +3518,27 @@ def edit_approval_post(post_id: str, req: ApprovalEditRequest):
             save_scheduled_posts(posts)
             return {"status": "SUCCESS", "message": "Draft updated."}
     raise HTTPException(status_code=404, detail="Post not found in approval queue.")
+
+@app.get("/api/approvals")
+def list_approvals(status: Optional[str] = None):
+    """Approval packages (video URL, topic, viral source with time + engagement, script, captions, per-shot checks).
+    Read-only. Status is refreshed from the post queue."""
+    by_id = {p.get("id"): p.get("status") for p in load_scheduled_posts()}
+    out = []
+    for pkg in growth_v2.list_approval_packages():
+        pkg["status"] = by_id.get(pkg.get("post_id"), pkg.get("status"))
+        if not status or str(pkg["status"]).upper() == status.upper():
+            out.append(pkg)
+    return out
+
+
+@app.get("/api/approvals/{post_id}")
+def get_approval(post_id: str):
+    pkg = next((p for p in list_approvals() if p.get("post_id") == post_id), None)
+    if not pkg:
+        raise HTTPException(status_code=404, detail="No approval package for that post.")
+    return pkg
+
 
 @app.post("/api/approval-queue/{post_id}/approve")
 async def approve_post(post_id: str):

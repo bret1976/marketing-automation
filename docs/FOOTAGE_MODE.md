@@ -82,3 +82,24 @@ This mode is off by default. When `VIDEO_ENGINE=footage` is set, `growth_v2.prod
 7. Port the tests, and add a test that `run_autopilot` in footage mode makes no Gemini call.
 
 - 9:16 crops of low-resolution sources (for example the 622x480 Titanic reel) are upscaled about 3x and look soft. Prefer HD sources for vertical-first topics.
+
+## Brand gate + mandatory approval (2026-11-13, footage 2026-11-13.1 / brand_gate 2026-11-13.1)
+
+After "The Slap" (Nov 13 7:31 AM PT) and "Mood" (Nov 12 7:12 PM PT) went out off-brand:
+
+* `brand_gate.check_viral_item`: the viral upload must be AI-filmmaking content with the marker in the title
+  text (a `#aivideo` hashtag pile does not count), be a film (not a tool review/tutorial/skit), and carry a real
+  upload time within 24 h plus URL and views. Platform, URL, title, channel, upload time, views and views/hour are
+  stored on the post (`media_info.brand_gate.viral_item`).
+* `brand_gate.check_subject`: a scanned Wikipedia subject is rejected if it is a homonym (`The Slap (novel)`,
+  `Mood (psychology)`), a work/media item, or not a filmable kind.
+* `brand_gate.check_clip` (per clip, in `gather_candidates`): rejects news/broadcaster/watermarked/talking-head
+  files and, for scanned subjects, any file that is not named for the subject AND sharing a concrete narration
+  term (the Slovene "Slap" waterfalls fail). It reads file metadata; it does not look at frames.
+* `brand_gate.publish_gate` runs in `growth_v2.run_autopilot` for every engine and trigger. Any failure raises
+  `BrandGateSkip`; `run_slot` marks the slot `skipped` with the reason (no retry, no fallback topic).
+* Every video that passes is held as `AWAITING_APPROVAL` (no setting can turn this off). The package is at
+  `STATE_DIR/approvals/<slot>/approval.json`, `GET /api/approvals`, `GET /api/approvals/{post_id}`;
+  `scripts/fetch_approvals.py` downloads it to `/workspace/marketing-approvals/<slot>/`. Only
+  `POST /api/approval-queue/{id}/approve` publishes; reject or silence never posts.
+* `scripts/dry_run_next_slot.py` shows what the next slot would pick right now, without publishing.

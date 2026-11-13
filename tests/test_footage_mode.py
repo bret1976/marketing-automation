@@ -13,6 +13,8 @@ os.environ.setdefault("DISABLE_BACKGROUND_SCHEDULER", "true")
 
 import footage_mode as fm
 import footage_topics as ft
+import brand_gate
+from datetime import datetime, timezone
 
 
 def test_flag_is_off_by_default(monkeypatch):
@@ -428,7 +430,7 @@ def test_synth_vo_skips_a_hung_line_and_keeps_the_rest(monkeypatch, tmp_path):
 def test_three_long_shots_can_fill_the_31s_floor():
     assert fm.min_shots() <= 3
     assert 3 * fm.MAX_SHOT_SECONDS >= fm.MIN_SECONDS
-    assert fm.VERSION == "2026-11-12.6"
+    assert fm.VERSION == "2026-11-13.1"
 
 
 def test_choose_segments_falls_back_when_quality_probes_return_nothing(monkeypatch):
@@ -612,6 +614,15 @@ _LEAD = ("The Hindenburg disaster was an airship accident that occurred on May 6
          "Newsreel cameras recorded the whole fire from start to finish.")
 
 
+def _v(title, vph, hours_old=2.0, **extra):
+    """A viral upload as open_viral returns it: real upload time, URL and engagement (the brand gate needs all three)."""
+    from datetime import timedelta
+    pub = (datetime.now(timezone.utc) - timedelta(hours=hours_old)).isoformat()
+    return {"title": title, "views_per_hour": vph, "views": int(vph * hours_old) or 1, "published_at": pub,
+            "url": f"https://www.youtube.com/watch?v={abs(hash(title)) % 10**11:011d}", "platform": "YouTube",
+            "author": "some channel", **extra}
+
+
 def _fake_wiki(pages):
     def get(url, params=None, **k):
         assert "wikipedia.org" in url
@@ -645,10 +656,10 @@ def test_script_from_text_is_long_enough_and_caption_sized():
 def test_viral_scan_determines_topic_not_the_library():
     pages = {"Chernobyl disaster": ("1986 nuclear accident in the Soviet Union", _LEAD.replace("Hindenburg", "Chernobyl")),
              "MrBeast": ("American YouTuber (born 1998)", "Jimmy Donaldson (born May 7, 1998) is an American YouTuber.")}
-    items = [{"title": "I Gave Away 100 Cars | MrBeast AI video", "views_per_hour": 900000},
-             {"title": "Trump speech reaction LIVE | AI video", "views_per_hour": 500000},
-             {"title": "Chernobyl disaster | AI Short Film made with Veo 3", "views_per_hour": 40000},
-             {"title": "Titanic wreck new scan #aifilm", "views_per_hour": 1000}]
+    items = [_v("I Gave Away 100 Cars | MrBeast AI video", 900000),
+             _v("Trump speech reaction LIVE | AI video", 500000),
+             _v("Chernobyl disaster | AI Short Film made with Veo 3", 40000),
+             _v("Titanic wreck | AI short film", 1000)]
     log = []
     picks = fm.viral_topics(items, get=_fake_wiki(pages), log=log)
     keys = [p["topic"]["key"] for p in picks]
@@ -656,7 +667,7 @@ def test_viral_scan_determines_topic_not_the_library():
     assert picks[0]["reason"] == "viral_subject" and picks[0]["topic"]["source"] == "viral_scan"
     assert "titanic-1912" in keys  # a library topic only when a viral title names it (better script)
     assert not any("mrbeast" in k or "trump" in k for k in keys)
-    assert any("news/politics" in l for l in log)
+    assert any("news/politics" in l or "not a film" in l for l in log)
     t = picks[0]["topic"]
     assert re.search(t["require"], "Chernobyl Nuclear Power Plant 1986.webm", re.I)
     assert t["text_credit"] and t["wikipedia"].startswith("https://en.wikipedia.org/wiki/")
@@ -674,11 +685,13 @@ def test_thin_viral_topic_is_skipped_for_the_next_viral_topic(monkeypatch, tmp_p
     tried = []
     a = {**ft.BY_KEY["titanic-1912"]}
     b = {**ft.BY_KEY["hindenburg-1937"]}
-    monkeypatch.setattr(fm, "viral_topics", lambda items, **k: [{"topic": a, "score": 9.0, "matched": []},
-                                                                {"topic": b, "score": 5.0, "matched": []}])
+    src = brand_gate.check_viral_item(_v("Hindenburg | AI short film made with Veo 3", 5.0))[2]
+    monkeypatch.setattr(fm, "viral_topics", lambda items, **k: [{"topic": a, "score": 9.0, "matched": [src]},
+                                                                {"topic": b, "score": 5.0, "matched": [src]}])
     monkeypatch.setattr(fm, "gather_candidates", lambda t: (tried.append(t["key"]) or [], []))
     monkeypatch.setattr(fm, "synth_vo", lambda lines, wd, max_total=None: (None, [], {"seconds": 40.0}))
-    rec = {"provider": "wikimedia_commons", "credit_short": "Wikimedia Commons (public domain)"}
+    rec = {"provider": "wikimedia_commons", "credit_short": "Wikimedia Commons (public domain)", "title": "Hindenburg.webm",
+           "clip_check": {"ok": True, "reason": "file title names the library subject"}}
 
     def plan(c, need, wd, log, min_need=None, **k):
         if len(tried) == 1:
@@ -865,7 +878,7 @@ def test_psychology_mood_subject_is_rejected_even_from_an_in_genre_title():
     ok, why = fm.subject_ok({"title": "Mood", "description": "", "lead": _MOOD[1]})  # lead alone is enough
     assert not ok and "abstract" in why
     log = []
-    picks = fm.viral_topics([{"title": "MOOD | AI Short Film made with Kling", "views_per_hour": 9e5}],
+    picks = fm.viral_topics([_v("MOOD | AI Short Film made with Kling", 9e5)],
                             get=_fake_wiki({"Mood": _MOOD}), log=log)
     assert picks == [] and any("too abstract" in l for l in log), log
     # a real, filmable subject from an in-genre title still works
@@ -874,7 +887,7 @@ def test_psychology_mood_subject_is_rejected_even_from_an_in_genre_title():
 
 def test_in_genre_title_resolves_to_what_the_ai_film_is_about():
     pages = {"Chernobyl disaster": ("1986 nuclear accident in the Soviet Union", _LEAD.replace("Hindenburg", "Chernobyl"))}
-    picks = fm.viral_topics([{"title": "AI Short Film | Chernobyl Disaster (Veo 3) #aifilm", "views_per_hour": 5e4}],
+    picks = fm.viral_topics([_v("AI Short Film | Chernobyl Disaster (Veo 3) #aifilm", 5e4)],
                             get=_fake_wiki(pages))
     assert [p["topic"]["key"] for p in picks] == ["viral-chernobyl-disaster"]
     assert picks[0]["matched"][0]["title"].startswith("AI Short Film")

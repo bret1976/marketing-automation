@@ -40,7 +40,7 @@ import footage_topics
 
 logger = logging.getLogger(__name__)
 MARKER = "FOOTAGE_MODE"
-VERSION = "2026-11-12.4"
+VERSION = "2026-11-12.5"
 MIN_SECONDS = 31.0  # hard floor for every output file (Bret 2026-11-12)
 MAX_SECONDS = 55.0  # hard ceiling for every output file (still a Short everywhere)
 TARGET_SECONDS = 45.0  # aim here when enough good on-topic footage exists
@@ -1256,12 +1256,25 @@ def synth_vo(lines: List[dict], workdir: str, max_total: float = MAX_SECONDS - V
             style = vec if style is None else style + vec
         speed = VO_SPEED
         clips, sr = [], 24000
-        for ln in lines:
-            audio, sr = k.create(ln["say"], voice=style, speed=speed, lang="en-us")
+        from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
+        line_timeout = float(os.environ.get("FOOTAGE_VO_LINE_TIMEOUT", "45") or 45)
+        used_lines = []
+        for i, ln in enumerate(lines):
+            logger.info("%s synth line %s/%s", MARKER, i + 1, len(lines))
+            try:
+                with ThreadPoolExecutor(max_workers=1) as ex:
+                    audio, sr = ex.submit(k.create, ln["say"], voice=style, speed=speed, lang="en-us").result(timeout=line_timeout)
+            except FuturesTimeout:
+                logger.warning("%s kokoro timed out after %.0fs on line %s; skipping that line", MARKER, line_timeout, i + 1)
+                continue
             idx = np.where(np.abs(audio) > 0.01)[0]
             if len(idx):
                 audio = audio[max(0, idx[0] - int(0.02 * sr)): idx[-1] + int(0.06 * sr)]
             clips.append(audio)
+            used_lines.append(ln)
+        lines = used_lines
+        if not clips:
+            raise RuntimeError("kokoro produced no audio")
         gap = VO_GAP
         start = VO_LEAD
         # drop trailing lines rather than rush the read

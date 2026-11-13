@@ -40,7 +40,7 @@ import footage_topics
 
 logger = logging.getLogger(__name__)
 MARKER = "FOOTAGE_MODE"
-VERSION = "2026-11-12.2"
+VERSION = "2026-11-12.3"
 MIN_SECONDS = 31.0  # hard floor for every output file (Bret 2026-11-12)
 MAX_SECONDS = 55.0  # hard ceiling for every output file (still a Short everywhere)
 TARGET_SECONDS = 45.0  # aim here when enough good on-topic footage exists
@@ -143,12 +143,22 @@ def _decode_tail(blob: Optional[bytes], n: int = 800) -> str:
 
 def _run(cmd: List[str], timeout: int = 300, fail_log: Optional[str] = None) -> subprocess.CompletedProcess:
     # bytes, not text=True: a non-UTF8 ffmpeg line used to hide the real error (or raise UnicodeDecodeError)
-    res = subprocess.run(cmd, capture_output=True, timeout=timeout)
+    try:
+        res = subprocess.run(cmd, capture_output=True, timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        name = os.path.basename(cmd[0])
+        raise RuntimeError(f"{name} timed out after {timeout}s: stderr={_decode_tail(exc.stderr)} stdout={_decode_tail(exc.stdout, 400)}") from exc
     if res.returncode != 0:
         err = _decode_tail(res.stderr)
         out = _decode_tail(res.stdout, 400)
         name = os.path.basename(cmd[0])
-        msg = f"{name} failed rc={res.returncode}: stderr={err or '(empty)'} stdout={out or '(empty)'}"
+        sig = ""
+        if res.returncode < 0:
+            try:
+                sig = f" ({__import__('signal').Signals(-res.returncode).name})"
+            except ValueError:
+                sig = " (killed by signal)"
+        msg = f"{name} failed rc={res.returncode}{sig}: stderr={err or '(empty)'} stdout={out or '(empty)'}"
         if fail_log:
             try:
                 with open(fail_log, "w", encoding="utf-8") as fh:
@@ -1403,27 +1413,47 @@ def _draw(workdir: str, text: str, font: str, size: int, y: str, start: float, e
 def render(shots: List[dict], vo_wav: Optional[str], captions: List[dict], music: dict, hook: str, credit: str,
            out_path: str, orientation: str, workdir: str) -> dict:
     """shots: [{path, kind, start, dur}] already local. Writes a CapCut/Meta-safe MP4 exactly sum(dur) long.
-    Short music beds are looped on a bar boundary so the bed covers the whole clip."""
+    Short music beds are looped on a bar boundary so the bed covers the whole clip.
+
+    Two-stage encode: each shot is scaled and trimmed alone, then those mezzanines are
+    concatenated with VO, captions and music. A single graph over every source was getting
+    SIGKILL (rc=-9, empty stderr) on the 45s / 11-shot production render.
+    """
     total = round(sum(float(s["dur"]) for s in shots), 3)
     font = _font(True)
     vertical = orientation == "vertical"
     W, H = (1080, 1920) if vertical else (1920, 1080)
     bw, bh = W, H  # full-bleed in both orientations (9:16 is a pan-and-scan of the action, never padded)
-    cmd = [_bin("ffmpeg"), "-y", "-v", "error"]
-    fc = []
+    fail_log = os.path.join(os.path.dirname(os.path.abspath(out_path)), "footage_ffmpeg_last.log")
+    preset = os.environ.get("FOOTAGE_X264_PRESET", "veryfast")
+
+    mezzanines: List[str] = []
     for i, s in enumerate(shots):
+        f0, f1 = round(sum(x["dur"] for x in shots[:i]) * FPS), round(sum(x["dur"] for x in shots[:i + 1]) * FPS)
+        if i == len(shots) - 1:
+            f1 = int(round(total * FPS))
+        frames = max(1, f1 - f0)
+        dest = os.path.join(workdir, f"shot_{orientation}_{i}.mp4")
+        cmd = [_bin("ffmpeg"), "-y", "-v", "error"]
         if s["kind"] == "image":
             cmd += ["-loop", "1", "-t", f"{s['dur'] + 0.2:.3f}", "-i", s["path"]]
         else:
             cmd += ["-ss", f"{s['start']:.3f}", "-t", f"{s['dur'] + 0.2:.3f}", "-i", s["path"]]
         focus = s.get("focus", 0.5) if vertical else 0.5
-        # exact integer frame budget per shot (cumulative rounding), padded by cloning so a short source can't drop frames
-        f0, f1 = round(sum(x["dur"] for x in shots[:i]) * FPS), round(sum(x["dur"] for x in shots[:i + 1]) * FPS)
-        if i == len(shots) - 1:
-            f1 = int(round(total * FPS))
-        fc.append(f"[{i}:v]{_shot_filter(s['kind'], bw, bh, s['dur'], i, focus)},setpts=PTS-STARTPTS,"
-                  f"tpad=stop_mode=clone:stop_duration=1,trim=end_frame={f1 - f0},setpts=N/({FPS}*TB)[s{i}]")
-    n = len(shots)
+        filt = (f"[0:v]{_shot_filter(s['kind'], bw, bh, s['dur'], i, focus)},setpts=PTS-STARTPTS,"
+                f"tpad=stop_mode=clone:stop_duration=1,trim=end_frame={frames},setpts=N/({FPS}*TB),format=yuv420p[v]")
+        cmd += ["-filter_complex", filt, "-map", "[v]", "-r", str(FPS), "-frames:v", str(frames),
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p",
+                "-an", dest]
+        _run(cmd, timeout=300, fail_log=fail_log)
+        mezzanines.append(dest)
+
+    cmd = [_bin("ffmpeg"), "-y", "-v", "error"]
+    fc = []
+    for i, path in enumerate(mezzanines):
+        cmd += ["-i", path]
+        fc.append(f"[{i}:v]setpts=PTS-STARTPTS[s{i}]")
+    n = len(mezzanines)
     fc.append("".join(f"[s{i}]" for i in range(n)) + f"concat=n={n}:v=1:a=0,{GRADE},noise=alls=5:allf=t+u,format=yuv420p[prog]")
     fc.append("[prog]null[base]")
     if vertical:
@@ -1468,10 +1498,9 @@ def render(shots: List[dict], vo_wav: Optional[str], captions: List[dict], music
     script = os.path.join(workdir, f"fc_{orientation}.txt")
     with open(script, "w", encoding="utf-8") as fh:
         fh.write(";".join(fc))
-    fail_log = os.path.join(os.path.dirname(os.path.abspath(out_path)), "footage_ffmpeg_last.log")
     cmd += ["-filter_complex_script", script, "-map", "[v]", "-map", "[a]", "-t", f"{total}",
             "-r", str(FPS), "-c:v", "libx264", "-profile:v", "main", "-level:v", "4.0", "-pix_fmt", "yuv420p",
-            "-preset", os.environ.get("FOOTAGE_X264_PRESET", "slow"), "-crf", "18", "-maxrate", "12M", "-bufsize", "24M",
+            "-preset", preset, "-crf", "18", "-maxrate", "12M", "-bufsize", "24M",
             "-g", str(FPS * 2), "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2",
             "-movflags", "+faststart", out_path]
     _run(cmd, timeout=900, fail_log=fail_log)

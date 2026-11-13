@@ -734,3 +734,13 @@ def test_ensure_render_space_deletes_old_unreferenced_only(tmp_path, monkeypatch
     assert kept_ref.exists()
     assert recent.exists()
     assert any("removed 1 files" in line for line in log)
+
+
+def test_run_names_sigkill_when_returncode_is_negative(monkeypatch, tmp_path):
+    class Fake:
+        returncode = -9
+        stdout = b""
+        stderr = b""
+    monkeypatch.setattr(fm.subprocess, "run", lambda *a, **k: Fake())
+    with pytest.raises(RuntimeError, match=r"rc=-9 \(SIGKILL\)"):
+        fm._run(["ffmpeg", "-y"], fail_log=str(tmp_path / "fail.log"))

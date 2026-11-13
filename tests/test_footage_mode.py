@@ -697,3 +697,40 @@ def test_scanned_subject_copy_matches_its_kind_not_history():
 def test_fit_caption_three_lines_for_long_sentence():
     text, size = fm.fit_caption("The global cheetah population was estimated at 6,517 mature individuals in 2021.", 26, 56)
     assert text.count("\n") == 2 and size >= 48
+
+
+def test_run_includes_returncode_when_stderr_is_empty(tmp_path):
+    # Production 4pm 2026-11-12 failed with "ffmpeg failed: " and nothing after the colon.
+    script = tmp_path / "boom.py"
+    script.write_text("import sys; sys.exit(3)\n")
+    try:
+        fm._run(["python3", str(script)], timeout=10)
+        assert False, "should have raised"
+    except RuntimeError as exc:
+        msg = str(exc)
+        assert "rc=3" in msg
+        assert "(empty)" in msg
+
+
+def test_ensure_render_space_deletes_old_unreferenced_only(tmp_path, monkeypatch):
+    gen = tmp_path / "generated"
+    gen.mkdir()
+    posts = tmp_path / "scheduled_posts.json"
+    keep_name = "keep_me.mp4"
+    posts.write_text('[{"id":"p1","video_path":"/static/assets/generated/%s"}]' % keep_name)
+    old = gen / "old_clip.mp4"
+    kept_ref = gen / keep_name
+    recent = gen / "recent.mp4"
+    old.write_bytes(b"x" * 2000)
+    kept_ref.write_bytes(b"y" * 2000)
+    recent.write_bytes(b"z" * 2000)
+    old_st = old.stat()
+    os.utime(old, (old_st.st_atime, old_st.st_mtime - 10 * 86400))
+    log = []
+    # pretend the volume is tight so cleanup runs
+    monkeypatch.setattr(fm, "disk_free", lambda path: 100 if (path == str(gen) and old.exists()) else 2_000_000_000)
+    fm.ensure_render_space(str(gen), log, need=1_000_000_000, keep_days=3)
+    assert not old.exists()
+    assert kept_ref.exists()
+    assert recent.exists()
+    assert any("removed 1 files" in line for line in log)

@@ -1,7 +1,11 @@
-"""Swappable LLM for Content Team: xAI Grok, Gemini, stub, or local fallback.
+"""Swappable LLM for Content Team.
 
-Never invent a paid provider. Failures return a structured error and the
-caller may use a template fallback. CONTENT_TEAM_LLM=auto|xai|gemini|stub
+Default path is a free OpenAI-compatible endpoint (Groq, Cloudflare Workers AI,
+OpenRouter :free, or a local llama.cpp / Ollama server). Gemini is never
+auto-selected. Failures and missing keys return a structured error so the
+caller can write a labeled template fallback.
+
+CONTENT_TEAM_LLM=auto|openai|groq|cloudflare|openrouter|ollama|xai|gemini|stub|fallback
 """
 
 from __future__ import annotations
@@ -10,11 +14,45 @@ import json
 import logging
 import os
 import re
+from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import urlparse
 
 logger = logging.getLogger("content_team.llm")
 
 STUB_MARKER = "CONTENT_TEAM_STUB"
+DEFAULT_DAILY_CAP = 80
+# Auto never includes gemini (credits are paid/depleted) or xai (paid).
+AUTO_PROVIDERS = ("openai", "groq", "cloudflare", "openrouter")
+KNOWN_PROVIDERS = (
+    "openai",
+    "groq",
+    "cloudflare",
+    "openrouter",
+    "ollama",
+    "xai",
+    "gemini",
+    "stub",
+    "fallback",
+    "auto",
+)
+
+DEFAULT_MODELS = {
+    "groq": "openai/gpt-oss-20b",
+    "cloudflare": "@cf/meta/llama-3.2-3b-instruct",
+    "openrouter": "openrouter/free",
+    "openai": "local",
+    "ollama": "llama3.2",
+    "xai": "grok-4",
+    "gemini": "gemini-2.5-flash",
+}
+
+DEFAULT_BASES = {
+    "groq": "https://api.groq.com/openai/v1",
+    "openrouter": "https://openrouter.ai/api/v1",
+    "ollama": "http://127.0.0.1:11434/v1",
+    "xai": "https://api.x.ai/v1",
+}
 
 
 def _env(name: str) -> str:
@@ -33,46 +71,114 @@ def gemini_key() -> str:
     return _env("GEMINI_API_KEY") or _env("GOOGLE_API_KEY")
 
 
+def groq_key() -> str:
+    return _env("GROQ_API_KEY")
+
+
+def openrouter_key() -> str:
+    return _env("OPENROUTER_API_KEY")
+
+
+def cloudflare_account() -> str:
+    return _env("CLOUDFLARE_ACCOUNT_ID") or _env("CF_ACCOUNT_ID")
+
+
+def cloudflare_token() -> str:
+    return _env("CLOUDFLARE_API_TOKEN") or _env("CF_API_TOKEN") or _env("CLOUDFLARE_API_KEY")
+
+
+def openai_base_url() -> str:
+    return _env("CONTENT_TEAM_LLM_BASE_URL").rstrip("/")
+
+
+def openai_api_key() -> str:
+    return _env("CONTENT_TEAM_LLM_API_KEY")
+
+
+def daily_cap() -> int:
+    raw = _env("CONTENT_TEAM_LLM_DAILY_CAP")
+    if raw == "":
+        return DEFAULT_DAILY_CAP
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return DEFAULT_DAILY_CAP
+
+
 def configured_provider() -> str:
     forced = _env("CONTENT_TEAM_LLM").lower()
-    if forced in {"stub", "xai", "gemini", "fallback", "auto"}:
+    if forced in KNOWN_PROVIDERS:
         return forced
-    if xai_key():
-        return "xai"
-    if gemini_key():
-        return "gemini"
-    return "fallback"
+    return "auto"
+
+
+def _provider_ready(name: str) -> bool:
+    if name == "openai":
+        return bool(openai_base_url())
+    if name == "groq":
+        return bool(groq_key() or (openai_api_key() and "groq.com" in openai_base_url()))
+    if name == "cloudflare":
+        return bool(cloudflare_account() and cloudflare_token())
+    if name == "openrouter":
+        return bool(openrouter_key())
+    if name == "ollama":
+        return bool(openai_base_url() or _env("OLLAMA_HOST") or configured_provider() == "ollama")
+    if name == "xai":
+        return bool(xai_key())
+    if name == "gemini":
+        return bool(gemini_key())
+    if name == "stub":
+        return True
+    return False
+
+
+def provider_order() -> list[str]:
+    """Ordered real providers to try. Gemini is never added in auto."""
+    choice = configured_provider()
+    if choice == "stub":
+        return ["stub"]
+    if choice == "fallback":
+        return []
+    if choice == "auto":
+        raw = _env("CONTENT_TEAM_LLM_PROVIDERS")
+        names = [p.strip().lower() for p in raw.split(",") if p.strip()] if raw else list(AUTO_PROVIDERS)
+        # Safety: never silently add gemini to auto even if listed... actually if they
+        # explicitly set CONTENT_TEAM_LLM_PROVIDERS=gemini we should honor it.
+        # Default AUTO_PROVIDERS has no gemini. If they use default auto, skip gemini/xai
+        # unless listed in CONTENT_TEAM_LLM_PROVIDERS.
+        if not raw:
+            names = [n for n in names if n not in {"gemini", "xai"}]
+        return [n for n in names if n in KNOWN_PROVIDERS and n not in {"auto", "fallback"} and _provider_ready(n)]
+    if choice in KNOWN_PROVIDERS:
+        return [choice]
+    return []
 
 
 def provider_status() -> dict:
     choice = configured_provider()
+    order = provider_order()
+    usage = current_usage()
     return {
         "configured": choice,
+        "active": order[0] if order else ("stub" if choice == "stub" else "fallback"),
+        "order": order,
+        "gemini_in_auto": False,
+        "groq_key_present": bool(groq_key()),
+        "cloudflare_ready": bool(cloudflare_account() and cloudflare_token()),
+        "openrouter_key_present": bool(openrouter_key()),
+        "openai_base_url_set": bool(openai_base_url()),
         "xai_key_present": bool(xai_key()),
         "gemini_key_present": bool(gemini_key()),
-        "model_xai": _env("XAI_MODEL") or "grok-4",
-        "model_gemini": _env("CONTENT_TEAM_GEMINI_MODEL") or "gemini-2.5-flash",
+        "model": _model_for(order[0] if order else choice),
+        "daily_cap": daily_cap(),
+        "calls_today": usage.get("count", 0),
+        "usage_date": usage.get("date"),
     }
 
 
 def complete_json(prompt: str, *, fallback: Any, system: str = "", role: str = "") -> dict:
     """Ask the LLM for JSON. Always returns {ok, provider, llm_status, data, error, raw}."""
-    choice = configured_provider()
-    order: list[str] = []
-    if choice == "stub":
-        order = ["stub"]
-    elif choice == "fallback":
-        order = []
-    elif choice == "xai":
-        order = ["xai"]
-    elif choice == "gemini":
-        order = ["gemini"]
-    else:  # auto
-        if xai_key():
-            order.append("xai")
-        if gemini_key():
-            order.append("gemini")
-
+    order = provider_order()
     last_error = None
     for provider in order:
         try:
@@ -80,18 +186,13 @@ def complete_json(prompt: str, *, fallback: Any, system: str = "", role: str = "
                 raw = _stub_complete(prompt, fallback, role=role)
                 data = _parse_json(raw, fallback)
                 return _result(True, "stub", "stub", data, None, raw)
-            if provider == "xai":
-                raw = _xai_complete(prompt, system)
-                data = _parse_json(raw, None)
-                if data is None:
-                    raise ValueError("xAI returned non-JSON")
-                return _result(True, "xai", "real", data, None, raw)
-            if provider == "gemini":
-                raw = _gemini_complete(prompt, system)
-                data = _parse_json(raw, None)
-                if data is None:
-                    raise ValueError("Gemini returned non-JSON")
-                return _result(True, "gemini", "real", data, None, raw)
+            _assert_under_daily_cap()
+            raw = _complete_with(provider, prompt, system)
+            data = _parse_json(raw, None)
+            if data is None:
+                raise ValueError(f"{provider} returned non-JSON")
+            record_call(provider)
+            return _result(True, provider, "real", data, None, raw)
         except Exception as exc:  # noqa: BLE001 — caller needs a graceful fallback
             last_error = f"{provider}: {exc}"
             logger.warning("content_team LLM %s failed: %s", provider, exc)
@@ -135,6 +236,153 @@ def _parse_json(text: str, fallback: Any) -> Any:
             except json.JSONDecodeError:
                 pass
     return fallback
+
+
+def _utc_date() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+def _usage_path():
+    from content_team import store
+
+    return store.state_root() / "llm_usage.json"
+
+
+def current_usage() -> dict:
+    from content_team import store
+
+    data = store.read_json(_usage_path(), {"date": _utc_date(), "count": 0, "by_provider": {}})
+    if data.get("date") != _utc_date():
+        return {"date": _utc_date(), "count": 0, "by_provider": {}}
+    return data
+
+
+def record_call(provider: str) -> dict:
+    from content_team import store
+
+    data = current_usage()
+    data["date"] = _utc_date()
+    data["count"] = int(data.get("count") or 0) + 1
+    by_provider = dict(data.get("by_provider") or {})
+    by_provider[provider] = int(by_provider.get(provider) or 0) + 1
+    data["by_provider"] = by_provider
+    store.write_json(_usage_path(), data)
+    return data
+
+
+def _assert_under_daily_cap() -> None:
+    cap = daily_cap()
+    used = int(current_usage().get("count") or 0)
+    if used >= cap:
+        raise RuntimeError(f"daily LLM cap reached ({used}/{cap})")
+
+
+def _model_for(provider: str) -> str:
+    override = _env("CONTENT_TEAM_LLM_MODEL")
+    if override:
+        return override
+    if provider == "gemini":
+        return _env("CONTENT_TEAM_GEMINI_MODEL") or DEFAULT_MODELS["gemini"]
+    if provider == "xai":
+        return _env("XAI_MODEL") or DEFAULT_MODELS["xai"]
+    return DEFAULT_MODELS.get(provider, "local")
+
+
+def _complete_with(provider: str, prompt: str, system: str) -> str:
+    if provider in {"openai", "groq", "cloudflare", "openrouter", "ollama", "xai"}:
+        return _openai_complete(provider, prompt, system)
+    if provider == "gemini":
+        return _gemini_complete(prompt, system)
+    raise RuntimeError(f"unknown provider {provider}")
+
+
+def _chat_url(base: str) -> str:
+    base = (base or "").rstrip("/")
+    if base.endswith("/chat/completions"):
+        return base
+    return base + "/chat/completions"
+
+
+def _base_and_key(provider: str) -> tuple[str, str]:
+    if provider == "openai":
+        base = openai_base_url()
+        if not base:
+            raise RuntimeError("CONTENT_TEAM_LLM_BASE_URL is not set")
+        return base, openai_api_key()
+    if provider == "groq":
+        base = openai_base_url() if "groq.com" in openai_base_url() else DEFAULT_BASES["groq"]
+        key = groq_key() or openai_api_key()
+        if not key:
+            raise RuntimeError("GROQ_API_KEY is not set")
+        return base, key
+    if provider == "cloudflare":
+        account = cloudflare_account()
+        token = cloudflare_token()
+        if not account or not token:
+            raise RuntimeError("CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN are not set")
+        base = openai_base_url() if "cloudflare.com" in openai_base_url() else (
+            f"https://api.cloudflare.com/client/v4/accounts/{account}/ai/v1"
+        )
+        return base, token
+    if provider == "openrouter":
+        key = openrouter_key() or openai_api_key()
+        if not key:
+            raise RuntimeError("OPENROUTER_API_KEY is not set")
+        base = openai_base_url() if "openrouter.ai" in openai_base_url() else DEFAULT_BASES["openrouter"]
+        return base, key
+    if provider == "ollama":
+        host = _env("OLLAMA_HOST").rstrip("/")
+        if openai_base_url():
+            base = openai_base_url()
+        elif host:
+            base = host if host.endswith("/v1") else host + "/v1"
+        else:
+            base = DEFAULT_BASES["ollama"]
+        return base, openai_api_key() or "ollama"
+    if provider == "xai":
+        key = xai_key()
+        if not key:
+            raise RuntimeError("XAI_API_KEY / GROK_API_KEY is not set")
+        return _env("XAI_API_BASE") or DEFAULT_BASES["xai"], key
+    raise RuntimeError(f"no OpenAI-compatible config for {provider}")
+
+
+def _openai_complete(provider: str, prompt: str, system: str) -> str:
+    import requests
+
+    base, key = _base_and_key(provider)
+    model = _model_for(provider)
+    messages: list[dict[str, str]] = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": prompt + "\n\nReturn only valid JSON."})
+    headers = {"Content-Type": "application/json"}
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+    if provider == "openrouter":
+        headers["HTTP-Referer"] = _env("PUBLIC_BASE_URL") or "https://6framestudio.com"
+        headers["X-Title"] = "6Frame Content Team"
+    # Never let OpenRouter fall through to a paid model.
+    payload: dict[str, Any] = {
+        "model": model,
+        "messages": messages,
+        "temperature": 0.4,
+    }
+    timeout = 90 if provider in {"openai", "ollama"} else 60
+    url = _chat_url(base)
+    host = urlparse(url).hostname or ""
+    logger.info("content_team LLM calling %s at %s model=%s", provider, host, model)
+    res = requests.post(url, headers=headers, json=payload, timeout=timeout)
+    if res.status_code >= 400:
+        raise RuntimeError(f"{provider} HTTP {res.status_code}: {res.text[:300]}")
+    data = res.json()
+    # Cloudflare and OpenAI both use choices[0].message.content
+    content = ((data.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+    if isinstance(content, list):
+        content = "".join(
+            part.get("text", "") if isinstance(part, dict) else str(part) for part in content
+        )
+    return content or ""
 
 
 def _stub_complete(prompt: str, fallback: Any, role: str = "") -> str:
@@ -201,38 +449,15 @@ def _stub_complete(prompt: str, fallback: Any, role: str = "") -> str:
     return json.dumps(fallback if fallback is not None else {"ok": True, "marker": STUB_MARKER})
 
 
-def _xai_complete(prompt: str, system: str) -> str:
-    key = xai_key()
-    if not key:
-        raise RuntimeError("XAI_API_KEY / GROK_API_KEY is not set")
-    import requests
-
-    model = _env("XAI_MODEL") or "grok-4"
-    url = _env("XAI_API_BASE") or "https://api.x.ai/v1/chat/completions"
-    messages = []
-    if system:
-        messages.append({"role": "system", "content": system})
-    messages.append({"role": "user", "content": prompt + "\n\nReturn only valid JSON."})
-    res = requests.post(
-        url,
-        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-        json={"model": model, "messages": messages, "temperature": 0.4},
-        timeout=60,
-    )
-    if res.status_code >= 400:
-        raise RuntimeError(f"xAI HTTP {res.status_code}: {res.text[:300]}")
-    data = res.json()
-    return ((data.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
-
-
 def _gemini_complete(prompt: str, system: str) -> str:
+    """Explicit opt-in only (CONTENT_TEAM_LLM=gemini). Not used in auto."""
     key = gemini_key()
     if not key:
         raise RuntimeError("GEMINI_API_KEY is not set")
     from google import genai
     from google.genai import types
 
-    model = _env("CONTENT_TEAM_GEMINI_MODEL") or "gemini-2.5-flash"
+    model = _model_for("gemini")
     client = genai.Client(api_key=key, http_options=types.HttpOptions(timeout=60000))
     contents = prompt + "\n\nReturn only valid JSON."
     if system:

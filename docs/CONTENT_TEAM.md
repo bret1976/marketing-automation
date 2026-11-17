@@ -78,9 +78,27 @@ Article Tracker: `POST /api/content-team/ideas` with `{ "text": "...", "source":
 
 Each report includes `llm_status`: `real` (live model or, for analytics, real stored metrics), `stub` (test provider), `fallback` (template used after an LLM failure or missing key), or `failed`.
 
-## LLM provider
+## LLM provider (free, OpenAI-compatible)
 
-`CONTENT_TEAM_LLM=auto|xai|gemini|stub`. Auto uses `XAI_API_KEY` or `GROK_API_KEY` first, then `GEMINI_API_KEY`. Credit or network failures are caught and the role still writes a labeled fallback draft.
+The Content Team does **not** auto-select Gemini. `CONTENT_TEAM_LLM=auto` tries, in order, any of these that are configured:
+
+1. Generic OpenAI-compatible server if `CONTENT_TEAM_LLM_BASE_URL` is set (llama.cpp, Ollama, etc.)
+2. Groq (`GROQ_API_KEY`) — recommended primary. Free plan, no card. Default model `openai/gpt-oss-20b`. Sign up at https://console.groq.com and create an API key.
+3. Cloudflare Workers AI (`CLOUDFLARE_ACCOUNT_ID` + `CLOUDFLARE_API_TOKEN`) — recommended fallback. 10,000 Neurons/day on the Workers Free plan. Default model `@cf/meta/llama-3.2-3b-instruct`. Create a token with Workers AI permission in the existing Cloudflare account.
+4. OpenRouter (`OPENROUTER_API_KEY`) — optional extra fallback, default model `openrouter/free` so it never falls through to a paid model. Free accounts are capped at 50 requests/day unless you buy credits (don't). Sign up at https://openrouter.ai.
+
+Override the order with `CONTENT_TEAM_LLM_PROVIDERS=groq,cloudflare,openrouter`. Point at any server with:
+
+```
+CONTENT_TEAM_LLM=openai
+CONTENT_TEAM_LLM_BASE_URL=http://127.0.0.1:8080/v1
+CONTENT_TEAM_LLM_MODEL=local
+CONTENT_TEAM_LLM_API_KEY=   # optional for a local llama.cpp server
+```
+
+`CONTENT_TEAM_LLM_DAILY_CAP` (default 80) stops further real calls for the UTC day and writes labeled fallback drafts instead. Failures (rate limits, missing keys, bad JSON) also fall back. Gemini and xAI are opt-in only (`CONTENT_TEAM_LLM=gemini` or `xai`) and are not used in auto.
+
+Do not run a multi-GB model inside the Railway container. RAM is billed at about $10/GB-month.
 
 ## Voice docs
 

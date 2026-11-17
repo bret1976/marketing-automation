@@ -85,6 +85,11 @@ def status() -> dict:
             "viral_source": (os.environ.get("VIRAL_SOURCE") or "").strip().lower() or "default"}
 
 
+def verified_enabled() -> bool:
+    """footage v2 (footage_verified.py) is the default; FOOTAGE_VERIFIED=0 restores the old keyword pipeline."""
+    return (os.environ.get("FOOTAGE_VERIFIED", "1").strip().lower() not in ("0", "false", "no", "off"))
+
+
 def enabled() -> bool:
     return (os.environ.get("VIDEO_ENGINE") or "").strip().lower() == "footage"
 
@@ -1277,15 +1282,17 @@ def shot_durations(beats: List[float], shots: int, total: float) -> Tuple[List[f
 _KOKORO = None
 
 
-def _kokoro_files() -> Tuple[str, str]:
-    model = os.environ.get("KOKORO_MODEL") or ""
+def _kokoro_files(fp32: bool = False) -> Tuple[str, str]:
+    model = os.environ.get("KOKORO_MODEL_FP32" if fp32 else "KOKORO_MODEL") or ""
     voices = os.environ.get("KOKORO_VOICES") or ""
     if model and voices and os.path.exists(model) and os.path.exists(voices):
         return model, voices
-    base = os.path.join(os.environ.get("STATE_DIR") or os.environ.get("DATA_DIR") or tempfile.gettempdir(), "kokoro")
+    # runtime fallback downloads go to the container's temp dir, never the (nearly full) data volume
+    base = os.path.join(tempfile.gettempdir(), "kokoro")
     os.makedirs(base, exist_ok=True)
     rel = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/"
-    files = {"kokoro-v1.0.int8.onnx": os.path.join(base, "kokoro-v1.0.int8.onnx"),
+    mname = "kokoro-v1.0.onnx" if fp32 else "kokoro-v1.0.int8.onnx"
+    files = {mname: os.path.join(base, mname),
              "voices-v1.0.bin": os.path.join(base, "voices-v1.0.bin")}
     for name, dest in files.items():
         if not os.path.exists(dest) or os.path.getsize(dest) < 1_000_000:
@@ -1297,7 +1304,7 @@ def _kokoro_files() -> Tuple[str, str]:
                     for chunk in r.iter_content(1 << 20):
                         fh.write(chunk)
                 os.replace(tmp, dest)
-    return files["kokoro-v1.0.int8.onnx"], files["voices-v1.0.bin"]
+    return files[mname], files["voices-v1.0.bin"]
 
 
 def _kokoro():
@@ -1505,7 +1512,8 @@ def _draw(workdir: str, text: str, font: str, size: int, y: str, start: float, e
 
 
 def render(shots: List[dict], vo_wav: Optional[str], captions: List[dict], music: dict, hook: str, credit: str,
-           out_path: str, orientation: str, workdir: str) -> dict:
+           out_path: str, orientation: str, workdir: str, credit_window: Optional[Tuple[float, float]] = None,
+           layout: str = "v1") -> dict:
     """shots: [{path, kind, start, dur}] already local. Writes a CapCut/Meta-safe MP4 exactly sum(dur) long.
     Short music beds are looped on a bar boundary so the bed covers the whole clip.
 
@@ -1557,16 +1565,23 @@ def render(shots: List[dict], vo_wav: Optional[str], captions: List[dict], music
     else:
         hook_y, cap_y, cred_y = "90", "h-310", "h-58"  # ~150 px clear between caption plate and credit
         hook_size, cap_size, cred_size, wrap_hook, wrap_cap = 78, 58, 24, 34, 44
+    if layout == "v2":
+        # v2: captions grow UP from a fixed bottom line inside the safe area (a 3-line caption can never reach
+        # the credit), and the credit is shown only on the end card, when no caption is on screen.
+        cap_y = "1400-text_h" if vertical else "h-120-text_h"
+        cred_y = "1180" if vertical else "h-260"
+        cred_size = 34 if vertical else 30
     draws = [_draw(workdir, _wrap(hook, wrap_hook), font, hook_size, hook_y, 0.0, HOOK_SECONDS, border=5, fade=0.12)]
     for c in captions:
         text, size = fit_caption(c["text"], wrap_cap, cap_size)
         draws.append(_draw(workdir, text, font, size, cap_y, c["start"], min(c["end"], total), border=3, plate=True))
     if credit:
         ctext, csize = screen_credit(credit, int((1000 if vertical else 1800) / (cred_size * 0.52)), cred_size)
-        if "\n" in ctext and not vertical:
+        if "\n" in ctext and not vertical and layout != "v2":
             cred_y = f"h-{58 + int(csize * 1.2)}"
-        draws.append(_draw(workdir, ctext, _font(False) or font, csize, cred_y, 0.0, total,
-                           alpha=0.7, border=2, fade=0.01))
+        c0, c1 = credit_window if credit_window else (0.0, total)
+        draws.append(_draw(workdir, ctext, _font(False) or font, csize, cred_y, c0, min(c1, total),
+                           alpha=0.85 if credit_window else 0.7, border=2, fade=0.25 if credit_window else 0.01))
     fc.append(f"[base]{','.join(draws)},fade=t=out:st={total - 0.35}:d=0.35[v]")
     # audio: CC0 music bed (starts on a downbeat), ducked under the Kokoro VO, loudness-normalised
     mi = n
@@ -1610,7 +1625,7 @@ def localize(c: dict, src: str, start: float, dur: float, workdir: str, idx: int
     """Cut just the needed seconds (HTTP range reads) into a local mezzanine; stills are downloaded."""
     if c["kind"] == "image":
         ext = os.path.splitext(src.split("?")[0])[1] or ".jpg"
-        dest = os.path.join(workdir, f"still{idx}{ext}")
+        dest = os.path.join(workdir, f"still{idx}_src{ext}")  # never the same path as the .png below
         with _get(src, timeout=120) as r, open(dest, "wb") as fh:
             fh.write(r.content)
         flat = os.path.join(workdir, f"still{idx}.png")
@@ -1765,6 +1780,12 @@ def produce_footage(out_dir: str, viral: Optional[dict] = None, avoid_keys: Opti
                     recent_topics: Optional[List[str]] = None, topic_key: Optional[str] = None,
                     workdir: Optional[str] = None, name: Optional[str] = None) -> Tuple[str, str, dict, dict]:
     """Returns (vertical_mp4, landscape_mp4, concept, info). Raises if no usable footage."""
+    if not topic_key and verified_enabled():
+        # v2 (2026-11-17): verified subject + per-line, vision-checked footage. No keyword-only fallback:
+        # if v2 finds nothing that matches, there is no video this slot.
+        import footage_verified
+        return footage_verified.produce(out_dir, viral=viral, avoid_keys=avoid_keys, recent_topics=recent_topics,
+                                        workdir=workdir, name=name)
     t0 = time.time()
     own_tmp = workdir is None
     workdir = workdir or tempfile.mkdtemp(prefix="footage_")

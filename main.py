@@ -34,6 +34,8 @@ import publish_guard
 import spend_guard
 import autopilot_watch
 import yt_proxy
+import content_team
+from content_team.routes import router as content_team_router, request_has_content_team_token
 import growth_v2
 import x_policy
 
@@ -191,6 +193,8 @@ async def spend_guard_middleware(request: Request, call_next):
 @app.middleware("http")
 async def require_admin_session(request: Request, call_next):
     if auth_enabled() and not is_public_path(request.url.path) and not request_is_authenticated(request):
+        if request.url.path.startswith("/api/content-team/") and request_has_content_team_token(request):
+            return await call_next(request)
         headers = {"WWW-Authenticate": 'Basic realm="6Frame Studio Admin", charset="UTF-8"'}
         if request.url.path.startswith("/api/"):
             return JSONResponse({"detail": "Authentication required."}, status_code=401, headers=headers)
@@ -3393,6 +3397,7 @@ def startup_event():
         asyncio.create_task(growth_v2.scheduler_loop())
     else:
         asyncio.create_task(scheduler_loop())
+    asyncio.create_task(content_team.scheduler.scheduler_loop())
 
 @app.post("/api/schedule-post")
 def schedule_post(req: SchedulePostRequest):
@@ -5407,6 +5412,9 @@ def terms_of_service():
 # PUBLISH GUARD — scout pack publish-guard-v1 (backend-only; no UI)
 # ==========================================================================
 
+app.include_router(content_team_router)
+
+
 @app.get("/health")
 def health():
     return {
@@ -5417,6 +5425,7 @@ def health():
             "autopilot_watch": autopilot_watch.PACK,
             "spend_guard": spend_guard.PACK,
             "x_policy": x_policy.PACK,
+            "content_team": content_team.PACK,
         },
         "x_policy": x_policy.summary(),
         "publish_guard": publish_guard.summary(),
@@ -5424,6 +5433,7 @@ def health():
         "yt_proxy": yt_proxy.summary(),
         "spend_guard": spend_guard.compact(),
         "growth_v2": growth_v2.health(),
+        "content_team": content_team.health(),
     }
 
 

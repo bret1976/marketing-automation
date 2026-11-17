@@ -1210,12 +1210,21 @@ document.addEventListener("DOMContentLoaded", () => {
     const navAutomation = document.getElementById("nav-automation");
     const navRepurposer = document.getElementById("nav-repurposer");
     const navGrowth = document.getElementById("nav-growth");
+    const navContentTeam = document.getElementById("nav-content-team");
     
     const pipelineView = document.getElementById("pipeline-view");
     const campaignsView = document.getElementById("campaigns-view");
     const automationView = document.getElementById("automation-view");
     const repurposerView = document.getElementById("repurposer-view");
     const growthView = document.getElementById("growth-view");
+    const contentTeamView = document.getElementById("content-team-view");
+
+    function setMainNav(activeId) {
+        ["nav-pipeline", "nav-campaigns", "nav-automation", "nav-repurposer", "nav-growth", "nav-content-team"].forEach(id => {
+            const el = document.getElementById(id);
+            if (el) el.classList.toggle("active", id === activeId);
+        });
+    }
 
     navPipeline.addEventListener("click", () => {
         navPipeline.classList.add("active");
@@ -1223,6 +1232,7 @@ document.addEventListener("DOMContentLoaded", () => {
         navAutomation.classList.remove("active");
         if (navRepurposer) navRepurposer.classList.remove("active");
         if (navGrowth) navGrowth.classList.remove("active");
+        if (navContentTeam) navContentTeam.classList.remove("active");
         pipelineView.scrollIntoView({ behavior: "smooth", block: "start" });
     });
 
@@ -1232,6 +1242,7 @@ document.addEventListener("DOMContentLoaded", () => {
         navAutomation.classList.remove("active");
         if (navRepurposer) navRepurposer.classList.remove("active");
         if (navGrowth) navGrowth.classList.remove("active");
+        if (navContentTeam) navContentTeam.classList.remove("active");
         campaignsView.scrollIntoView({ behavior: "smooth", block: "start" });
         loadCampaigns(); // Fetch campaigns JSON if not loaded
     });
@@ -1242,6 +1253,7 @@ document.addEventListener("DOMContentLoaded", () => {
         navCampaigns.classList.remove("active");
         if (navRepurposer) navRepurposer.classList.remove("active");
         if (navGrowth) navGrowth.classList.remove("active");
+        if (navContentTeam) navContentTeam.classList.remove("active");
         automationView.scrollIntoView({ behavior: "smooth", block: "start" });
         fetchSettings(); // Refresh diagnostics and input states
     });
@@ -1253,6 +1265,7 @@ document.addEventListener("DOMContentLoaded", () => {
             navCampaigns.classList.remove("active");
             navAutomation.classList.remove("active");
             if (navGrowth) navGrowth.classList.remove("active");
+            if (navContentTeam) navContentTeam.classList.remove("active");
             repurposerView.scrollIntoView({ behavior: "smooth", block: "start" });
         });
     }
@@ -1264,10 +1277,20 @@ document.addEventListener("DOMContentLoaded", () => {
             navCampaigns.classList.remove("active");
             navAutomation.classList.remove("active");
             if (navRepurposer) navRepurposer.classList.remove("active");
+            if (navContentTeam) navContentTeam.classList.remove("active");
             growthView.scrollIntoView({ behavior: "smooth", block: "start" });
             fetchGrowthOS();
         });
     }
+
+    if (navContentTeam && contentTeamView) {
+        navContentTeam.addEventListener("click", () => {
+            setMainNav("nav-content-team");
+            contentTeamView.scrollIntoView({ behavior: "smooth", block: "start" });
+            if (window.loadContentTeam) window.loadContentTeam();
+        });
+    }
+
 
     /* ==========================================================================
        VIRAL CAMPAIGNS HUB
@@ -3881,3 +3904,192 @@ document.addEventListener("DOMContentLoaded", () => {
     setInterval(fetchAnalyticsSummary, 30000);
     setInterval(fetchEngagementQueue, 30000);
 });
+
+    /* ==========================================================================
+       CONTENT TEAM — draft-only roles. Approve never publishes.
+       ========================================================================== */
+    (function initContentTeam() {
+        const tabs = document.querySelectorAll("#ct-tabs .ct-tab-btn");
+        tabs.forEach(tab => {
+            tab.addEventListener("click", () => {
+                tabs.forEach(t => t.classList.remove("active"));
+                document.querySelectorAll("#content-team-view .ct-tab-content").forEach(c => c.classList.remove("active"));
+                tab.classList.add("active");
+                const target = document.getElementById(tab.dataset.cttab);
+                if (target) target.classList.add("active");
+            });
+        });
+
+        const reportBox = (role) => document.getElementById(`ct-report-${role}`);
+
+        function llmBadge(report) {
+            const status = (report && report.llm_status) || "n/a";
+            return `<span class="ct-llm">${status}</span>`;
+        }
+
+        function renderItems(el, html) {
+            if (!el) return;
+            el.innerHTML = html || `<div class="growth-empty">No report yet.</div>`;
+        }
+
+        function itemHtml(title, body, report) {
+            const text = (body || "").replace(/</g, "&lt;");
+            return `<div class="growth-list-item"><strong>${title || "Draft"} ${llmBadge(report)}</strong><p style="white-space:pre-wrap">${text || "—"}</p></div>`;
+        }
+
+        function renderReport(role, report) {
+            const el = reportBox(role);
+            if (!report || !Object.keys(report).length) {
+                renderItems(el, "");
+                return;
+            }
+            renderItems(el, itemHtml(report.title, report.body, report));
+        }
+
+        function renderDrafts(drafts) {
+            const el = document.getElementById("ct-draft-list");
+            if (!drafts || !drafts.length) {
+                renderItems(el, "");
+                return;
+            }
+            el.innerHTML = drafts.map(d => `
+                <div class="growth-list-item" data-draft="${d.id}">
+                    <strong>${d.role} · ${d.title || "Untitled"} <span class="ct-llm">${d.llm_status || ""} ${d.status}</span></strong>
+                    <p style="white-space:pre-wrap">${(d.body || "").replace(/</g, "&lt;")}</p>
+                    <div class="growth-actions" style="margin-top:0.5rem">
+                        <button class="secondary-btn ct-review" data-id="${d.id}" data-status="APPROVED" type="button">Approve (does not publish)</button>
+                        <button class="secondary-btn ct-review" data-id="${d.id}" data-status="REJECTED" type="button">Reject</button>
+                    </div>
+                </div>
+            `).join("");
+            el.querySelectorAll(".ct-review").forEach(btn => {
+                btn.addEventListener("click", async () => {
+                    const res = await fetch(`/api/content-team/drafts/${btn.dataset.id}/review`, {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ status: btn.dataset.status })
+                    });
+                    const data = await res.json();
+                    if (!res.ok) {
+                        alert(data.detail || "Review failed");
+                        return;
+                    }
+                    loadContentTeam();
+                });
+            });
+        }
+
+        function renderIdeas(items) {
+            const el = document.getElementById("ct-idea-list");
+            if (!items || !items.length) {
+                renderItems(el, "");
+                return;
+            }
+            el.innerHTML = items.map(it => `<div class="growth-list-item"><strong>${(it.title || "Idea").replace(/</g, "&lt;")}</strong><p>${(it.text || "").replace(/</g, "&lt;")}</p><span>${it.source || ""} · ${it.created_at || ""}</span></div>`).join("");
+        }
+
+        let voicesCache = {};
+        function renderVoices(voices) {
+            voicesCache = voices || {};
+            const select = document.getElementById("ct-voice-role");
+            if (!select) return;
+            const current = select.value;
+            select.innerHTML = Object.keys(voicesCache).map(role => `<option value="${role}">${voicesCache[role].label || role}</option>`).join("");
+            if (current && voicesCache[current]) select.value = current;
+            fillVoiceForm(select.value);
+        }
+
+        function fillVoiceForm(role) {
+            const doc = voicesCache[role] || {};
+            document.getElementById("ct-voice-text").value = doc.voice || "";
+            document.getElementById("ct-voice-dos").value = doc.dos || "";
+            document.getElementById("ct-voice-donts").value = doc.donts || "";
+        }
+
+        async function loadContentTeam() {
+            const [health, reports, drafts, ideas, voices] = await Promise.all([
+                fetch("/api/content-team/health").then(r => r.json()).catch(() => ({})),
+                fetch("/api/content-team/reports").then(r => r.json()).catch(() => ({ reports: {} })),
+                fetch("/api/content-team/drafts").then(r => r.json()).catch(() => ({ items: [] })),
+                fetch("/api/content-team/ideas").then(r => r.json()).catch(() => ({ items: [] })),
+                fetch("/api/content-team/voices").then(r => r.json()).catch(() => ({ voices: {} })),
+            ]);
+            const store = (health.store || {});
+            document.getElementById("ct-stat-drafts").textContent = store.drafts_awaiting ?? (drafts.items || []).filter(d => d.status === "AWAITING_REVIEW").length;
+            document.getElementById("ct-stat-ideas").textContent = store.ideas ?? (ideas.items || []).length;
+            const ingest = store.ingest || {};
+            const ingestTotal = Object.values(ingest).reduce((a, b) => a + (Number(b) || 0), 0);
+            document.getElementById("ct-stat-ingest").textContent = ingestTotal;
+            const llm = (health.llm || {}).configured || "—";
+            document.getElementById("ct-stat-llm").textContent = llm;
+            const allReports = reports.reports || {};
+            ["researcher","competitors","bookmarks","qt_scout","sparring","writer","visuals","factcheck","analytics","chief","repurposer","reply_scout","sponsors","collabs"].forEach(role => {
+                renderReport(role, allReports[role]);
+            });
+            renderDrafts(drafts.items || []);
+            renderIdeas(ideas.items || []);
+            renderVoices(voices.voices || {});
+        }
+        window.loadContentTeam = loadContentTeam;
+
+        document.getElementById("ct-refresh-btn")?.addEventListener("click", loadContentTeam);
+        document.getElementById("ct-run-morning-btn")?.addEventListener("click", async () => {
+            await fetch("/api/content-team/run-morning", { method: "POST" });
+            loadContentTeam();
+        });
+        document.getElementById("ct-run-evening-btn")?.addEventListener("click", async () => {
+            await fetch("/api/content-team/run-evening", { method: "POST" });
+            loadContentTeam();
+        });
+        document.querySelectorAll(".ct-run").forEach(btn => {
+            btn.addEventListener("click", async () => {
+                const role = btn.dataset.role;
+                const body = {};
+                if (role === "sparring") body.idea = document.getElementById("ct-sparring-input").value;
+                if (role === "writer") body.brief = document.getElementById("ct-writer-input").value;
+                if (role === "visuals") body.subject = document.getElementById("ct-visuals-input").value;
+                if (role === "factcheck") body.text = document.getElementById("ct-factcheck-input").value;
+                if (role === "repurposer") body.text = document.getElementById("ct-repurposer-input").value;
+                if (role === "sponsors" || role === "collabs") body.urls = [];
+                const res = await fetch(`/api/content-team/run/${role}`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(body)
+                });
+                const data = await res.json();
+                if (!res.ok) {
+                    alert(data.detail || "Run failed");
+                    return;
+                }
+                loadContentTeam();
+            });
+        });
+        document.getElementById("ct-idea-btn")?.addEventListener("click", async () => {
+            const input = document.getElementById("ct-idea-input");
+            const text = (input.value || "").trim();
+            if (!text) return;
+            const res = await fetch("/api/content-team/ideas", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ text, source: "dashboard" })
+            });
+            if (res.ok) {
+                input.value = "";
+                loadContentTeam();
+            }
+        });
+        document.getElementById("ct-voice-role")?.addEventListener("change", ev => fillVoiceForm(ev.target.value));
+        document.getElementById("ct-voice-save")?.addEventListener("click", async () => {
+            const role = document.getElementById("ct-voice-role").value;
+            await fetch(`/api/content-team/voices/${role}`, {
+                method: "PUT",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    voice: document.getElementById("ct-voice-text").value,
+                    dos: document.getElementById("ct-voice-dos").value,
+                    donts: document.getElementById("ct-voice-donts").value
+                })
+            });
+            loadContentTeam();
+        });
+    })();

@@ -102,19 +102,34 @@ def test_trend_scanner_uses_open_source_without_gemini(monkeypatch):
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     result = _run(monkeypatch)
     monkeypatch.setattr(ov, "find_viral", lambda: result)
+    import last30days_scan
+    monkeypatch.setattr(last30days_scan, "scan", lambda **k: {"items": [], "top": [], "sources": {}, "errors": [], "window_hours": 24})
     orchestrator.run_live_trend_scanner("job-open", {"brand_name": "6Frame Studio"})
     st = orchestrator.get_job_status("job-open")
     assert st["status"] == "SUCCESS", st
-    assert st["result"]["source"] == "open"
-    assert [t["url"] for t in st["result"]["trends"]][:1] == ["https://www.youtube.com/watch?v=fast"]
+    assert st["result"]["engine"] == "last30days" and st["result"]["gemini_calls"] == 0
+    assert "https://www.youtube.com/watch?v=fast" in [t["url"] for t in st["result"]["trends"]]
 
 
-def test_trend_scanner_default_path_unchanged(monkeypatch):
+def test_trend_scanner_default_uses_last30days_without_gemini(monkeypatch):
+    import last30days_scan
     import orchestrator
     monkeypatch.delenv("VIRAL_SOURCE", raising=False)
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
-    called = []
-    monkeypatch.setattr(ov, "find_viral", lambda: called.append(1))
-    orchestrator.run_live_trend_scanner("job-default", {})
+    found = {
+        "engine": "last30days", "window_hours": 24, "sources": {"hackernews": "ok"}, "errors": [],
+        "items": [{
+            "title": "TEST last 24h item", "url": "https://news.ycombinator.com/item?id=1",
+            "platform": "hackernews", "author": "pg", "published_at": "2026-11-17T10:00:00Z",
+            "age_hours": 2.0, "score": 400, "comments": 80, "pace": 200, "why": "400 points in 2 hours",
+        }],
+    }
+    monkeypatch.setattr(last30days_scan, "scan", lambda **k: found)
+    gemini_called = []
+    monkeypatch.setattr("orchestrator.genai", type("G", (), {"Client": lambda *a, **k: gemini_called.append(1)}) , raising=False)
+    orchestrator.run_live_trend_scanner("job-default", {"brand_name": "6Frame Studio"})
     st = orchestrator.get_job_status("job-default")
-    assert st["status"] == "FAILED" and "Gemini" in st["message"] and not called
+    assert st["status"] == "SUCCESS", st
+    assert st["result"]["source"] == "last30days" and st["result"]["gemini_calls"] == 0
+    assert st["result"]["trends"][0]["url"] == "https://news.ycombinator.com/item?id=1"
+    assert not gemini_called

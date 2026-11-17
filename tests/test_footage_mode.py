@@ -817,8 +817,10 @@ _MOOD = ("Relatively long-lasting emotional state",
 
 
 def test_footage_viral_scan_is_limited_to_the_ai_filmmaking_genre(monkeypatch):
+    import last30days_scan
     import open_viral
     seen = {}
+    monkeypatch.setattr(last30days_scan, "scan", lambda **k: {"items": [], "top": [], "sources": {}, "errors": [], "window_hours": 24})
     monkeypatch.setattr(open_viral, "find_viral", lambda **k: seen.update(k) or {"top": []})
     monkeypatch.delenv("FOOTAGE_VIRAL_QUERIES", raising=False)
     fm.todays_viral()

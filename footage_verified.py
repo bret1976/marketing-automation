@@ -37,7 +37,7 @@ import footage_tts
 
 logger = logging.getLogger("footage_verified")
 MARKER = "FOOTAGE_VERIFIED"
-VERSION = "2026-11-17.1"
+VERSION = "2026-11-17.2"
 
 SUBJECT_MIN_CONF = float(os.environ.get("FOOTAGE_SUBJECT_MIN_CONF", "0.75"))
 SUBJECT_MIN_SIM = float(os.environ.get("FOOTAGE_SUBJECT_MIN_SIM", "0.55"))
@@ -66,6 +66,74 @@ class _EchoLog(list):
 
 # --------------------------------------------------------------------------- A. trend -> verified subject
 
+# Bret 2026-11-17: no religious subjects for the brand (sites, deities, scriptures, religious figures,
+# holidays/rituals of living religions). Checked on the Wikipedia page's categories + description (not the
+# trend title's words) and again by the verify model. Archaeology of dead religions (Parthenon, pyramids,
+# Stonehenge) and secular history (Holy Roman Empire) are not blocked.
+RELIGIOUS_CAT = re.compile(
+    r"\b(hindu|buddhist|jain|sikh|shinto|taoist|islamic|christian|catholic|orthodox|jewish|bah[aá]'?[ií])\s+"
+    r"(gods?|goddess(es)?|deit(y|ies)|temples?|shrines?|holy (places|sites|cities)|pilgrimage\w*|festivals?|holidays?|"
+    r"rituals?|scriptures?|texts|saints?|prophets?|clergy|religious leaders?|monaster(y|ies)|mosques?|churches)\b"
+    r"|(?<!former )\b(mosques|churches|cathedrals|synagogues|gurdwaras|basilicas)\b"
+    r"|\b(deities|gods|goddesses) of\b|\bforms of (vishnu|shiva|krishna|devi|buddha)\b|\bavatars of\b"
+    r"|\b(hajj|umrah|religious (texts|scriptures|festivals|holidays|leaders|pilgrimages?)|sacred texts|"
+    r"holy (places|sites|cities)|pilgrimage sites|places of worship|religious buildings and structures in (mecca|medina|jerusalem|varanasi|puri)|"
+    r"popes|prophets of islam|bible|quran|qur'an|torah|vedas|islamic architecture)\b", re.I)
+RELIGIOUS_DESC = re.compile(
+    r"\b(deity|god|goddess|avatar|prophet|apostle|saint|pope|imam|guru|bishop|archbishop|scripture|holy book|sacred text|"
+    r"religious (text|festival|holiday|ritual|figure|leader|site|building)|place of worship|pilgrimage|mosque|church|"
+    r"cathedral|basilica|synagogue|gurdwara|masjid|islam\w*|hindu\w*|christian\w*|buddhis\w*|sikh\w*|jewish holiday|"
+    r"(hindu|buddhist|jain|sikh) temple)\b", re.I)
+
+
+def _wiki_categories(title: str, get=fm._get) -> List[str]:
+    """Visible Wikipedia categories of a page ([] on any error)."""
+    try:
+        data = get(fm.WIKI_API, {"action": "query", "prop": "categories", "clshow": "!hidden", "cllimit": "max",
+                                 "redirects": 1, "titles": title, "format": "json"}).json()
+        page = next(iter(((data.get("query") or {}).get("pages") or {}).values()), {})
+        return [str(c.get("title") or "").split(":", 1)[-1] for c in page.get("categories") or []]
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def religious_subject(subj: dict, categories: Optional[List[str]] = None) -> Optional[str]:
+    """Return the evidence string if the Wikipedia subject is religious (category/description check), else None."""
+    desc = subj.get("description") or ""
+    m = RELIGIOUS_DESC.search(desc)
+    if m:
+        return f"description '{desc[:80]}'"
+    for c in categories or []:
+        if RELIGIOUS_CAT.search(c):
+            return f"category '{c[:80]}'"
+    return None
+
+
+# trend-title pre-filter: name the real reason (the old single label said "live/sport/game/politics" for everything)
+_SKIP_REASONS = [
+    ("sport/wrestling", r"\bwwe\b|\baew\b|wrestl\w*|\bnba\b|\bnfl\b|\bufc\b"),
+    ("livestream", r"\blive\b|\U0001F534|#?shortslive|\bstream(ing)?\b"),
+    ("video game", r"\bgam(e|ing|er)\b|\bgta\b|roblox|minecraft|fortnite|free ?fire|pubg|\bbgmi\b"),
+    ("music/dance", r"\bmashup\b|\bmusic\b|\bsong\b|\blyrics?\b|\bdance\b"),
+    ("tutorial/how-to", r"\btutorial\b|\brecipe\b"),
+    ("reaction/prank/vlog", r"\breaction\b|\bprank\b|\bunboxing\b|\basmr\b|\bvlog\b|\bpodcast\b"),
+    ("review/trailer", r"\bmovie review\b|\btrailer\b"),
+    ("series episode", r"\bepisode\b|\bep \d+|\bs\d+e\d+\b"),
+]
+_SKIP_REASONS = [(lab, re.compile(rx, re.I)) for lab, rx in _SKIP_REASONS]
+
+
+def trend_skip_reason(title: str) -> Optional[str]:
+    """Why a trend title is skipped before resolving, e.g. "tutorial/how-to: 'tutorial'"; None = resolve it.
+    "film"/"movie" alone are NOT a skip in v2: AI short films OF real subjects are the niche, and the resolver
+    rejects invented stories ("She Asked How Much Dinner Cost | AI Short Film" -> not real-world)."""
+    for lab, rx in _SKIP_REASONS:
+        m = rx.search(title or "")
+        if m:
+            return f"{lab}: '{m.group(0)}'"
+    return None
+
+
 RESOLVE_PROMPT = """A video is trending in the last 24 hours.
 Title: "{title}"
 {extra}
@@ -84,10 +152,16 @@ Return JSON: {{"real_world": true|false, "subject": "<the subject in plain words
 
 VERIFY_PROMPT = """Trending video title: "{title}"
 Candidate Wikipedia article: "{page}" ({desc})
+Article categories: {cats}
 Article opening: {lead}
 
-Is the trending video about the subject of THIS article (same real-world thing, not just a shared word)?
-Return JSON: {{"same_subject": true|false, "confidence": <0.0-1.0>, "why": "<one short sentence>"}}"""
+1. Is the trending video about the subject of THIS article (same real-world thing, not just a shared word)?
+2. Is the subject RELIGIOUS? Religious = a religious site or place of worship (e.g. the Kaaba, a mosque, church,
+   Hindu temple), a deity or god (e.g. Jagannath), a scripture, a religious figure (prophet, saint, pope, guru),
+   or a religious holiday, festival, pilgrimage or ritual of a living religion. NOT religious: secular history,
+   empires and states, archaeology of ancient civilizations (Parthenon, pyramids, Stonehenge), science, nature.
+Return JSON: {{"same_subject": true|false, "confidence": <0.0-1.0>, "religious": true|false,
+"why": "<one short sentence>"}}"""
 
 
 def resolve_trend(item: dict, get=fm._get, log: Optional[List[str]] = None) -> Optional[dict]:
@@ -119,8 +193,17 @@ def resolve_trend(item: dict, get=fm._get, log: Optional[List[str]] = None) -> O
     if not ok:
         log.append(f"subject skip ({why})")
         return None
+    cats = _wiki_categories(subj["title"], get)
+    rel = religious_subject(subj, cats)
+    if rel:
+        log.append(f"subject skip (religious: {rel}): {title[:60]} -> {subj['title']}"[:260])
+        return None
     ver = cf_ai.chat_json(VERIFY_PROMPT.format(title=title[:200], page=subj["title"], desc=subj.get("description") or "",
+                                               cats="; ".join(cats[:25]) or "(none)",
                                                lead=(subj.get("lead") or "")[:700]), max_tokens=1200)
+    if isinstance(ver, dict) and ver.get("religious"):
+        log.append(f"subject skip (religious: verify model: {str(ver.get('why'))[:90]}): {title[:60]} -> {subj['title']}"[:260])
+        return None
     vconf = float((ver or {}).get("confidence") or 0)
     try:
         e = cf_ai.embed([f"{ans.get('subject')}: {title}", f"{subj['title']}. {subj.get('description')}. {(subj.get('lead') or '')[:400]}"])
@@ -543,8 +626,9 @@ def produce(out_dir: str, viral: Optional[dict] = None, avoid_keys: Optional[set
             if pool_mode == "genre" and not open_viral.NICHE_RE.search(title):
                 log.append(f"trend skip (off-genre, not AI filmmaking): {title[:70]}")
                 continue
-            if fm.SKIP_VIRAL.search(title):
-                log.append(f"trend skip (live/sport/game/politics): {title[:70]}")
+            why = trend_skip_reason(title)
+            if why:
+                log.append(f"trend skip ({why}): {title[:70]}")
                 continue
             resolved += 1
             subj = resolve_trend(it, log=log)

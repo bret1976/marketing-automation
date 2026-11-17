@@ -131,3 +131,9 @@ or `settings.autopilot_format="stitched"`).
 - Platforms: `GROWTH_PLATFORMS=instagram,tiktok,linkedin,twitter` pins the publish list (no YouTube). Without it,
   every connected PostProxy channel is added automatically.
 - `/health` -> `growth_v2` shows `autopilot_format`, `shorts_cost_cap_usd` and `platforms`.
+
+## Content Team (content-team-v1, draft-only)
+
+A Content Team tab in the existing cockpit. Eleven narrow roles plus a draft-only Repurposer, Reply Scout, Sponsor Hunter, and Collab Finder. Every output is queued for review. Approving a draft does **not** publish or send a reply. The pack never calls the X API; Grok Bot routines ingest X posts and can fetch reports. Schedules: 7 AM and 7 PM America/Los_Angeles.
+
+See `docs/CONTENT_TEAM.md` for the ingest payload, report URLs, and `CONTENT_TEAM_TOKEN` auth.

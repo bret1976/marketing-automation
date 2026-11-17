@@ -563,7 +563,7 @@ body {
     padding-bottom: 0.5rem;
 }
 
-.tab-btn {
+.tab-btn, .ct-tab-btn {
     background: none;
     border: none;
     color: var(--text-secondary);
@@ -576,15 +576,15 @@ body {
     position: relative;
 }
 
-.tab-btn:hover {
+.tab-btn:hover, .ct-tab-btn:hover {
     color: var(--text-primary);
 }
 
-.tab-btn.active {
+.tab-btn.active, .ct-tab-btn.active {
     color: var(--primary-color);
 }
 
-.tab-btn.active::after {
+.tab-btn.active::after, .ct-tab-btn.active::after {
     content: '';
     position: absolute;
     bottom: -0.6rem;
@@ -595,12 +595,12 @@ body {
     border-radius: 1.5px;
 }
 
-.tab-content {
+.tab-content, .ct-tab-content {
     display: none;
     flex: 1;
 }
 
-.tab-content.active {
+.tab-content.active, .ct-tab-content.active {
     display: flex;
     flex-direction: column;
 }
@@ -1768,3 +1768,54 @@ body {
 .switch-toggle input:checked + .slider-toggle:before {
     transform: translateX(20px);
 }
+
+/* Content Team — reuses growth-panel, tabs, and glass-card tokens */
+.ct-sub {
+    color: var(--text-secondary);
+    font-size: 0.8rem;
+    line-height: 1.45;
+    margin: 0.35rem 0 0;
+    max-width: 46rem;
+}
+#ct-tabs {
+    flex-wrap: wrap;
+    margin: 1rem 0 1.25rem;
+}
+.ct-one-col {
+    grid-template-columns: 1fr auto;
+    margin-bottom: 0.85rem;
+}
+.ct-label {
+    display: block;
+    color: var(--text-secondary);
+    font-size: 0.72rem;
+    margin: 0.6rem 0 0.25rem;
+}
+#ct-voice-text,
+#ct-voice-dos,
+#ct-voice-donts,
+#ct-factcheck-input,
+#ct-repurposer-input {
+    width: 100%;
+    background: rgba(0,0,0,0.4);
+    border: 1px solid var(--border-color);
+    color: var(--text-primary);
+    border-radius: 6px;
+    padding: 0.5rem;
+    font-size: 0.8rem;
+    font-family: Inter, sans-serif;
+    resize: vertical;
+}
+.ct-llm {
+    display: inline-block;
+    margin-left: 0.35rem;
+    color: var(--accent-color);
+    font-size: 0.68rem;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+}
+
+#ct-tabs { display: flex; gap: 0.25rem; }
+.ct-tab-btn { }
+#content-team-view .ct-tab-btn { }

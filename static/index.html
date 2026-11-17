@@ -9,7 +9,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;600;800&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/static/index.css?v=2.2">
+    <link rel="stylesheet" href="/static/index.css?v=2.4">
 </head>
 <body>
     <div class="glow-bg"></div>
@@ -32,6 +32,7 @@
             <button id="nav-automation" class="nav-link">Autopilot & Cockpit</button>
             <button id="nav-campaigns" class="nav-link active">Viral Trends & Recreation</button>
             <button id="nav-growth" class="nav-link">Growth OS</button>
+            <button id="nav-content-team" class="nav-link">Content Team</button>
             <button id="nav-repurposer" class="nav-link">Repurposer Workshop</button>
             <button id="nav-pipeline" class="nav-link">Upload & Analyze Video</button>
         </div>
@@ -1400,6 +1401,178 @@
                 </section>
             </div>
         </div>
+
+        <!-- Content Team (draft-only; never publishes or replies) -->
+        <div id="content-team-view" class="view-content" style="width:100%;">
+            <div class="growth-toolbar glass-card">
+                <div>
+                    <div class="growth-kicker">Draft only · nothing posts</div>
+                    <h2>Content Team</h2>
+                    <p class="ct-sub">Eleven narrow roles plus hunt tools. Every output lands in the review queue. X posts are ingested by a Grok routine — this app never calls the X API.</p>
+                </div>
+                <div class="growth-actions">
+                    <button id="ct-refresh-btn" class="secondary-btn" type="button">Refresh</button>
+                    <button id="ct-run-morning-btn" class="primary-btn" type="button">Run 7 AM jobs</button>
+                    <button id="ct-run-evening-btn" class="secondary-btn" type="button">Run 7 PM jobs</button>
+                </div>
+            </div>
+            <div class="growth-metrics" id="ct-metrics">
+                <div class="growth-stat"><span>Awaiting review</span><strong id="ct-stat-drafts">0</strong></div>
+                <div class="growth-stat"><span>Ideas logged</span><strong id="ct-stat-ideas">0</strong></div>
+                <div class="growth-stat"><span>Ingested posts</span><strong id="ct-stat-ingest">0</strong></div>
+                <div class="growth-stat"><span>LLM</span><strong id="ct-stat-llm">—</strong></div>
+            </div>
+            <div class="tabs-container" id="ct-tabs">
+                <button class="ct-tab-btn active" data-cttab="ct-queue">Draft Queue</button>
+                <button class="ct-tab-btn" data-cttab="ct-research">Research</button>
+                <button class="ct-tab-btn" data-cttab="ct-create">Create</button>
+                <button class="ct-tab-btn" data-cttab="ct-analytics">Analytics</button>
+                <button class="ct-tab-btn" data-cttab="ct-ideas">Ideas</button>
+                <button class="ct-tab-btn" data-cttab="ct-chief">Chief of Staff</button>
+                <button class="ct-tab-btn" data-cttab="ct-hunt">Hunt</button>
+                <button class="ct-tab-btn" data-cttab="ct-voices">Voices</button>
+            </div>
+
+            <div class="ct-tab-content active" id="ct-queue">
+                <section class="growth-panel growth-panel-wide">
+                    <div class="growth-panel-header"><h3>Review queue</h3><span>Approve never publishes</span></div>
+                    <div id="ct-draft-list" class="growth-list"></div>
+                </section>
+            </div>
+
+            <div class="ct-tab-content" id="ct-research">
+                <div class="growth-grid">
+                    <section class="growth-panel">
+                        <div class="growth-panel-header"><h3>X Researcher</h3><span>30 morning ideas</span></div>
+                        <button class="secondary-btn ct-run" data-role="researcher" type="button">Generate ideas</button>
+                        <div id="ct-report-researcher" class="growth-list"></div>
+                    </section>
+                    <section class="growth-panel">
+                        <div class="growth-panel-header"><h3>Competitor Watch</h3><span>Daily digest</span></div>
+                        <button class="secondary-btn ct-run" data-role="competitors" type="button">Generate digest</button>
+                        <div id="ct-report-competitors" class="growth-list"></div>
+                    </section>
+                    <section class="growth-panel">
+                        <div class="growth-panel-header"><h3>Bookmarks Brain</h3><span>7 PM summary</span></div>
+                        <button class="secondary-btn ct-run" data-role="bookmarks" type="button">Generate summary</button>
+                        <div id="ct-report-bookmarks" class="growth-list"></div>
+                    </section>
+                    <section class="growth-panel growth-panel-wide">
+                        <div class="growth-panel-header"><h3>QT Scout</h3><span>3 drafted quote-tweets</span></div>
+                        <button class="secondary-btn ct-run" data-role="qt_scout" type="button">Draft 3 QTs</button>
+                        <div id="ct-report-qt_scout" class="growth-list"></div>
+                    </section>
+                </div>
+            </div>
+
+            <div class="ct-tab-content" id="ct-create">
+                <div class="growth-grid">
+                    <section class="growth-panel">
+                        <div class="growth-panel-header"><h3>Ideas Sparring</h3><span>Titles + packaging</span></div>
+                        <div class="growth-inline-form ct-one-col">
+                            <input id="ct-sparring-input" type="text" placeholder="Paste an idea">
+                            <button class="primary-btn ct-run" data-role="sparring" type="button">Spar</button>
+                        </div>
+                        <div id="ct-report-sparring" class="growth-list"></div>
+                    </section>
+                    <section class="growth-panel">
+                        <div class="growth-panel-header"><h3>X Writer</h3><span>Post + thread drafts</span></div>
+                        <div class="growth-inline-form ct-one-col">
+                            <input id="ct-writer-input" type="text" placeholder="Brief for the post">
+                            <button class="primary-btn ct-run" data-role="writer" type="button">Draft</button>
+                        </div>
+                        <div id="ct-report-writer" class="growth-list"></div>
+                    </section>
+                    <section class="growth-panel">
+                        <div class="growth-panel-header"><h3>Banner &amp; Visuals</h3><span>Image prompts only</span></div>
+                        <div class="growth-inline-form ct-one-col">
+                            <input id="ct-visuals-input" type="text" placeholder="Title or post">
+                            <button class="primary-btn ct-run" data-role="visuals" type="button">Write prompts</button>
+                        </div>
+                        <div id="ct-report-visuals" class="growth-list"></div>
+                    </section>
+                    <section class="growth-panel">
+                        <div class="growth-panel-header"><h3>Fact Checker</h3><span>Flags claims + sources</span></div>
+                        <div class="growth-inline-form ct-one-col">
+                            <textarea id="ct-factcheck-input" rows="3" placeholder="Paste a draft to check"></textarea>
+                            <button class="primary-btn ct-run" data-role="factcheck" type="button">Check</button>
+                        </div>
+                        <div id="ct-report-factcheck" class="growth-list"></div>
+                    </section>
+                    <section class="growth-panel growth-panel-wide">
+                        <div class="growth-panel-header"><h3>Repurposer</h3><span>X → LinkedIn + newsletter</span></div>
+                        <div class="growth-inline-form ct-one-col">
+                            <textarea id="ct-repurposer-input" rows="3" placeholder="Paste an X post"></textarea>
+                            <button class="primary-btn ct-run" data-role="repurposer" type="button">Repurpose</button>
+                        </div>
+                        <div id="ct-report-repurposer" class="growth-list"></div>
+                    </section>
+                </div>
+            </div>
+
+            <div class="ct-tab-content" id="ct-analytics">
+                <section class="growth-panel growth-panel-wide">
+                    <div class="growth-panel-header"><h3>Analytics Analyst</h3><span>Last 24h · PostProxy only</span></div>
+                    <button class="secondary-btn ct-run" data-role="analytics" type="button">Build morning report</button>
+                    <div id="ct-report-analytics" class="growth-list"></div>
+                </section>
+            </div>
+
+            <div class="ct-tab-content" id="ct-ideas">
+                <section class="growth-panel growth-panel-wide">
+                    <div class="growth-panel-header"><h3>Article Tracker</h3><span>Master idea list</span></div>
+                    <div class="growth-inline-form">
+                        <input id="ct-idea-input" type="text" placeholder="Log an idea">
+                        <button id="ct-idea-btn" class="primary-btn" type="button">Add idea</button>
+                    </div>
+                    <div id="ct-idea-list" class="growth-list"></div>
+                </section>
+            </div>
+
+            <div class="ct-tab-content" id="ct-chief">
+                <section class="growth-panel growth-panel-wide">
+                    <div class="growth-panel-header"><h3>Chief of Staff</h3><span>7 PM rollup</span></div>
+                    <button class="secondary-btn ct-run" data-role="chief" type="button">Write end-of-day summary</button>
+                    <div id="ct-report-chief" class="growth-list"></div>
+                </section>
+            </div>
+
+            <div class="ct-tab-content" id="ct-hunt">
+                <div class="growth-grid">
+                    <section class="growth-panel">
+                        <div class="growth-panel-header"><h3>Reply Scout</h3><span>Drafts only · never sends</span></div>
+                        <button class="secondary-btn ct-run" data-role="reply_scout" type="button">Draft replies</button>
+                        <div id="ct-report-reply_scout" class="growth-list"></div>
+                    </section>
+                    <section class="growth-panel">
+                        <div class="growth-panel-header"><h3>Sponsor Hunter</h3><span>Public web only</span></div>
+                        <button class="secondary-btn ct-run" data-role="sponsors" type="button">Research sponsors</button>
+                        <div id="ct-report-sponsors" class="growth-list"></div>
+                    </section>
+                    <section class="growth-panel">
+                        <div class="growth-panel-header"><h3>Collab Finder</h3><span>Public web only</span></div>
+                        <button class="secondary-btn ct-run" data-role="collabs" type="button">Research collabs</button>
+                        <div id="ct-report-collabs" class="growth-list"></div>
+                    </section>
+                </div>
+            </div>
+
+            <div class="ct-tab-content" id="ct-voices">
+                <section class="growth-panel growth-panel-wide">
+                    <div class="growth-panel-header"><h3>Voice and do's / don'ts</h3><span>One doc per role</span></div>
+                    <div class="growth-inline-form">
+                        <select id="ct-voice-role"></select>
+                        <button id="ct-voice-save" class="primary-btn" type="button">Save voice</button>
+                    </div>
+                    <label class="ct-label" for="ct-voice-text">Voice</label>
+                    <textarea id="ct-voice-text" rows="4"></textarea>
+                    <label class="ct-label" for="ct-voice-dos">Do</label>
+                    <textarea id="ct-voice-dos" rows="3"></textarea>
+                    <label class="ct-label" for="ct-voice-donts">Don't</label>
+                    <textarea id="ct-voice-donts" rows="3"></textarea>
+                </section>
+            </div>
+        </div>
     </main>
 
     <!-- SETTINGS MODAL -->
@@ -1785,6 +1958,6 @@
     <div id="toast" class="toast hidden">Post copied successfully!</div>
     
     <!-- Scripts -->
-    <script src="/static/index.js?v=2.2"></script>
+    <script src="/static/index.js?v=2.4"></script>
 </body>
 </html>

@@ -86,6 +86,22 @@ def paused() -> bool:
     return _truthy(os.environ.get("AUTOPILOT_PAUSE"))
 
 
+def approval_required(settings: Optional[dict] = None) -> bool:
+    """Autopilot must stage for review when the setting is missing or null.
+
+    An explicit False still allows immediate publish. Content Team never uses this path.
+    """
+    if not settings or "require_autopilot_approval" not in settings:
+        return True
+    val = settings.get("require_autopilot_approval")
+    if val is None:
+        return True
+    if isinstance(val, str):
+        return val.strip().lower() not in {"0", "false", "no", "off"}
+    return bool(val)
+
+
+
 def transform_fallback_enabled() -> bool:
     """Off by default (Bret, 2026-10-14): no downloaded third-party clip is ever published
     unless AUTOPILOT_TRANSFORM_FALLBACK=1 is set explicitly."""
@@ -1591,7 +1607,7 @@ async def run_autopilot(settings: dict, dry_run: bool = False) -> dict:
     posts = m.load_scheduled_posts()
     if info.get("format") == "stitched_short" and len(platforms) > 1:
         staggered = build_staggered_posts(post, info, platforms)
-        if settings.get("require_autopilot_approval", False):
+        if approval_required(settings):
             for p in staggered:
                 p["status"] = "AWAITING_APPROVAL"
             posts.extend(staggered)
@@ -1603,7 +1619,7 @@ async def run_autopilot(settings: dict, dry_run: bool = False) -> dict:
         posts.extend(staggered)
         m.save_scheduled_posts(posts)
         logger.info("%s stitched Short staggered: %s", MARKER, {p["platform"]: p["scheduled_time"] for p in staggered})
-    elif settings.get("require_autopilot_approval", False):
+    elif approval_required(settings):
         post["status"] = "AWAITING_APPROVAL"
         posts.append(post)
         m.save_scheduled_posts(posts)

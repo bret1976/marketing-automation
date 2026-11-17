@@ -16,6 +16,11 @@ REALM_PAGE = {"title": "Realm (database)", "description": "Embedded database", "
               "url": "https://en.wikipedia.org/wiki/Realm_(database)"}
 
 
+@pytest.fixture(autouse=True)
+def _no_wiki_categories(monkeypatch):
+    monkeypatch.setattr(fv, "_wiki_categories", lambda *a, **k: [])
+
+
 def test_realm_fantasy_short_is_rejected_when_resolver_says_fiction(monkeypatch):
     monkeypatch.setattr(cf_ai, "chat_json", lambda *a, **k: {"real_world": False, "subject": "", "wikipedia_title": "",
                                                              "confidence": 1.0, "why": "fantasy short film"})
@@ -96,3 +101,73 @@ def test_produce_raises_instead_of_wrong_video(monkeypatch, tmp_path):
     monkeypatch.setattr(fv, "resolve_trend", lambda it, log=None: None)
     with pytest.raises(RuntimeError, match="not rendering a wrong video"):
         fv.produce(str(tmp_path), viral={"top": [{"title": "Some AI Short Film", "views_per_hour": 10}]})
+
+
+# --- religious block (Bret 2026-11-17) + honest skip labels
+KAABA = {"title": "Kaaba", "description": "Building at the center of Masjid al-Haram", "lead": "The Kaaba is a stone building.",
+         "text": "", "commons_category": "", "url": ""}
+KAABA_CATS = ["Arabic architecture", "Buildings and structures in Mecca", "Hajj", "Islamic architecture", "Kaaba",
+              "Religious buildings and structures converted into mosques"]
+JAGANNATH = {"title": "Jagannath", "description": "Regional form of the Hindu deity Mahavishnu", "lead": "", "text": "",
+             "commons_category": "", "url": ""}
+JAGANNATH_CATS = ["Deities of Jagannath", "Forms of Krishna", "Forms of Vishnu", "Hindu gods", "Regional Hindu gods"]
+
+
+def test_religious_category_check_blocks_kaaba_and_jagannath():
+    assert fv.religious_subject(KAABA, KAABA_CATS)
+    assert fv.religious_subject(dict(KAABA, description="Cube building"), KAABA_CATS).startswith("category")
+    assert fv.religious_subject(JAGANNATH, JAGANNATH_CATS)
+    assert fv.religious_subject(dict(JAGANNATH, description="Regional form"), JAGANNATH_CATS).startswith("category")
+
+
+@pytest.mark.parametrize("subj,cats", [
+    ({"title": "Voyager 1", "description": "NASA space probe launched in 1977"}, ["NASA space probes", "Missions to Saturn"]),
+    ({"title": "Greenhouse", "description": "Building for growing plants"}, ["Agricultural buildings", "Greenhouses"]),
+    ({"title": "Titanic", "description": "British passenger liner that sank in 1912"}, ["Ships sunk by icebergs"]),
+    ({"title": "Holy Roman Empire", "description": "European political entity (800/962-1806)"},
+     ["Christendom", "Former Christian states", "History of Catholicism in Europe", "Western Christianity"]),
+    ({"title": "Christmas Island", "description": "External territory of Australia"}, ["Islands of Australia"]),
+    ({"title": "Great Pyramid of Giza", "description": "Largest pyramid in the Giza Necropolis, Egypt"},
+     ["Seven Wonders of the Ancient World"]),
+])
+def test_religious_check_leaves_secular_subjects(subj, cats):
+    assert fv.religious_subject(subj, cats) is None
+
+
+def test_resolve_rejects_kaaba_as_religious_before_verify(monkeypatch):
+    answers = iter([{"real_world": True, "subject": "Kaaba", "wikipedia_title": "Kaaba", "confidence": 1.0}])
+    monkeypatch.setattr(cf_ai, "chat_json", lambda *a, **k: next(answers))
+    monkeypatch.setattr(fv.fm, "_wiki_page", lambda *a, **k: dict(KAABA))
+    monkeypatch.setattr(fv.fm, "subject_ok", lambda s: (True, ""))
+    monkeypatch.setattr(fv, "_wiki_categories", lambda *a, **k: list(KAABA_CATS))
+    log = []
+    assert fv.resolve_trend({"title": "Snowfall at Holy Kaaba | Beautiful Islamic AI Video"}, log=log) is None
+    assert log[-1].startswith("subject skip (religious:")
+
+
+def test_resolve_rejects_when_verify_model_says_religious(monkeypatch):
+    page = {"title": "Some Shrine", "description": "Building", "lead": "", "text": "", "commons_category": "", "url": ""}
+    answers = iter([{"real_world": True, "subject": "x", "wikipedia_title": "Some Shrine", "confidence": 1.0},
+                    {"same_subject": True, "confidence": 1.0, "religious": True, "why": "a place of worship"}])
+    monkeypatch.setattr(cf_ai, "chat_json", lambda *a, **k: next(answers))
+    monkeypatch.setattr(cf_ai, "embed", lambda texts: [[1.0, 0.0], [1.0, 0.0]])
+    monkeypatch.setattr(fv.fm, "_wiki_page", lambda *a, **k: dict(page))
+    monkeypatch.setattr(fv.fm, "subject_ok", lambda s: (True, ""))
+    log = []
+    assert fv.resolve_trend({"title": "Some Shrine AI film"}, log=log) is None
+    assert "religious: verify model" in log[-1]
+
+
+@pytest.mark.parametrize("title,label", [
+    ("Kling 4.0 on Artlist Tutorial - Create Cinematic AI Videos with Audio", "tutorial/how-to"),
+    ("browns raiders NFL week 12", "sport/wrestling"),
+    ("LIVE now: AI art stream", "livestream"),
+    ("Minecraft but AI", "video game"),
+])
+def test_trend_skip_reason_names_the_real_reason(title, label):
+    assert fv.trend_skip_reason(title).startswith(label)
+
+
+def test_ai_short_films_are_not_prefiltered():
+    assert fv.trend_skip_reason("She Asked How Much Dinner Cost... | AI Short Film") is None
+    assert fv.trend_skip_reason("TITANIC | AI Short Film made with Veo 3") is None

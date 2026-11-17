@@ -1,9 +1,9 @@
 """Swappable LLM for Content Team.
 
-Default path is a free OpenAI-compatible endpoint (Groq, Cloudflare Workers AI,
-OpenRouter :free, or a local llama.cpp / Ollama server). Gemini is never
-auto-selected. Failures and missing keys return a structured error so the
-caller can write a labeled template fallback.
+Default path is Cloudflare Workers AI (free, 10k Neurons/day). Groq and
+OpenRouter :free are optional fallbacks only when their keys are set.
+Gemini and xAI are never auto-selected. 429 / quota errors, and a reached
+daily cap, fall back to the labeled placeholder and never to a paid route.
 
 CONTENT_TEAM_LLM=auto|openai|groq|cloudflare|openrouter|ollama|xai|gemini|stub|fallback
 """
@@ -20,10 +20,28 @@ from urllib.parse import urlparse
 
 logger = logging.getLogger("content_team.llm")
 
+
+class QuotaError(RuntimeError):
+    """Raised on 429 / payment / neuron quota errors, or when the daily cap is hit.
+
+    Callers must fall back to the placeholder and must not try a paid provider.
+    """
+
 STUB_MARKER = "CONTENT_TEAM_STUB"
-DEFAULT_DAILY_CAP = 80
+# 60 short-to-medium calls of the default Cloudflare model stay under the
+# Workers Free 10,000 Neurons/day hard stop, even at max_tokens=3072.
+DEFAULT_DAILY_CAP = 60
 # Auto never includes gemini (credits are paid/depleted) or xai (paid).
-AUTO_PROVIDERS = ("openai", "groq", "cloudflare", "openrouter")
+AUTO_PROVIDERS = ("cloudflare", "groq", "openrouter")
+# Neurons per 1M tokens for the default Cloudflare model.
+# Source: Workers AI pricing, 16 Nov 2026.
+CF_DEFAULT_MODEL = "@cf/zai-org/glm-4.7-flash"
+CF_NEURONS_PER_M_INPUT = 5500
+CF_NEURONS_PER_M_OUTPUT = 36400
+WORKERS_AI_FREE_NEURONS_PER_DAY = 10_000
+# Enough for a 30-idea researcher JSON blob; still safe at DEFAULT_DAILY_CAP.
+DEFAULT_MAX_TOKENS = 3072
+
 KNOWN_PROVIDERS = (
     "openai",
     "groq",
@@ -39,7 +57,7 @@ KNOWN_PROVIDERS = (
 
 DEFAULT_MODELS = {
     "groq": "openai/gpt-oss-20b",
-    "cloudflare": "@cf/meta/llama-3.2-3b-instruct",
+    "cloudflare": CF_DEFAULT_MODEL,
     "openrouter": "openrouter/free",
     "openai": "local",
     "ollama": "llama3.2",
@@ -79,12 +97,23 @@ def openrouter_key() -> str:
     return _env("OPENROUTER_API_KEY")
 
 
+def _account_from_base_url() -> str:
+    base = openai_base_url()
+    match = re.search(r"/accounts/([^/]+)/ai", base)
+    return match.group(1) if match else ""
+
+
 def cloudflare_account() -> str:
-    return _env("CLOUDFLARE_ACCOUNT_ID") or _env("CF_ACCOUNT_ID")
+    return _env("CLOUDFLARE_ACCOUNT_ID") or _env("CF_ACCOUNT_ID") or _account_from_base_url()
 
 
 def cloudflare_token() -> str:
-    return _env("CLOUDFLARE_API_TOKEN") or _env("CF_API_TOKEN") or _env("CLOUDFLARE_API_KEY")
+    return (
+        _env("CLOUDFLARE_API_TOKEN")
+        or _env("CF_API_TOKEN")
+        or _env("CLOUDFLARE_API_KEY")
+        or (openai_api_key() if cloudflare_account() or "cloudflare.com" in openai_base_url() else "")
+    )
 
 
 def openai_base_url() -> str:
@@ -118,7 +147,13 @@ def _provider_ready(name: str) -> bool:
     if name == "groq":
         return bool(groq_key() or (openai_api_key() and "groq.com" in openai_base_url()))
     if name == "cloudflare":
-        return bool(cloudflare_account() and cloudflare_token())
+        token = cloudflare_token()
+        if cloudflare_account() and token:
+            return True
+        # CONTENT_TEAM_LLM_BASE_URL + CONTENT_TEAM_LLM_API_KEY can fully override.
+        return bool(openai_base_url() and (token or openai_api_key()) and (
+            "cloudflare.com" in openai_base_url() or configured_provider() == "cloudflare"
+        ))
     if name == "openrouter":
         return bool(openrouter_key())
     if name == "ollama":
@@ -193,6 +228,11 @@ def complete_json(prompt: str, *, fallback: Any, system: str = "", role: str = "
                 raise ValueError(f"{provider} returned non-JSON")
             record_call(provider)
             return _result(True, provider, "real", data, None, raw)
+        except QuotaError as exc:
+            last_error = f"{provider}: {exc}"
+            logger.warning("content_team LLM %s quota/rate-limit: %s", provider, exc)
+            # Do not try another provider (including any paid route). Use the placeholder.
+            break
         except Exception as exc:  # noqa: BLE001 — caller needs a graceful fallback
             last_error = f"{provider}: {exc}"
             logger.warning("content_team LLM %s failed: %s", provider, exc)
@@ -274,7 +314,7 @@ def _assert_under_daily_cap() -> None:
     cap = daily_cap()
     used = int(current_usage().get("count") or 0)
     if used >= cap:
-        raise RuntimeError(f"daily LLM cap reached ({used}/{cap})")
+        raise QuotaError(f"daily LLM cap reached ({used}/{cap})")
 
 
 def _model_for(provider: str) -> str:
@@ -317,12 +357,16 @@ def _base_and_key(provider: str) -> tuple[str, str]:
         return base, key
     if provider == "cloudflare":
         account = cloudflare_account()
-        token = cloudflare_token()
-        if not account or not token:
+        token = cloudflare_token() or openai_api_key()
+        override = openai_base_url()
+        if override:
+            base = override
+        elif account:
+            base = f"https://api.cloudflare.com/client/v4/accounts/{account}/ai/v1"
+        else:
             raise RuntimeError("CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN are not set")
-        base = openai_base_url() if "cloudflare.com" in openai_base_url() else (
-            f"https://api.cloudflare.com/client/v4/accounts/{account}/ai/v1"
-        )
+        if not token:
+            raise RuntimeError("CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN are not set")
         return base, token
     if provider == "openrouter":
         key = openrouter_key() or openai_api_key()
@@ -347,6 +391,29 @@ def _base_and_key(provider: str) -> tuple[str, str]:
     raise RuntimeError(f"no OpenAI-compatible config for {provider}")
 
 
+def _is_quota_status(status: int, body: str) -> bool:
+    """True for rate-limit, credit, or Workers AI neuron-quota failures."""
+    if status in {402, 429}:
+        return True
+    lower = (body or "").lower()
+    needles = (
+        "quota",
+        "rate limit",
+        "rate_limit",
+        "too many requests",
+        "neuron",
+        "out of capacity",
+        "exceeded your",
+        "insufficient credits",
+        "credit",
+        "payment required",
+        "upgrade to workers paid",
+        "error 5035",
+        "3040",
+    )
+    return any(n in lower for n in needles)
+
+
 def _openai_complete(provider: str, prompt: str, system: str) -> str:
     import requests
 
@@ -367,6 +434,7 @@ def _openai_complete(provider: str, prompt: str, system: str) -> str:
         "model": model,
         "messages": messages,
         "temperature": 0.4,
+        "max_tokens": DEFAULT_MAX_TOKENS,
     }
     timeout = 90 if provider in {"openai", "ollama"} else 60
     url = _chat_url(base)
@@ -374,7 +442,10 @@ def _openai_complete(provider: str, prompt: str, system: str) -> str:
     logger.info("content_team LLM calling %s at %s model=%s", provider, host, model)
     res = requests.post(url, headers=headers, json=payload, timeout=timeout)
     if res.status_code >= 400:
-        raise RuntimeError(f"{provider} HTTP {res.status_code}: {res.text[:300]}")
+        snippet = res.text[:300]
+        if _is_quota_status(res.status_code, snippet):
+            raise QuotaError(f"{provider} HTTP {res.status_code}: {snippet}")
+        raise RuntimeError(f"{provider} HTTP {res.status_code}: {snippet}")
     data = res.json()
     # Cloudflare and OpenAI both use choices[0].message.content
     content = ((data.get("choices") or [{}])[0].get("message") or {}).get("content") or ""

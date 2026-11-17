@@ -80,14 +80,13 @@ Each report includes `llm_status`: `real` (live model or, for analytics, real st
 
 ## LLM provider (free, OpenAI-compatible)
 
-The Content Team does **not** auto-select Gemini. `CONTENT_TEAM_LLM=auto` tries, in order, any of these that are configured:
+The Content Team does **not** auto-select Gemini or xAI. `CONTENT_TEAM_LLM=auto` tries, in order, any of these that are configured:
 
-1. Generic OpenAI-compatible server if `CONTENT_TEAM_LLM_BASE_URL` is set (llama.cpp, Ollama, etc.)
-2. Groq (`GROQ_API_KEY`) — recommended primary. Free plan, no card. Default model `openai/gpt-oss-20b`. Sign up at https://console.groq.com and create an API key.
-3. Cloudflare Workers AI (`CLOUDFLARE_ACCOUNT_ID` + `CLOUDFLARE_API_TOKEN`) — recommended fallback. 10,000 Neurons/day on the Workers Free plan. Default model `@cf/meta/llama-3.2-3b-instruct`. Create a token with Workers AI permission in the existing Cloudflare account.
-4. OpenRouter (`OPENROUTER_API_KEY`) — optional extra fallback, default model `openrouter/free` so it never falls through to a paid model. Free accounts are capped at 50 requests/day unless you buy credits (don't). Sign up at https://openrouter.ai.
+1. Cloudflare Workers AI (`CLOUDFLARE_ACCOUNT_ID` + `CLOUDFLARE_API_TOKEN`) — **primary**. 10,000 Neurons/day on the Workers Free plan, which hard-stops instead of billing. Default model `@cf/zai-org/glm-4.7-flash`. Create a token with the Workers AI template (Workers AI: Read and Workers AI: Edit). `CONTENT_TEAM_LLM_BASE_URL`, `CONTENT_TEAM_LLM_MODEL`, and `CONTENT_TEAM_LLM_API_KEY` can override the endpoint, model, and token.
+2. Groq (`GROQ_API_KEY`) — optional fallback only, if a key is set. Default model `openai/gpt-oss-20b`.
+3. OpenRouter (`OPENROUTER_API_KEY`) — optional extra fallback only, default model `openrouter/free` so it never falls through to a paid model. Free accounts are capped at 50 requests/day unless you buy credits (don't).
 
-Override the order with `CONTENT_TEAM_LLM_PROVIDERS=groq,cloudflare,openrouter`. Point at any server with:
+Override the order with `CONTENT_TEAM_LLM_PROVIDERS=cloudflare,groq,openrouter`. Point at a local server with:
 
 ```
 CONTENT_TEAM_LLM=openai
@@ -96,7 +95,7 @@ CONTENT_TEAM_LLM_MODEL=local
 CONTENT_TEAM_LLM_API_KEY=   # optional for a local llama.cpp server
 ```
 
-`CONTENT_TEAM_LLM_DAILY_CAP` (default 80) stops further real calls for the UTC day and writes labeled fallback drafts instead. Failures (rate limits, missing keys, bad JSON) also fall back. Gemini and xAI are opt-in only (`CONTENT_TEAM_LLM=gemini` or `xai`) and are not used in auto.
+`CONTENT_TEAM_LLM_DAILY_CAP` (default 60) stops further real calls for the UTC day and writes labeled fallback drafts instead. That cap keeps Cloudflare usage under the 10,000 Neuron free allowance (see `docs/CONTENT_TEAM_LLM.md`). HTTP 429 / quota errors also fall back to the placeholder and do not try a paid route. Other failures (missing keys, bad JSON) fall back after any remaining free providers. Gemini and xAI are opt-in only (`CONTENT_TEAM_LLM=gemini` or `xai`) and are not used in auto.
 
 Do not run a multi-GB model inside the Railway container. RAM is billed at about $10/GB-month.
 

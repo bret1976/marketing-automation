@@ -1,0 +1,12 @@
+This directory vendors a snapshot of mvanhorn/last30days-skill
+(https://github.com/mvanhorn/last30days-skill), MIT License,
+Copyright (c) 2026 Matt Van Horn.
+
+Version: 4.3.2
+Upstream commit: 488e50d9ea1f22302601d1bd61696a4532ec73d7 (2026-11-17 7:55 AM PT)
+License text: LICENSE
+
+We use only the keyless/free collectors (Hacker News Algolia, and other
+public endpoints the engine exposes without API keys). Paid or
+authenticated sources such as ScrapeCreators, X/Twitter bearer tokens,
+Perplexity, Brave, and Apify are not enabled in this integration.

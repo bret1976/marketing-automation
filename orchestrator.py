@@ -684,21 +684,37 @@ def run_live_trend_scanner(
     settings: Dict[str, Any]
 ):
     try:
-        # VIRAL_SOURCE=open: free last-24h finder (YouTube Data API + yt-dlp + Reddit), no Gemini.
-        # Default off, so the Gemini Google-Search scan below is unchanged unless the flag is set.
+        # last30days-skill is the grounded last-24h provider (keyless HN + Google Trends).
+        # No Gemini. VIRAL_SOURCE=open still merges the existing YouTube/Reddit finder.
+        import last30days_scan
         import open_viral
+        update_job_status(job_id, "PROCESSING", 20, "Scanning last-24h trends via last30days-skill (keyless sources, no Gemini)...")
+        found = last30days_scan.scan()
+        trends = last30days_scan.to_trends(found, brand=(settings.get("brand_name") or "6Frame Studio"))
+        sources = dict(found.get("sources") or {})
+        errors = list(found.get("errors") or [])
         if open_viral.enabled():
-            update_job_status(job_id, "PROCESSING", 20, "Finding the most-viewed uploads of the last 24 hours (YouTube, Reddit)...")
-            found = open_viral.find_viral()
-            trends = open_viral.to_trends(found, brand=(settings.get("brand_name") or "6Frame Studio"))
-            if not trends:
-                update_job_status(job_id, "FAILED", 0, "Open viral finder found nothing from the last 24 hours. "
-                                  + "; ".join(found.get("errors") or [])[:400])
-                return
-            update_job_status(job_id, "SUCCESS", 100, "Live trend search complete (open sources, last 24h, ranked by views/hour).",
-                              result={"trends": trends[:10], "verified_count": len(trends), "filtered_unresolved_count": 0,
-                                      "source": "open", "sources": found.get("sources"), "errors": found.get("errors")})
+            extra = open_viral.find_viral()
+            trends.extend(open_viral.to_trends(extra, brand=(settings.get("brand_name") or "6Frame Studio")))
+            sources.update(extra.get("sources") or {})
+            errors.extend(extra.get("errors") or [])
+        if not trends:
+            update_job_status(job_id, "FAILED", 0, "last30days 24h scan found nothing. "
+                              + "; ".join(errors)[:400])
             return
+        # Feed Content Team researcher (draft-only ingest). Never publishes or sends.
+        try:
+            from content_team import store as ct_store
+            ct_store.append_ingest("trending", last30days_scan.to_ingest(found))
+        except Exception:
+            logger.warning("content team trending ingest skipped", exc_info=True)
+        source_name = "last30days+open" if open_viral.enabled() else "last30days"
+        update_job_status(job_id, "SUCCESS", 100, "Live trend search complete (last30days-skill, last 24h, no Gemini).",
+                          result={"trends": trends[:10], "verified_count": len(trends), "filtered_unresolved_count": 0,
+                                  "source": source_name, "engine": "last30days", "gemini_calls": 0,
+                                  "sources": sources, "errors": errors,
+                                  "window_hours": found.get("window_hours")})
+        return
 
         api_key = settings.get("gemini_api_key") or os.environ.get("GEMINI_API_KEY")
         if not api_key:

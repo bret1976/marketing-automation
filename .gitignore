@@ -22,3 +22,8 @@ autopilot_watch.json
 spend_guard_ledger.json
 spend_guard_ledger.tmp
 node_modules/
+
+# runtime Content Team ingest written when STATE_DIR is unset
+content_team/ingest/
+content_team/drafts/
+content_team/reports/

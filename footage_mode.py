@@ -358,13 +358,28 @@ def genre_queries(queries: Optional[List[str]] = None) -> List[str]:
 
 
 def todays_viral(queries: Optional[List[str]] = None) -> dict:
-    """Keyless (yt-dlp) last-24h finder from PR #23, limited to 6Frame Studio's genre: in-genre queries
-    AND the niche title filter (open_viral.NICHE_RE) forced on. Only titles/view counts are read;
-    no viral video is downloaded."""
+    """Last-24h finder: last30days-skill (keyless) plus the genre-limited YouTube probe.
+    Only titles/view counts are read; no viral video is downloaded. No Gemini."""
+    import last30days_scan
     import open_viral
+    try:
+        viral = last30days_scan.to_viral(last30days_scan.scan())
+    except Exception as exc:  # noqa: BLE001
+        viral = {"top": [], "sources": {}, "errors": [str(exc)]}
     qs = genre_queries(queries)
     os.environ.setdefault("VIRAL_OPEN_PROBE_LIMIT", os.environ.get("FOOTAGE_VIRAL_PROBE_LIMIT", "80"))
-    return open_viral.find_viral(queries=qs, subreddits=[], top_n=60, niche=True, max_seconds=3600)
+    yt = open_viral.find_viral(queries=qs, subreddits=[], top_n=60, niche=True, max_seconds=3600)
+    top = list(viral.get("top") or []) + list(yt.get("top") or [])
+    sources = {**(viral.get("sources") or {}), **(yt.get("sources") or {})}
+    errors = list(viral.get("errors") or []) + list(yt.get("errors") or [])
+    return {
+        "source": "last30days+open",
+        "window_hours": 24,
+        "sources": sources,
+        "errors": errors,
+        "top": top,
+        "gemini_calls": 0,
+    }
 
 
 # --------------------------------------------------------------------------- 1b. viral-first topic selection

@@ -141,39 +141,43 @@ def _item(
     return out
 
 
-def _fetch_hackernews(now: datetime, niche: str = "", window_hours: int = WINDOW_HOURS) -> tuple[list[dict[str, Any]], str]:
-    _ensure_vendor_on_path()
-    from lib import hackernews
-    from lib import http as last_http
+def _algolia_json(url: str) -> dict[str, Any]:
+    """Fetch HN Algolia JSON without importing last30days hackernews.py.
 
-    to_day = now.date()
-    from_day = (now - timedelta(hours=window_hours)).date()
+    That module uses Python 3.12 f-string syntax, and marketing-automation
+    still runs Python 3.11. The endpoint and query shape are the same
+    keyless collector last30days uses.
+    """
+    req = Request(url, headers={"User-Agent": USER_AGENT, "Accept": "application/json"})
+    with urlopen(req, timeout=30) as resp:
+        return json.loads(resp.read().decode())
+
+
+def _fetch_hackernews(now: datetime, niche: str = "", window_hours: int = WINDOW_HOURS) -> tuple[list[dict[str, Any]], str]:
+    from urllib.parse import urlencode
+
+    algolia = "https://hn.algolia.com/api/v1/search"  # last30days ALGOLIA_SEARCH_URL
     from_ts = int((now - timedelta(hours=window_hours)).timestamp())
     to_ts = int(now.timestamp()) + 1
     limit = 30
     urls = [
-        f"{hackernews.ALGOLIA_SEARCH_URL}?tags=front_page&hitsPerPage={limit}",
-        (
-            f"{hackernews.ALGOLIA_SEARCH_URL}?tags=story"
-            f"&numericFilters=created_at_i>{from_ts},created_at_i<{to_ts}"
-            f"&hitsPerPage={limit}"
-        ),
+        f"{algolia}?tags=front_page&hitsPerPage={limit}",
+        f"{algolia}?tags=story&numericFilters=created_at_i>{from_ts},created_at_i<{to_ts}&hitsPerPage={limit}",
     ]
     if niche.strip():
-        from urllib.parse import urlencode
         params = {
             "query": niche.strip(),
             "tags": "story",
             "numericFilters": f"created_at_i>{from_ts},created_at_i<{to_ts}",
             "hitsPerPage": str(limit),
         }
-        urls.append(f"{hackernews.ALGOLIA_SEARCH_URL}?{urlencode(params)}")
+        urls.append(f"{algolia}?{urlencode(params)}")
 
     hits: list[dict[str, Any]] = []
     errors: list[str] = []
     for url in urls:
         try:
-            response = last_http.request("GET", url, timeout=30)
+            response = _algolia_json(url)
             hits.extend(response.get("hits") or [])
         except Exception as exc:  # noqa: BLE001 — one source must not abort the scan
             errors.append(str(exc))

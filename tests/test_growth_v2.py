@@ -612,3 +612,48 @@ def test_unescape_caption_escapes():
     assert g.unescape_caption_escapes("Hook.\\n\\n\\#A \\#B") == "Hook.\n\n#A #B"
     assert g.unescape_caption_escapes("a\\r\\nb\\tc") == "a\nb\tc"
     assert g.unescape_caption_escapes("plain") == "plain"
+
+
+def test_call_gemini_json_uses_free_llm_and_never_gemini(monkeypatch, tmp_path):
+    import main as m
+    import json
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from threading import Thread
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, fmt, *args):
+            return
+
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length") or 0)
+            self.rfile.read(length)
+            payload = {
+                "choices": [{
+                    "message": {
+                        "role": "assistant",
+                        "content": json.dumps({"hook": "Ship in a bottle.", "commentary": ["one", "two"]}),
+                    }
+                }]
+            }
+            raw = json.dumps(payload).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    Thread(target=server.serve_forever, daemon=True).start()
+    host, port = server.server_address
+    monkeypatch.setenv("CONTENT_TEAM_STATE_DIR", str(tmp_path / "ct"))
+    monkeypatch.setenv("CONTENT_TEAM_LLM", "openai")
+    monkeypatch.setenv("CONTENT_TEAM_LLM_BASE_URL", f"http://127.0.0.1:{port}/v1")
+    monkeypatch.setenv("CONTENT_TEAM_LLM_MODEL", "test")
+    monkeypatch.setenv("GEMINI_API_KEY", "should-not-be-used")
+    called = []
+    monkeypatch.setattr(m, "genai", type("Nope", (), {"Client": staticmethod(lambda *a, **k: called.append("gemini") or (_ for _ in ()).throw(AssertionError("Gemini client must not be used")))})())
+    data = m.call_gemini_json({}, "Write JSON hook and commentary for a bottle ship.", {"hook": "fallback"})
+    server.shutdown()
+    assert called == []
+    assert data["hook"] == "Ship in a bottle."
+    assert data["commentary"] == ["one", "two"]

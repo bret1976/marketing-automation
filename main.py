@@ -4178,27 +4178,24 @@ def note_text_usage(response: Any, grounded: bool = False) -> float:
 
 
 def call_gemini_json(settings: dict, prompt: str, fallback: Any, use_search: bool = True) -> Any:
-    api_key = settings.get("gemini_api_key") or os.environ.get("GEMINI_API_KEY")
-    if not api_key:
-        raise ValueError("Missing Gemini API key.")
-    client = genai.Client(api_key=api_key, http_options=types.HttpOptions(timeout=180000))
-    config_kwargs = {}
+    """JSON writer for Growth/Autopilot text. Uses the free Cloudflare Workers AI
+    client (content_team.llm). Gemini is never auto-selected. Video generation
+    still uses its own engines. The function name is kept so existing callers
+    and tests that monkeypatch it stay compatible.
+    """
+    del settings  # key lookup used to be Gemini; the free client reads its own env
     if use_search:
-        config_kwargs["tools"] = [types.Tool(google_search=types.GoogleSearch())]
-        prompt = f"{prompt}\n\nReturn only valid JSON. Do not wrap it in Markdown."
-    else:
-        config_kwargs["response_mime_type"] = "application/json"
-    response = client.models.generate_content(
-        model="gemini-3.6-flash",
-        contents=prompt,
-        config=types.GenerateContentConfig(**config_kwargs)
-    )
-    note_text_usage(response, grounded=use_search)
-    try:
-        return extract_json_object(response.text)
-    except Exception as e:
-        logger.warning(f"Failed to parse Gemini JSON: {e}; text={response.text[:500]}")
-        return fallback
+        prompt = (
+            f"{prompt}\n\nReturn only valid JSON. Do not wrap it in Markdown. "
+            "If you cannot verify a live public URL, omit that item or use an empty string."
+        )
+    from content_team.llm import complete_json
+    result = complete_json(prompt, fallback=fallback, system="")
+    if result.get("llm_status") == "real" and result.get("data") is not None:
+        return result["data"]
+    err = result.get("error") or "no free LLM provider configured"
+    logger.warning("AI JSON writer failed (%s): %s", result.get("provider"), err)
+    return fallback if fallback is not None else result.get("data")
 
 def refresh_live_listening_and_competitors(state: dict, settings: dict) -> dict:
     topics = [t for t in state.get("listening_topics", []) if t.get("keyword")]

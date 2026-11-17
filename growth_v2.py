@@ -1109,23 +1109,19 @@ def extract_frames(path: str, count: int = 5, width: int = 512) -> List[bytes]:
 
 
 def call_gemini_vision_json(settings: dict, prompt: str, frames: List[bytes]) -> Any:
-    """Same cheap model/key as main.call_gemini_json, but with sampled frames attached."""
+    """Text-only JSON writer on the free Cloudflare client.
+
+    Frames used to be sent to Gemini Vision. That path is retired so Autopilot
+    writing never hits a paid or depleted Gemini key. The caller already falls
+    back to title-only copy when this returns nothing useful.
+    """
+    del settings, frames
     m = _main()
-    api_key = settings.get("gemini_api_key") or os.environ.get("GEMINI_API_KEY")
-    if not api_key:
-        raise ValueError("Missing Gemini API key.")
-    from google import genai
-    from google.genai import types
-    client = genai.Client(api_key=api_key, http_options=types.HttpOptions(timeout=120000))
-    parts = [types.Part.from_bytes(data=f, mime_type="image/jpeg") for f in frames] + [prompt]
-    response = client.models.generate_content(
-        model=getattr(m, "GEMINI_TEXT_MODEL", None) or "gemini-3.6-flash",
-        contents=parts,
-        config=types.GenerateContentConfig(response_mime_type="application/json"),
+    prompt = (
+        prompt
+        + "\n\nNo still frames are attached. Write JSON from the title and instructions only."
     )
-    if hasattr(m, "note_text_usage"):
-        m.note_text_usage(response)
-    return m.extract_json_object(response.text)
+    return m.call_gemini_json({}, prompt, {}, use_search=False)
 
 
 def build_transformed_clip(settings: dict, state: dict) -> Optional[Tuple[str, dict, dict]]:

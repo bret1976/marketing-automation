@@ -663,6 +663,7 @@ def test_viral_scan_determines_topic_not_the_library():
 
 
 def test_no_viral_subject_means_no_canned_fallback(monkeypatch, tmp_path):
+    monkeypatch.setenv("FOOTAGE_VERIFIED", "0")  # legacy keyword pipeline under test
     monkeypatch.setattr(fm, "wiki_subjects", lambda title, get=None, limit=2: [])
     monkeypatch.setattr(fm, "gather_candidates", lambda t: (_ for _ in ()).throw(AssertionError("no library fallback")))
     with pytest.raises(RuntimeError, match="not falling back"):
@@ -671,6 +672,7 @@ def test_no_viral_subject_means_no_canned_fallback(monkeypatch, tmp_path):
 
 
 def test_thin_viral_topic_is_skipped_for_the_next_viral_topic(monkeypatch, tmp_path):
+    monkeypatch.setenv("FOOTAGE_VERIFIED", "0")  # legacy keyword pipeline under test
     tried = []
     a = {**ft.BY_KEY["titanic-1912"]}
     b = {**ft.BY_KEY["hindenburg-1937"]}
@@ -929,6 +931,7 @@ def test_scanned_topic_is_skipped_instead_of_blind_cuts_when_probes_fail(monkeyp
 
 
 def test_produce_footage_plans_scanned_topics_strictly(monkeypatch, tmp_path):
+    monkeypatch.setenv("FOOTAGE_VERIFIED", "0")  # legacy keyword pipeline under test
     seen = {}
     topic = _scanned()
     monkeypatch.setattr(fm, "viral_topics", lambda items, **k: [{"topic": topic, "score": 9.0, "matched": []}])
@@ -942,3 +945,10 @@ def test_produce_footage_plans_scanned_topics_strictly(monkeypatch, tmp_path):
     with pytest.raises(RuntimeError, match="no usable footage"):
         fm.produce_footage(str(tmp_path), viral={"top": [{"title": "x"}]}, workdir=str(tmp_path / "w"))
     assert seen["strict"] is True
+
+
+def test_produce_footage_uses_verified_pipeline_by_default(monkeypatch, tmp_path):
+    import footage_verified
+    monkeypatch.delenv("FOOTAGE_VERIFIED", raising=False)
+    monkeypatch.setattr(footage_verified, "produce", lambda out_dir, **kw: ("v.mp4", "l.mp4", {"c": 1}, {"i": 1}))
+    assert fm.produce_footage(str(tmp_path), viral={"top": []}) == ("v.mp4", "l.mp4", {"c": 1}, {"i": 1})

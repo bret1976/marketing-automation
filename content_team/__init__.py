@@ -6,7 +6,7 @@ routines have free X reads). This package never calls the X API.
 """
 
 PACK = "content-team-v1"
-VERSION = "2026-11-16.1"
+VERSION = "2026-11-16.2"
 
 from content_team.guard import assert_no_publish_hooks  # noqa: F401
 

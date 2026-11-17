@@ -78,9 +78,26 @@ Article Tracker: `POST /api/content-team/ideas` with `{ "text": "...", "source":
 
 Each report includes `llm_status`: `real` (live model or, for analytics, real stored metrics), `stub` (test provider), `fallback` (template used after an LLM failure or missing key), or `failed`.
 
-## LLM provider
+## LLM provider (free, OpenAI-compatible)
 
-`CONTENT_TEAM_LLM=auto|xai|gemini|stub`. Auto uses `XAI_API_KEY` or `GROK_API_KEY` first, then `GEMINI_API_KEY`. Credit or network failures are caught and the role still writes a labeled fallback draft.
+The Content Team does **not** auto-select Gemini or xAI. `CONTENT_TEAM_LLM=auto` tries, in order, any of these that are configured:
+
+1. Cloudflare Workers AI (`CLOUDFLARE_ACCOUNT_ID` + `CLOUDFLARE_API_TOKEN`) — **primary**. 10,000 Neurons/day on the Workers Free plan, which hard-stops instead of billing. Default model `@cf/zai-org/glm-4.7-flash`. Create a token with the Workers AI template (Workers AI: Read and Workers AI: Edit). `CONTENT_TEAM_LLM_BASE_URL`, `CONTENT_TEAM_LLM_MODEL`, and `CONTENT_TEAM_LLM_API_KEY` can override the endpoint, model, and token.
+2. Groq (`GROQ_API_KEY`) — optional fallback only, if a key is set. Default model `openai/gpt-oss-20b`.
+3. OpenRouter (`OPENROUTER_API_KEY`) — optional extra fallback only, default model `openrouter/free` so it never falls through to a paid model. Free accounts are capped at 50 requests/day unless you buy credits (don't).
+
+Override the order with `CONTENT_TEAM_LLM_PROVIDERS=cloudflare,groq,openrouter`. Point at a local server with:
+
+```
+CONTENT_TEAM_LLM=openai
+CONTENT_TEAM_LLM_BASE_URL=http://127.0.0.1:8080/v1
+CONTENT_TEAM_LLM_MODEL=local
+CONTENT_TEAM_LLM_API_KEY=   # optional for a local llama.cpp server
+```
+
+`CONTENT_TEAM_LLM_DAILY_CAP` (default 60) stops further real calls for the UTC day and writes labeled fallback drafts instead. That cap keeps Cloudflare usage under the 10,000 Neuron free allowance (see `docs/CONTENT_TEAM_LLM.md`). HTTP 429 / quota errors also fall back to the placeholder and do not try a paid route. Other failures (missing keys, bad JSON) fall back after any remaining free providers. Gemini and xAI are opt-in only (`CONTENT_TEAM_LLM=gemini` or `xai`) and are not used in auto.
+
+Do not run a multi-GB model inside the Railway container. RAM is billed at about $10/GB-month.
 
 ## Voice docs
 

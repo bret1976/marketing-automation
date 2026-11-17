@@ -136,4 +136,4 @@ or `settings.autopilot_format="stitched"`).
 
 A Content Team tab in the existing cockpit. Eleven narrow roles plus a draft-only Repurposer, Reply Scout, Sponsor Hunter, and Collab Finder. Every output is queued for review. Approving a draft does **not** publish or send a reply. The pack never calls the X API; Grok Bot routines ingest X posts and can fetch reports. Schedules: 7 AM and 7 PM America/Los_Angeles.
 
-See `docs/CONTENT_TEAM.md` for the ingest payload, report URLs, and `CONTENT_TEAM_TOKEN` auth.
+See `docs/CONTENT_TEAM.md` for the ingest payload, report URLs, and `CONTENT_TEAM_TOKEN` auth. Writing uses a free OpenAI-compatible LLM (Groq, then Cloudflare Workers AI); Gemini is not auto-selected for this pack.

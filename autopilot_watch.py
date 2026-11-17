@@ -124,6 +124,28 @@ def hint_for(sig_id: str) -> str:
     return ""
 
 
+# Once Autopilot writing no longer calls Gemini, leftover 402 log signatures
+# are stale and must not be the /health top_issue.
+_GEMINI_WRITER_ISSUES = {"gemini_credits_depleted", "gemini_rate_limited"}
+
+
+def text_writer_provider() -> str:
+    """Active Content Team / Autopilot text-writer provider, or unknown."""
+    try:
+        from content_team.llm import provider_status
+        status = provider_status()
+        return str(status.get("active") or status.get("configured") or "unknown")
+    except Exception:
+        return "unknown"
+
+
+def _drop_stale_gemini_writer_issues(issues: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    writer = text_writer_provider()
+    if writer not in {"cloudflare", "groq", "openrouter", "openai", "ollama"}:
+        return issues
+    return [row for row in issues if row.get("id") not in _GEMINI_WRITER_ISSUES]
+
+
 # --------------------------------------------------------------------------
 # Schedule math
 # --------------------------------------------------------------------------
@@ -451,7 +473,7 @@ def report(settings: Optional[dict] = None, posts: Optional[List[dict]] = None,
     else:
         slots = {"status": "disabled", "consecutive_missed": 0, "missed_slots": [], "failed_slots": [], "slots": []}
     scanned = scan_posts(posts or [], now, lookback) if posts is not None else {"failed_rows": None, "issues": {}}
-    issues = _active_issues(scanned["issues"], now, lookback)
+    issues = _drop_stale_gemini_writer_issues(_active_issues(scanned["issues"], now, lookback))
     last_success_at = ledger.get("last_success_at")
     age_hours = None
     if last_success_at:

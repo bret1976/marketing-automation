@@ -195,3 +195,31 @@ def test_oct22_slot_that_ran_and_gave_up_is_failed_not_missed(tmp_path, monkeypa
 def test_classify_retired_video_model():
     assert "video_model_retired" in aw.classify(OCT22_404)
     assert "video_model_retired" not in aw.classify("404 page not found")
+
+
+def test_stale_gemini_credit_issue_hidden_when_writer_is_cloudflare(tmp_path, monkeypatch):
+    _env(monkeypatch, tmp_path)
+    monkeypatch.setenv("CLOUDFLARE_ACCOUNT_ID", "acct")
+    monkeypatch.setenv("CLOUDFLARE_API_TOKEN", "token")
+    monkeypatch.delenv("CONTENT_TEAM_LLM", raising=False)
+    monkeypatch.delenv("CONTENT_TEAM_LLM_PROVIDERS", raising=False)
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    aw.observe("RESOURCE_EXHAUSTED. Your prepayment credits are depleted.")
+    r = aw.report(settings={"autonomous_posting": False}, posts=[], now=_now("2026-11-17T16:00:00"), state_dir=tmp_path)
+    assert aw.text_writer_provider() == "cloudflare"
+    assert all(i["id"] != "gemini_credits_depleted" for i in r["issues"])
+    compact = aw.compact(settings={"autonomous_posting": False})
+    assert compact.get("top_issue") != "gemini_credits_depleted"
+
+
+def test_gemini_credit_issue_still_visible_without_free_writer(tmp_path, monkeypatch):
+    _env(monkeypatch, tmp_path)
+    for name in (
+        "CLOUDFLARE_ACCOUNT_ID", "CLOUDFLARE_API_TOKEN", "CF_ACCOUNT_ID", "CF_API_TOKEN",
+        "GROQ_API_KEY", "OPENROUTER_API_KEY", "CONTENT_TEAM_LLM", "CONTENT_TEAM_LLM_BASE_URL",
+        "CONTENT_TEAM_LLM_API_KEY",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    aw.observe("RESOURCE_EXHAUSTED. Your prepayment credits are depleted.")
+    r = aw.report(settings={"autonomous_posting": False}, posts=[], now=_now("2026-11-17T16:00:00"), state_dir=tmp_path)
+    assert "gemini_credits_depleted" in {i["id"] for i in r["issues"]}

@@ -25,12 +25,10 @@ def test_age_filter_drops_items_older_than_24h(monkeypatch):
     stale = _fresh(30, object_id="1", title="Old")
     fresh = _fresh(5)
 
-    def fake_request(method, url, timeout=30):
+    def fake_algolia(url):
         return {"hits": [stale, fresh]}
 
-    ls._ensure_vendor_on_path()
-    import lib.http as last_http
-    monkeypatch.setattr(last_http, "request", fake_request)
+    monkeypatch.setattr(ls, "_algolia_json", fake_algolia)
     monkeypatch.setattr(ls, "_fetch_google_trends", lambda now, window_hours=24: ([], "ok"))
     monkeypatch.setattr(ls, "_fetch_reddit_last30days", lambda now, window_hours=24: ([], "schema-drift"))
     found = ls.scan(now=NOW)

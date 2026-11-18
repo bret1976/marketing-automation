@@ -41,7 +41,7 @@ import footage_tts
 
 logger = logging.getLogger("footage_verified")
 MARKER = "FOOTAGE_VERIFIED"
-VERSION = "2026-11-17.5"
+VERSION = "2026-11-17.6"
 
 # Set only by a dry-run to exercise the no-Cloudflare path; the scheduler never sets this.
 _force_fallback = False
@@ -865,8 +865,7 @@ _GENERIC_SUBJECT = {
     "war", "world", "wartime", "wars", "military", "army", "navy", "forces", "force", "troops", "troop",
     "soldiers", "soldier", "men", "man", "allied", "allies", "enemy", "battle", "campaign", "operation",
     "invasion", "landing", "landings", "front", "coast", "beach", "beaches", "shore", "aboard",
-    "second", "first", "history", "historical", "century", "american", "british", "french", "german",
-    "nazi", "soviet", "russian", "chinese", "japanese", "national", "united", "states", "royal",
+    "second", "first", "history", "historical", "century", "national", "united", "states", "royal",
     "center", "centre", "university", "museum", "building", "portrait", "picture", "view", "near",
     "several", "many", "early", "later", "great", "south", "north", "east", "west", "northern",
     "southern", "eastern", "western",
@@ -917,6 +916,19 @@ _NAME_ALIASES = {
     "eisenhower": ("ike",),
     "lbj": ("johnson", "lyndon johnson"),
     "mlk": ("king", "martin luther king"),
+}
+
+# Counted as line-specific when the line names them, not as generic subject words.
+_NATIONALITIES = {
+    "german", "british", "american", "french", "nazi", "soviet", "russian", "chinese", "japanese",
+    "italian", "canadian", "polish", "australian", "indian", "korean", "vietnamese", "spanish",
+    "portuguese", "dutch", "belgian", "austrian", "turkish", "iraqi", "iranian", "israeli",
+    "egyptian", "mexican", "brazilian",
+}
+
+_COMPOUND_MODIFIERS = {
+    "captured", "motorised", "motorized", "unreliable", "artificial", "amphibious",
+    "self-propelled", "anti-tank", "airborne",
 }
 
 
@@ -1102,6 +1114,16 @@ def line_specific_terms(line: dict, subj: dict, extra_generic: Optional[set] = N
         if year not in subj_years and ("y", year) not in dates:
             dates.append(("y", year))
     named = people + places
+    nations = []
+    for w in re.findall(r"[a-z]+", show.lower()):
+        if w in _NATIONALITIES and w not in generic and w not in nations:
+            nations.append(w)
+    compounds = []
+    for m in re.finditer(
+        r"\b(" + "|".join(re.escape(x) for x in sorted(_COMPOUND_MODIFIERS, key=len, reverse=True)) + r")\s+[a-z][a-z\-]+\b",
+        show.lower(),
+    ):
+        compounds.append(m.group(0))
     words = []
     for w in _meta_words(show):
         if w in generic or w in _META_STOP or w in _MONTHS:
@@ -1109,7 +1131,8 @@ def line_specific_terms(line: dict, subj: dict, extra_generic: Optional[set] = N
         if any(w in n.lower() for n in named):
             continue
         words.append(w)
-    return {"people": people, "places": places, "dates": dates, "words": words}
+    return {"people": people, "places": places, "dates": dates, "words": words,
+            "nations": nations, "compounds": compounds}
 
 
 def clip_is_of_subject(c: dict, subj: dict) -> bool:
@@ -1142,6 +1165,15 @@ def meta_line_match(c: dict, subj: dict, line: dict, extra_generic: Optional[set
     missing_dates = [d for d in terms["dates"] if not _date_in_text(d, text)]
     if missing_dates:
         return {"ok": False, "reason": "missing line-specific date", "score": 0.0, "overlap": []}
+    missing_nations = [n for n in terms.get("nations") or [] if not re.search(r"\b" + re.escape(n) + r"\b", text.lower())]
+    if missing_nations:
+        return {"ok": False, "reason": "missing line-specific nationality: " + ", ".join(missing_nations),
+                "score": 0.0, "overlap": []}
+    missing_compounds = [c for c in terms.get("compounds") or [] if c not in text.lower() and c.split()[0] not in text.lower()]
+    # The distinctive modifier (captured, motorised, ...) must appear, not just the noun (equipment, transport).
+    if missing_compounds:
+        return {"ok": False, "reason": "missing line-specific phrase: " + ", ".join(missing_compounds),
+                "score": 0.0, "overlap": []}
     word_hits = [w for w in terms["words"] if re.search(r"\b" + re.escape(w) + r"\b", text.lower())]
     person_hits = [n for n in terms["people"] if _name_in_text(n, text)]
     place_hits = [n for n in terms.get("places") or [] if _place_in_text(n, text)]

@@ -472,3 +472,25 @@ def test_meta_line_match_accepts_true_greenhouse_line_specific_stills():
     belfast = {"show": "One of the earliest examples of a palm house is in the Belfast Botanic Gardens."}
     got = fv.meta_line_match(belfast_photo, GREENHOUSE, belfast)
     assert got["ok"] is True
+
+
+def test_meta_line_match_rejects_normandy_polarity_and_nationality_mismatches():
+    """A British gun crew is not German tank losses; US troops on a transport did not 'lack transport'."""
+    german_losses = {"show": "All told, the German forces stationed in France were deprived of 45,827 troops and 363 tanks, assault guns, and self-propelled anti-tank guns."}
+    british_guns = _still("The British Army in Normandy 1944 B5020.jpg",
+                          "A British anti-tank gun in a field in Normandy",
+                          "File:B5020.jpg")
+    assert fv.meta_line_match(british_guns, NORMANDY, german_losses)["ok"] is False
+
+    lacked = {"show": "They were provided mainly with unreliable captured equipment and lacked motorised transport."}
+    us_transport = _still(
+        "H Hour has arrived. American soldiers, hardened and ready, lounge under full fighting equipment on the deck of a Coast Guard assault transport in the fateful trip across the English Channel. (49380246091).jpg",
+        ident="File:transport.jpg",
+    )
+    assert fv.meta_line_match(us_transport, NORMANDY, lacked)["ok"] is False
+
+    mulberry = {"show": "The most serious drawback of the Normandy coast would be overcome through the development of artificial Mulberry harbours."}
+    harbor = _still("D-Day Harbor (15103484811).jpg", "Remains of an artificial Mulberry harbour caisson", "File:harbor.jpg")
+    got = fv.meta_line_match(harbor, NORMANDY, mulberry)
+    assert got["ok"] is True
+    assert "mulberry" in " ".join(got["overlap"]) or "artificial" in got["overlap"]

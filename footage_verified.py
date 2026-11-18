@@ -18,6 +18,10 @@ Wikipedia page, then cut over a Tekken talk show). This module replaces the keyw
   D. edit      - one shot per line, cut in the silence between sentences; captions bottom-anchored in
                  the safe area; credits only on the end card (never under a caption).
 All calls are free (Cloudflare Workers AI free plan, public archives). No Gemini, no xAI, no paid API.
+When Cloudflare returns 429 (neuron limit) or is unavailable, produce() logs 'ai fallback (cf 429)' and
+builds from library or previously verified subjects with a template script and metadata-only clip matches.
+A clip is kept only when metadata guarantees it shows the subject and the voiceover line; otherwise the
+slot is skipped (never a mismatched video).
 """
 import json
 import logging
@@ -37,7 +41,7 @@ import footage_tts
 
 logger = logging.getLogger("footage_verified")
 MARKER = "FOOTAGE_VERIFIED"
-VERSION = "2026-11-17.2"
+VERSION = "2026-11-17.3"
 
 SUBJECT_MIN_CONF = float(os.environ.get("FOOTAGE_SUBJECT_MIN_CONF", "0.75"))
 SUBJECT_MIN_SIM = float(os.environ.get("FOOTAGE_SUBJECT_MIN_SIM", "0.55"))
@@ -600,15 +604,21 @@ def produce(out_dir: str, viral: Optional[dict] = None, avoid_keys: Optional[set
     """Same contract as footage_mode.produce_footage: (vertical_mp4, landscape_mp4, concept, info). Raises when no
     topic can be built with verified, matching footage (no video beats a wrong video)."""
     t0 = time.time()
+    fallback = False
     if not cf_ai.ready():
-        raise RuntimeError("footage v2 needs the free Cloudflare Workers AI credentials (subject + clip verification)")
-    cf_ai.reset_usage()
+        fallback = True
+        # logged again below once `log` exists
+    else:
+        cf_ai.reset_usage()
     own_tmp = workdir is None
     workdir = workdir or tempfile.mkdtemp(prefix="footage_v2_")
     os.makedirs(workdir, exist_ok=True)
     log: List[str] = _EchoLog()
     avoid = avoid_keys or set()
     recent = " | ".join(recent_topics or []).lower()
+    if fallback:
+        log.append("ai fallback (cf 429)")
+        log.append("ai fallback reason: Cloudflare Workers AI is not configured")
     try:
         if viral is None:
             viral = fm.todays_viral()
@@ -619,54 +629,70 @@ def produce(out_dir: str, viral: Optional[dict] = None, avoid_keys: Optional[set
         attempts = int(os.environ.get("FOOTAGE_TOPIC_ATTEMPTS", "3"))
         tried_subjects, resolved = set(), 0
         built, shortlist = None, []
-        for it in items:
-            if resolved >= max_resolve:
-                break
-            title = it.get("title") or ""
-            if pool_mode == "genre" and not open_viral.NICHE_RE.search(title):
-                log.append(f"trend skip (off-genre, not AI filmmaking): {title[:70]}")
-                continue
-            why = trend_skip_reason(title)
-            if why:
-                log.append(f"trend skip ({why}): {title[:70]}")
-                continue
-            resolved += 1
-            subj = resolve_trend(it, log=log)
-            if not subj:
-                continue
-            key = "v2-" + re.sub(r"[^a-z0-9]+", "-", subj["title"].lower()).strip("-")[:48]
-            if subj["title"] in tried_subjects or key in avoid or subj["title"].lower() in recent:
-                log.append(f"subject skip (already tried / recently posted): {subj['title']}")
-                continue
-            tried_subjects.add(subj["title"])
-            supply = footage_supply(subj)
-            if supply < MIN_SUPPLY:
-                log.append(f"subject skip (only {supply} licensed videos of {subj['title']}; need {MIN_SUPPLY}): prefer subjects with real footage")
-                continue
-            log.append(f"footage supply for {subj['title']}: {supply} licensed videos")
-            shortlist.append((subj, it, key, supply))
-            if len(shortlist) >= SHORTLIST:
-                break
+        if not fallback:
+            for it in items:
+                if resolved >= max_resolve:
+                    break
+                title = it.get("title") or ""
+                if pool_mode == "genre" and not open_viral.NICHE_RE.search(title):
+                    log.append(f"trend skip (off-genre, not AI filmmaking): {title[:70]}")
+                    continue
+                why = trend_skip_reason(title)
+                if why:
+                    log.append(f"trend skip ({why}): {title[:70]}")
+                    continue
+                resolved += 1
+                try:
+                    subj = resolve_trend(it, log=log)
+                except cf_ai.CFQuota as exc:
+                    log.append("ai fallback (cf 429)")
+                    log.append(f"ai fallback reason: {exc}"[:240])
+                    fallback = True
+                    break
+                if not subj:
+                    continue
+                key = "v2-" + re.sub(r"[^a-z0-9]+", "-", subj["title"].lower()).strip("-")[:48]
+                if subj["title"] in tried_subjects or key in avoid or subj["title"].lower() in recent:
+                    log.append(f"subject skip (already tried / recently posted): {subj['title']}")
+                    continue
+                tried_subjects.add(subj["title"])
+                supply = footage_supply(subj)
+                if supply < MIN_SUPPLY:
+                    log.append(f"subject skip (only {supply} licensed videos of {subj['title']}; need {MIN_SUPPLY}): prefer subjects with real footage")
+                    continue
+                log.append(f"footage supply for {subj['title']}: {supply} licensed videos")
+                shortlist.append((subj, it, key, supply))
+                if len(shortlist) >= SHORTLIST:
+                    break
         # most real footage first (weighted by how viral the trend is): picture-rich subjects match best
         import math
         shortlist.sort(key=lambda r: -(min(r[3], 60) * (1 + 0.25 * math.log10(1 + float(r[1].get("views_per_hour") or 0)))))
-        for subj, it, key, supply in shortlist[:attempts]:
-            try:
-                built = build_topic(subj, it, key, workdir, log)
-            except cf_ai.CFQuota as exc:
-                log.append(f"free Cloudflare budget hit: {exc}")
-                break
-            except Exception as exc:  # noqa: BLE001
-                log.append(f"topic {subj['title']} failed: {exc}"[:240])
-                built = None
-            if built:
-                break
+        if not fallback:
+            for subj, it, key, supply in shortlist[:attempts]:
+                try:
+                    built = build_topic(subj, it, key, workdir, log)
+                except cf_ai.CFQuota as exc:
+                    log.append("ai fallback (cf 429)")
+                    log.append(f"ai fallback reason: {exc}"[:240])
+                    fallback = True
+                    built = None
+                    break
+                except Exception as exc:  # noqa: BLE001
+                    log.append(f"topic {subj['title']} failed: {exc}"[:240])
+                    built = None
+                if built:
+                    break
+        if not built and fallback:
+            built = run_fallback(avoid, recent, workdir, log)
         if not built:
             try:
                 with open(os.path.join(out_dir, "footage_v2_last_log.json"), "w") as fh:
                     json.dump({"at": datetime.now(timezone.utc).isoformat(), "log": log, "cf_ai_calls": dict(cf_ai.USAGE)}, fh, indent=1)
             except OSError:
                 pass
+            if fallback:
+                raise RuntimeError("ai fallback (cf 429): no library or previously verified subject has guaranteed "
+                                   f"matching footage; skipping slot. log tail={log[-12:]}")
             raise RuntimeError("no trending subject today has verified, matching footage; not rendering a wrong video. "
                                f"log tail={log[-12:]}")
         return finish(built, out_dir, workdir, log, name, t0)
@@ -777,8 +803,11 @@ def finish(b: dict, out_dir: str, workdir: str, log: List[str], name: Optional[s
         "topic": script["name"], "topic_key": b["key"].replace("-", " "), "title_line": script["title_line"],
         "on_screen_hook": hook, "hook": b["lines"][0]["show"], "lines": [f"Real footage: {script['name']}.", credit],
         "hashtags": [tag] + tags, "linkedin_angle": "Real archival footage, every shot checked against the narration. No AI generation.",
-        "comment_question": question, "vo": b["lines"], "concept_source": "footage_v2 (Cloudflare Workers AI, free)",
-        "footage_credit": credit, "topic_source": "viral_scan", "wikipedia": subj["url"], "text_credit": fm.TEXT_CREDIT,
+        "comment_question": question, "vo": b["lines"],
+        "concept_source": ("footage_v2 fallback (no Cloudflare, metadata-matched clips)" if b.get("fallback")
+                           else "footage_v2 (Cloudflare Workers AI, free)"),
+        "footage_credit": credit, "topic_source": ("library_fallback" if b.get("fallback") else "viral_scan"),
+        "wikipedia": subj["url"], "text_credit": fm.TEXT_CREDIT,
         "viral_match": {"score": item.get("views_per_hour"), "reason": "verified_subject",
                         "matched": [{"title": (item.get("title") or "")[:120], "url": item.get("url"), "views": item.get("views"),
                                      "views_per_hour": item.get("views_per_hour")}]},
@@ -787,7 +816,11 @@ def finish(b: dict, out_dir: str, workdir: str, log: List[str], name: Optional[s
         "engine": "footage", "footage_mode": f"{fm.VERSION}+v2 {VERSION}", "media_source": "archival_footage", "format": "footage_short",
         "duration_s": round(float(pv["duration"]), 2), "length_rule_s": [fm.MIN_SECONDS, fm.MAX_SECONDS],
         "cost_usd": 0.0, "cost": {"cap": 0.0, "total": 0.0, "items": []}, "concept_source": concept["concept_source"],
-        "topic_key": b["key"], "topic_source": "viral_scan", "topic_reason": "verified_subject", "subject_verify": subj.get("verify"),
+        "topic_key": b["key"],
+        "topic_source": "library_fallback" if b.get("fallback") else "viral_scan",
+        "topic_reason": "metadata_guaranteed_fallback" if b.get("fallback") else "verified_subject",
+        "ai_fallback": bool(b.get("fallback")),
+        "subject_verify": subj.get("verify"),
         "wikipedia": subj["url"], "viral_match": concept["viral_match"], "footage_sources": sources, "line_matches": line_matches,
         "music": {k: music[k] for k in ("title", "author", "source", "license", "license_url", "bpm")},
         "voiceover": b["vo"]["info"], "captions": b["caps"], "cuts_s": [round(sum(b["shot_durs"][:i + 1]), 3) for i in range(len(b["shot_durs"]) - 1)],
@@ -796,5 +829,382 @@ def finish(b: dict, out_dir: str, workdir: str, log: List[str], name: Optional[s
     }
     with open(os.path.join(out_dir, f"{name}.sources.json"), "w") as fh:
         json.dump({"concept": concept, "info": info}, fh, indent=1, default=str)
-    logger.info("%s ready %s subject=%s lines=%s", MARKER, os.path.basename(vertical), script["name"], len(b["lines"]))
+    remember_verified(subj, script, sources, fallback=bool(b.get("fallback")))
+    logger.info("%s ready %s subject=%s lines=%s fallback=%s", MARKER, os.path.basename(vertical),
+                script["name"], len(b["lines"]), bool(b.get("fallback")))
     return vertical, landscape, concept, info
+
+
+# --------------------------------------------------------------------------- C. no-Cloudflare fallback (429 / unavailable)
+
+_META_STOP = {
+    "the", "a", "an", "of", "and", "in", "on", "at", "to", "for", "from", "with", "by", "this", "that",
+    "was", "were", "are", "is", "its", "had", "has", "have", "been", "into", "over", "after", "before",
+    "during", "through", "between", "about", "which", "when", "where", "what", "than", "then", "also",
+    "used", "use", "using", "called", "known", "their", "they", "them", "his", "her", "she", "him",
+    "who", "whom", "whose", "not", "but", "or", "as", "if", "so", "all", "any", "can", "may", "will",
+    "would", "could", "should", "did", "does", "there", "here", "such", "these", "those", "each",
+    "other", "more", "most", "some", "very", "just", "only", "both", "same", "own", "under", "above",
+    "out", "down", "off", "again", "real", "footage",
+}
+
+
+def _meta_words(text: str) -> List[str]:
+    return [w for w in re.findall(r"[a-z0-9]{4,}", (text or "").lower()) if w not in _META_STOP]
+
+
+def subject_name(subj: dict) -> str:
+    return re.sub(r"\s*\([^)]*\)$", "", subj.get("title") or "").strip()
+
+
+def clip_is_of_subject(c: dict, subj: dict) -> bool:
+    """True when metadata alone ties the file to this subject (Commons category or subject name)."""
+    name = subject_name(subj)
+    text = f"{c.get('title') or ''} {c.get('description') or ''}".lower()
+    name_in = bool(name) and bool(re.search(r"\b" + re.escape(name.lower()) + r"\b", text))
+    if not name_in:
+        toks = [w for w in _meta_words(name) if len(w) >= 4]
+        name_in = bool(toks) and all(w in text for w in toks)
+    curated = bool(c.get("curated") and subj.get("commons_category"))
+    nasa = c.get("provider") == "nasa" and _space(subj)
+    return bool((curated or nasa) and (name_in or curated))
+
+
+def meta_line_match(c: dict, subj: dict, line: dict) -> dict:
+    """Guarantee, from title/description plus provenance, that the clip shows this subject and this line."""
+    title = c.get("title") or ""
+    text = f"{title} {c.get('description') or ''}"
+    if not clip_is_of_subject(c, subj):
+        return {"ok": False, "reason": "clip is not provenance-tied to the subject", "score": 0.0, "overlap": []}
+    line_words = _meta_words(line.get("show") or "")
+    title_l, text_l = title.lower(), text.lower()
+    title_hit = [w for w in line_words if w in title_l]
+    text_hit = [w for w in line_words if w in text_l]
+    name = subject_name(subj)
+    extra_in_title = [w for w in title_hit if w not in set(_meta_words(name))]
+    # Subject name in the title plus at least one other line word in the title, or two+ title hits.
+    if (name.lower() in title_l and extra_in_title) or len(title_hit) >= 2:
+        return {"ok": True, "reason": "title overlap with subject-provenance clip",
+                "score": round(0.8 + 0.05 * min(len(title_hit), 4), 3), "overlap": title_hit}
+    if line_words and title_hit and len(title_hit) / max(len(line_words), 1) >= 0.5 and extra_in_title:
+        return {"ok": True, "reason": "title overlap with subject-provenance clip",
+                "score": round(0.75 + 0.05 * len(title_hit), 3), "overlap": title_hit}
+    return {"ok": False, "reason": f"weak line/title overlap {text_hit}",
+            "score": round(0.1 * len(text_hit), 3), "overlap": text_hit}
+
+
+def write_script_from_footage(subj: dict, pool: List[dict], log: List[str]) -> Optional[dict]:
+    """Write VO lines from Wikipedia sentences that a provenance-tied clip's title clearly matches."""
+    name = subject_name(subj)
+    source = (subj.get("text") or subj.get("lead") or "")
+    try:
+        raw_sents = fm._sentences(source)
+    except Exception:  # noqa: BLE001
+        raw_sents = re.split(r"(?<=[.!?])\s+", source)
+    provenanced = [c for c in pool if clip_is_of_subject(c, subj)]
+    lines: List[dict] = []
+    used, said = set(), set()
+    for c in provenanced:
+        best = None
+        for raw in raw_sents:
+            try:
+                tightened = fm.tighten(raw) if hasattr(fm, "tighten") else raw
+            except Exception:  # noqa: BLE001
+                tightened = raw
+            say = " ".join(fm.spoken(tightened).split())
+            if not (4 <= len(say.split()) <= 22):
+                continue
+            if not _grounded(say, source):
+                continue
+            rec = {"say": say, "show": say if not hasattr(fm, "tighten") else tightened, "parts": [say],
+                   "visual": say, "queries": [name], "picks": [c]}
+            rec["show"] = tightened if isinstance(tightened, str) else say
+            rec["say"] = fm.spoken(rec["show"])
+            m = meta_line_match(c, subj, rec)
+            if not m["ok"]:
+                continue
+            if best is None or m["score"] > best[0]["score"]:
+                best = (m, rec, c)
+        if not best:
+            continue
+        key = (c.get("provider"), c.get("id"))
+        say_key = best[1]["say"].lower()
+        if key in used or say_key in said:
+            continue
+        if not lines:
+            first = best[1]["show"].lower()
+            if name.lower() not in first and not any(w in first for w in _meta_words(name)):
+                continue
+        lines.append(best[1])
+        used.add(key)
+        said.add(say_key)
+        if len(lines) >= 12:
+            break
+    if len(lines) < MIN_LINES:
+        log.append(f"ai fallback script: only {len(lines)} guaranteed lines for {name}")
+        return None
+    short = name if len(name.split()) <= 3 else " ".join(name.split()[:3])
+    return {"name": name, "short": short, "title_line": f"{name}: Real Footage"[:80],
+            "hook": name.upper()[:24], "lines": lines}
+
+
+def place_by_meta(c: dict, need: float, used: Dict[str, List[float]], workdir: str,
+                  get=fm._get) -> Optional[dict]:
+    """Pick a clean segment of a metadata-guaranteed clip. No vision call."""
+    src = _resolve_url(c, get)
+    if not src:
+        c["_last"] = "no file url"
+        return None
+    if c["kind"] == "image":
+        if c.get("id") in used:
+            c["_last"] = "still already used"
+            return None
+        vis = {"ok": True, "match": None, "on_topic": True, "has_text": False, "type": "photo",
+               "description": "accepted by metadata guarantee (no vision)", "method": "metadata"}
+        return {"cand": c, "start": 0.0, "crop": None, "vision": vis}
+    meta = _probe_video(c, src)
+    if not meta:
+        c["_last"] = "probe failed / too small"
+        return None
+    if meta["duration"] > MAX_VIDEO_SECONDS:
+        c["_bad"] = True
+        c["_last"] = f"too long ({meta['duration']:.0f}s)"
+        return None
+    segs = fm.choose_segments(src, meta["duration"], 3, need + 0.4, max_probes=5, crop=meta.get("crop"))
+    segs = [s for s in segs if all(abs(s[0] - u) > max(6.0, need) for u in used.get(c["id"], []))]
+    if not segs:
+        c["_last"] = "no clean segment (cuts / black / frozen / already used)"
+        return None
+    start = segs[0][0]
+    vis = {"ok": True, "match": None, "on_topic": True, "has_text": False, "type": "footage",
+           "description": "accepted by metadata guarantee (no vision)", "method": "metadata"}
+    return {"cand": c, "start": start, "crop": meta.get("crop"), "vision": vis}
+
+
+def match_lines_meta(subj: dict, script: dict, durations: List[float], pool: List[dict],
+                     workdir: str, log: List[str]) -> List[Optional[dict]]:
+    used: Dict[str, List[float]] = {}
+    uses: Dict[str, int] = {}
+    out: List[Optional[dict]] = []
+    for line, need in zip(script["lines"], durations):
+        ranked = []
+        seen = set()
+        for c in (line.get("picks") or []) + pool:
+            ident = (c.get("provider"), c.get("id"))
+            if ident in seen:
+                continue
+            seen.add(ident)
+            m = meta_line_match(c, subj, line)
+            if m["ok"]:
+                ranked.append((m["score"], c, m))
+        ranked.sort(key=lambda r: -r[0])
+        placed = None
+        for score, c, m in ranked:
+            if uses.get(c["id"], 0) >= 2 or c.get("_bad"):
+                continue
+            got = place_by_meta(c, need, used, workdir)
+            if not got:
+                continue
+            got["meta_score"] = score
+            got["vision"] = {**got["vision"], "reason": m["reason"], "overlap": m.get("overlap")}
+            uses[c["id"]] = uses.get(c["id"], 0) + 1
+            used.setdefault(c["id"], []).append(got["start"])
+            placed = got
+            break
+        if placed is None:
+            log.append(f"ai fallback: no guaranteed clip for line: {(line.get('show') or '')[:80]}")
+        out.append(placed)
+    return out
+
+
+def build_fallback_topic(subj: dict, item: dict, key: str, workdir: str, log: List[str]) -> Optional[dict]:
+    pool = gather_pool(subj, None, log)
+    if len(pool) < 4:
+        log.append(f"ai fallback {subj['title']}: only {len(pool)} licensed candidates")
+        return None
+    pool.sort(key=lambda c: (c["kind"] != "video", not c.get("curated")))
+    script = write_script_from_footage(subj, pool, log)
+    if not script:
+        return None
+    more = gather_pool(subj, script, log)
+    ids = {(c["provider"], c["id"]) for c in pool}
+    pool += [c for c in more if (c["provider"], c["id"]) not in ids]
+    vo = footage_tts.synth_lines([ln["say"] for ln in script["lines"]], workdir)
+    durs = vo["durations"]
+    _, shot_durs, _ = timeline(durs)
+    matches = match_lines_meta(subj, script, [d + 0.2 for d in shot_durs], pool, workdir, log)
+    keep = [i for i, m in enumerate(matches) if m]
+    if len(keep) < MIN_LINES:
+        log.append(f"ai fallback {subj['title']}: only {len(keep)}/{len(matches)} lines have guaranteed footage (need {MIN_LINES})")
+        return None
+    lines = [script["lines"][i] for i in keep]
+    picks = [matches[i] for i in keep]
+    clips = [vo["clips"][i] for i in keep]
+    durs = [durs[i] for i in keep]
+    caps, shot_durs, total = timeline(durs)
+    if total < fm.MIN_SECONDS:
+        log.append(f"ai fallback {subj['title']}: guaranteed lines only fill {total:.1f}s (< {fm.MIN_SECONDS:.0f}s)")
+        return None
+    if total > fm.MAX_SECONDS:
+        while total > fm.MAX_SECONDS and len(lines) > MIN_LINES:
+            lines, picks, clips, durs = lines[:-1], picks[:-1], clips[:-1], durs[:-1]
+            caps, shot_durs, total = timeline(durs)
+    for c, ln in zip(caps, lines):
+        c["text"] = ln["show"]
+    return {"subj": subj, "item": item, "key": key, "script": script, "lines": lines, "picks": picks,
+            "clips": clips, "durs": durs, "caps": caps, "shot_durs": shot_durs, "total": total, "vo": vo,
+            "fallback": True}
+
+
+def _cache_path() -> str:
+    root = os.environ.get("STATE_DIR") or os.environ.get("DATA_DIR") or os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(root, "footage_verified_cache.json")
+
+
+def load_verified_cache() -> List[dict]:
+    path = _cache_path()
+    rows: List[dict] = []
+    try:
+        data = json.loads(open(path, encoding="utf-8").read())
+        rows = data if isinstance(data, list) else list(data.get("subjects") or [])
+    except Exception:  # noqa: BLE001
+        rows = []
+    gen = os.environ.get("STATE_DIR") or os.environ.get("DATA_DIR")
+    if gen:
+        generated = os.path.join(gen, "generated")
+        try:
+            for fn in os.listdir(generated):
+                if not fn.endswith(".sources.json"):
+                    continue
+                try:
+                    blob = json.loads(open(os.path.join(generated, fn), encoding="utf-8").read())
+                except Exception:  # noqa: BLE001
+                    continue
+                info = (blob.get("info") or {}) if isinstance(blob, dict) else {}
+                concept = (blob.get("concept") or {}) if isinstance(blob, dict) else {}
+                matches = info.get("line_matches") or []
+                visioned = [m for m in matches if isinstance((m or {}).get("vision_match"), (int, float))
+                            and (m.get("vision_match") or 0) >= CLIP_MIN_MATCH]
+                if len(visioned) < MIN_LINES:
+                    continue
+                rows.append({"title": concept.get("topic") or info.get("topic_key"),
+                             "url": info.get("wikipedia") or concept.get("wikipedia"),
+                             "from_sources": fn, "vision_verified": True, "lines": visioned})
+        except OSError:
+            pass
+    return rows
+
+
+def remember_verified(subj: dict, script: dict, sources: List[dict], fallback: bool = False) -> None:
+    rec = {"title": subj.get("title"), "url": subj.get("url"), "commons_category": subj.get("commons_category"),
+           "at": datetime.now(timezone.utc).isoformat(), "fallback": fallback,
+           "lines": [{"line": s.get("line"), "provider": s.get("provider"), "title": s.get("title"),
+                      "page": s.get("page"), "vision": s.get("vision")} for s in sources]}
+    rows = []
+    path = _cache_path()
+    try:
+        data = json.loads(open(path, encoding="utf-8").read())
+        rows = data if isinstance(data, list) else list(data.get("subjects") or [])
+    except Exception:  # noqa: BLE001
+        rows = []
+    rows = [r for r in rows if r.get("title") != rec["title"]]
+    rows.append(rec)
+    try:
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(rows[-40:], fh, indent=1, default=str)
+        os.replace(tmp, path)
+    except OSError as exc:
+        logger.warning("could not write verified-subject cache: %s", exc)
+
+
+def library_fallback_subjects(avoid: set, recent: str, log: List[str], get=fm._get, limit: int = 8) -> List[tuple]:
+    import footage_topics
+    out = []
+    for topic in footage_topics.TOPICS:
+        if topic["key"] in avoid or (topic.get("topic") or "").lower() in recent:
+            continue
+        try:
+            subj = fm.wiki_subject(topic["topic"], get) or fm._wiki_page(topic["topic"], get)
+        except Exception as exc:  # noqa: BLE001
+            log.append(f"ai fallback wiki {topic['key']}: {exc}"[:160])
+            continue
+        if not subj:
+            log.append(f"ai fallback skip (no Wikipedia page): {topic['topic']}")
+            continue
+        ok, why = fm.subject_ok(subj)
+        if not ok:
+            log.append(f"ai fallback skip ({why}): {subj['title']}")
+            continue
+        try:
+            cats = _wiki_categories(subj["title"], get)
+        except Exception:  # noqa: BLE001
+            cats = []
+        rel = religious_subject(subj, cats)
+        if rel:
+            log.append(f"subject skip (religious: {rel}): library {topic['key']} -> {subj['title']}"[:260])
+            continue
+        key = "v2-" + re.sub(r"[^a-z0-9]+", "-", topic["key"]).strip("-") + "-fb"
+        if key in avoid or subj["title"].lower() in recent:
+            continue
+        item = {"title": topic["topic"], "views_per_hour": 0, "source": "library"}
+        out.append((subj, item, key))
+        if len(out) >= limit:
+            break
+    return out
+
+
+def cached_fallback_subjects(avoid: set, recent: str, log: List[str], get=fm._get) -> List[tuple]:
+    out = []
+    seen = set()
+    for rec in load_verified_cache():
+        title = (rec.get("title") or "").strip()
+        if not title or title in seen or title.lower() in recent:
+            continue
+        if not rec.get("vision_verified") and rec.get("fallback"):
+            continue  # don't chain metadata-only results as "already verified"
+        try:
+            subj = fm._wiki_page(title, get)
+        except Exception as exc:  # noqa: BLE001
+            log.append(f"ai fallback cache wiki {title}: {exc}"[:160])
+            continue
+        if not subj:
+            continue
+        ok, why = fm.subject_ok(subj)
+        if not ok:
+            continue
+        try:
+            cats = _wiki_categories(subj["title"], get)
+        except Exception:  # noqa: BLE001
+            cats = []
+        rel = religious_subject(subj, cats)
+        if rel:
+            log.append(f"subject skip (religious: {rel}): cache {title} -> {subj['title']}"[:260])
+            continue
+        key = "v2-" + re.sub(r"[^a-z0-9]+", "-", subj["title"].lower()).strip("-")[:48]
+        if key in avoid:
+            continue
+        seen.add(title)
+        item = {"title": title, "views_per_hour": 0, "source": "verified_cache"}
+        out.append((subj, item, key))
+    return out
+
+
+def run_fallback(avoid: set, recent: str, workdir: str, log: List[str]) -> Optional[dict]:
+    """Build one topic without Cloudflare. Returns None (and logs) rather than a mismatched video."""
+    if "ai fallback (cf 429)" not in log:
+        log.append("ai fallback (cf 429)")
+    candidates = cached_fallback_subjects(avoid, recent, log) + library_fallback_subjects(avoid, recent, log)
+    if not candidates:
+        log.append("ai fallback: no library or previously verified subjects available")
+        return None
+    for subj, item, key in candidates:
+        try:
+            built = build_fallback_topic(subj, item, key, workdir, log)
+        except Exception as exc:  # noqa: BLE001
+            log.append(f"ai fallback topic {subj.get('title')} failed: {exc}"[:240])
+            built = None
+        if built:
+            log.append(f"ai fallback: built {subj['title']} with {len(built['lines'])} metadata-guaranteed lines")
+            return built
+    return None

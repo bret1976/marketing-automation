@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 
 import autopilot_watch as aw
 
-HOURS = "15,0"  # 8 AM / 5 PM PT
+HOURS = "8,17"  # 8 AM / 5 PM PT (local)
 
 
 def _now(s):
@@ -29,25 +29,25 @@ def _env(monkeypatch, tmp_path):
 
 
 def test_parse_hours_shapes():
-    assert aw.parse_hours("15,0") == [15, 0]
-    assert aw.parse_hours("[15, 0, 15]") == [15, 0]
+    assert aw.parse_hours("8,17") == [8, 17]
+    assert aw.parse_hours("[8, 17, 8]") == [8, 17]
     assert aw.parse_hours(9) == [9]
     assert aw.parse_hours("x,25") == [1]
     assert aw.parse_hours("") == []
 
 
 def test_expected_slot_ids_match_overlay_format():
-    slots = aw.expected_slots(_now("2026-10-07T13:00:00"), [15, 0], 48)
-    assert [s["slot"] for s in slots] == ["2026-10-05-15", "2026-10-06-0", "2026-10-06-15", "2026-10-07-0"]
+    slots = aw.expected_slots(_now("2026-10-07T13:00:00"), [8, 17], 48)
+    assert [s["slot"] for s in slots] == ["2026-10-05-8", "2026-10-05-17", "2026-10-06-8", "2026-10-06-17"]
 
 
 def test_all_ok(tmp_path, monkeypatch):
     _env(monkeypatch, tmp_path)
-    _ledger(tmp_path, ["2026-10-05-15", "2026-10-06-0", "2026-10-06-15", "2026-10-07-0"])
+    _ledger(tmp_path, ["2026-10-05-8", "2026-10-05-17", "2026-10-06-8", "2026-10-06-17"])
     r = aw.report(settings={"autonomous_posting": True}, posts=[], now=_now("2026-10-07T13:00:00"), state_dir=tmp_path)
     assert r["status"] == "ok"
     assert r["consecutive_missed"] == 0
-    assert r["last_success_slot"] == "2026-10-07-0"
+    assert r["last_success_slot"] == "2026-10-06-17"
     assert r["schedule"]["next_slot_utc"] == "2026-10-07T15:00:00Z"
     assert r["read_only"] is True
 
@@ -55,32 +55,32 @@ def test_all_ok(tmp_path, monkeypatch):
 def test_oct5_outage_is_down(tmp_path, monkeypatch):
     """Replays the real 2026-10-05 outage: three slots in a row with no success."""
     _env(monkeypatch, tmp_path)
-    _ledger(tmp_path, ["2026-10-04-0", "2026-10-04-15", "2026-10-05-0"], last_at="2026-10-05T00:00:54Z")
+    _ledger(tmp_path, ["2026-10-03-17", "2026-10-04-8", "2026-10-04-17"], last_at="2026-10-05T00:00:54Z")
     r = aw.report(settings={"autonomous_posting": True}, posts=[], now=_now("2026-10-06T18:00:00"), state_dir=tmp_path)
     assert r["status"] == "down"
     assert r["consecutive_missed"] == 3
-    assert r["missed_slots"] == ["2026-10-05-15", "2026-10-06-0", "2026-10-06-15"]
+    assert r["missed_slots"] == ["2026-10-05-8", "2026-10-05-17", "2026-10-06-8"]
     assert r["last_success_age_hours"] > 40
 
 
 def test_single_miss_is_late_and_current_slot_in_grace_is_due(tmp_path, monkeypatch):
     _env(monkeypatch, tmp_path)
-    _ledger(tmp_path, ["2026-10-06-15"])
-    # 2026-10-07-0 missed; 2026-10-07-15 started 20 min ago (inside grace)
+    _ledger(tmp_path, ["2026-10-06-8"])
+    # 2026-10-06-17 (5 PM PT Oct 6) missed; 2026-10-07-8 started 20 min ago (inside grace)
     r = aw.report(settings={"autonomous_posting": True}, posts=[], now=_now("2026-10-07T15:20:00"), state_dir=tmp_path)
     states = {s["slot"]: s["state"] for s in r["slots"]}
-    assert states["2026-10-07-15"] == "due"
-    assert states["2026-10-07-0"] == "missed"
+    assert states["2026-10-07-8"] == "due"
+    assert states["2026-10-06-17"] == "missed"
     assert r["status"] == "late"
     assert r["consecutive_missed"] == 1
 
 
 def test_attempted_slot_shows_running(tmp_path, monkeypatch):
     _env(monkeypatch, tmp_path)
-    _ledger(tmp_path, ["2026-10-07-0"])
-    aw.observe("Autonomous autoposting slot 2026-10-07-15 reached. Initiating pipeline...")
+    _ledger(tmp_path, ["2026-10-06-17"])
+    aw.observe("Autonomous autoposting slot 2026-10-07-8 reached. Initiating pipeline...")
     r = aw.report(settings={"autonomous_posting": True}, posts=[], now=_now("2026-10-07T15:05:00"), state_dir=tmp_path)
-    assert r["slots"][-1] == {**r["slots"][-1], "slot": "2026-10-07-15", "state": "running"}
+    assert r["slots"][-1] == {**r["slots"][-1], "slot": "2026-10-07-8", "state": "running"}
     assert r["status"] == "ok"
 
 
@@ -117,7 +117,7 @@ def test_redacts_secrets():
 
 def test_log_tap_and_post_scan_merge(tmp_path, monkeypatch):
     _env(monkeypatch, tmp_path)
-    _ledger(tmp_path, ["2026-10-07-0"])
+    _ledger(tmp_path, ["2026-10-06-17"])
     assert aw.install() is True
     logging.getLogger("main").warning("Google Search grounding failed: 402 RESOURCE_EXHAUSTED prepay credits are depleted")
     # Relative dates so the 72h lookback window keeps covering the recent row
@@ -178,17 +178,17 @@ def test_oct22_slot_that_ran_and_gave_up_is_failed_not_missed(tmp_path, monkeypa
     """Replays 2026-10-23-0 (Oct 22 5 PM PT): it ran twice and gave up on a retired Veo model.
     The watch used to call that 'missed' (never ran); after a restart the log tap is empty too."""
     _env(monkeypatch, tmp_path)
-    _ledger(tmp_path, ["2026-10-20-15", "2026-10-21-0", "2026-10-21-15", "2026-10-22-0", "2026-10-22-15"],
+    _ledger(tmp_path, ["2026-10-20-8", "2026-10-20-17", "2026-10-21-8", "2026-10-21-17", "2026-10-22-8"],
             last_at="2026-10-22T15:03:00Z")
     (tmp_path / "growth_v2_state.json").write_text(json.dumps({"slots": {
-        "2026-10-23-0": {"attempts": 2, "status": "gave_up", "last_error": OCT22_404}}}))
+        "2026-10-22-17": {"attempts": 2, "status": "gave_up", "last_error": OCT22_404}}}))
     r = aw.report(settings={"autonomous_posting": True}, posts=[], now=_now("2026-10-23T13:55:00"), state_dir=tmp_path)
-    row = {s["slot"]: s for s in r["slots"]}["2026-10-23-0"]
+    row = {s["slot"]: s for s in r["slots"]}["2026-10-22-17"]
     assert row["state"] == "failed"
     assert row["attempts"] == 2
     assert "no longer available" in row["last_error"]
-    assert r["failed_slots"] == ["2026-10-23-0"]
-    assert r["missed_slots"] == ["2026-10-23-0"]  # still counts toward late/down
+    assert r["failed_slots"] == ["2026-10-22-17"]
+    assert r["missed_slots"] == ["2026-10-22-17"]  # still counts toward late/down
     assert r["status"] == "late" and r["consecutive_missed"] == 1
 
 

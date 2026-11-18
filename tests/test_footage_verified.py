@@ -90,10 +90,25 @@ def test_tts_rejects_blended_voice(monkeypatch):
     assert footage_tts.voice() == footage_tts.DEFAULT_VOICE
 
 
-def test_produce_without_cloudflare_refuses(monkeypatch, tmp_path):
+def test_produce_without_cloudflare_falls_back_and_skips_without_guaranteed_clips(monkeypatch, tmp_path):
     monkeypatch.setattr(cf_ai, "ready", lambda: False)
-    with pytest.raises(RuntimeError):
+    monkeypatch.setattr(fv, "run_fallback", lambda *a, **k: None)
+    with pytest.raises(RuntimeError, match="ai fallback"):
         fv.produce(str(tmp_path), viral={"top": []})
+
+
+def test_cfquota_during_resolve_switches_to_fallback(monkeypatch, tmp_path):
+    monkeypatch.setattr(cf_ai, "ready", lambda: True)
+    monkeypatch.setattr(cf_ai, "reset_usage", lambda: None)
+
+    def boom(*_a, **_k):
+        raise cf_ai.CFQuota("glm HTTP 429: daily free allocation of 10,000 neurons")
+
+    monkeypatch.setattr(fv, "resolve_trend", boom)
+    monkeypatch.setattr(fv, "run_fallback", lambda *a, **k: None)
+    monkeypatch.setenv("FOOTAGE_TOPIC_POOL", "all")
+    with pytest.raises(RuntimeError, match=r"ai fallback \(cf 429\)"):
+        fv.produce(str(tmp_path), viral={"top": [{"title": "Apollo 11 launch documentary", "views_per_hour": 10}]})
 
 
 def test_produce_raises_instead_of_wrong_video(monkeypatch, tmp_path):
@@ -171,3 +186,68 @@ def test_trend_skip_reason_names_the_real_reason(title, label):
 def test_ai_short_films_are_not_prefiltered():
     assert fv.trend_skip_reason("She Asked How Much Dinner Cost... | AI Short Film") is None
     assert fv.trend_skip_reason("TITANIC | AI Short Film made with Veo 3") is None
+
+
+def test_meta_line_match_accepts_category_clip_with_title_overlap():
+    subj = {"title": "Apollo 11", "commons_category": "Apollo 11", "description": "first crewed moon landing"}
+    cand = {"title": "Apollo 11 launch from Kennedy Space Center", "description": "Saturn V lifts off",
+            "provider": "wikimedia_commons", "id": "File:A.ogv", "curated": True, "kind": "video"}
+    line = {"show": "Apollo 11 lifts off from Kennedy Space Center."}
+    got = fv.meta_line_match(cand, subj, line)
+    assert got["ok"] is True
+    assert "kennedy" in got["overlap"] or "apollo" in got["overlap"] or "center" in got["overlap"]
+
+
+def test_meta_line_match_rejects_unrelated_or_uncurated_clip():
+    subj = {"title": "Apollo 11", "commons_category": "Apollo 11", "description": ""}
+    unrelated = {"title": "Tekken 8 tournament finals", "description": "a talk show about a fighting game",
+                 "provider": "wikimedia_commons", "id": "File:T.webm", "curated": False, "kind": "video"}
+    line = {"show": "Apollo 11 lifts off from Kennedy Space Center."}
+    assert fv.meta_line_match(unrelated, subj, line)["ok"] is False
+    # curated but the title does not overlap the line
+    weak = {"title": "Apollo 11 patch artwork", "description": "mission insignia",
+            "provider": "wikimedia_commons", "id": "File:P.svg", "curated": True, "kind": "image"}
+    assert fv.meta_line_match(weak, subj, line)["ok"] is False
+
+
+def test_library_fallback_skips_religious_subjects(monkeypatch):
+    log = []
+    temple = {"title": "Kaaba", "description": "Building at the center of Masjid al-Haram",
+              "lead": "The Kaaba is a stone building.", "text": "", "commons_category": "Kaaba",
+              "url": "https://en.wikipedia.org/wiki/Kaaba"}
+    monkeypatch.setattr(fv.fm, "wiki_subject", lambda *a, **k: temple)
+    monkeypatch.setattr(fv.fm, "_wiki_page", lambda *a, **k: temple)
+    monkeypatch.setattr(fv.fm, "subject_ok", lambda subj: (True, ""))
+    monkeypatch.setattr(fv, "_wiki_categories", lambda *a, **k: KAABA_CATS)
+    monkeypatch.setattr("footage_topics.TOPICS", [{"key": "kaaba", "topic": "Kaaba"}], raising=False)
+    import footage_topics
+    monkeypatch.setattr(footage_topics, "TOPICS", [{"key": "kaaba", "topic": "Kaaba"}])
+    out = fv.library_fallback_subjects(set(), "", log)
+    assert out == []
+    assert any("religious" in line for line in log)
+
+
+def test_write_script_from_footage_requires_guaranteed_lines():
+    subj = {"title": "Apollo 11", "commons_category": "Apollo 11",
+            "text": "Apollo 11 was the American spaceflight that first landed humans on the Moon. "
+                    "The Apollo 11 launch took place at Kennedy Space Center. "
+                    "Neil Armstrong stepped onto the lunar surface. "
+                    "The Saturn V rocket carried the crew into Earth orbit. "
+                    "A camera recorded the Apollo 11 landing on the Moon. "
+                    "Mission control in Houston watched the Apollo 11 landing. "
+                    "The crew splashed down in the Pacific Ocean after Apollo 11. "
+                    "Apollo 11 returned the first Moon rocks to Earth. "
+                    "The command module Columbia carried the Apollo 11 crew home."}
+    pool = [
+        {"title": "Apollo 11 launch at Kennedy Space Center", "description": "Saturn V liftoff",
+         "provider": "wikimedia_commons", "id": "File:L.ogv", "curated": True, "kind": "video"},
+        {"title": "Apollo 11 landing on the Moon", "description": "lunar module descent",
+         "provider": "wikimedia_commons", "id": "File:M.ogv", "curated": True, "kind": "video"},
+        {"title": "Unrelated cooking video", "description": "pasta",
+         "provider": "wikimedia_commons", "id": "File:Z.ogv", "curated": False, "kind": "video"},
+    ]
+    log = []
+    script = fv.write_script_from_footage(subj, pool, log)
+    # Only two clips can be guaranteed, MIN_LINES is 6, so the script must be refused.
+    assert script is None
+    assert any("guaranteed lines" in line for line in log)

@@ -57,7 +57,7 @@ Navigate to your web browser:
 
 ## Autopilot Watch (autopilot-watch-v1, backend-only)
 
-Read-only dead-man's switch for the scheduled Autopilot slots (`AUTONOMOUS_HOURS`, UTC).
+Read-only dead-man's switch for the scheduled Autopilot slots (`AUTONOMOUS_HOURS`, local hours in America/Los_Angeles; default 8 AM and 5 PM PT).
 It compares expected slots against the slot ledger the live overlay writes
 (`STATE_DIR/autonomous_slot.json`) and reports `ok` / `late` (1 missed) / `down` (2+ missed in a row),
 plus classified upstream issues (Gemini prepaid credits empty, YouTube bot wall, TikTok discovery empty,

@@ -31,6 +31,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
+import slot_schedule
+
 PACK = "autopilot-watch-v1"
 DEFAULT_GRACE_MIN = 75          # overlay retries inside the slot hour; past this the slot is gone
 DEFAULT_LOOKBACK_HOURS = 72
@@ -151,35 +153,13 @@ def _drop_stale_gemini_writer_issues(issues: List[Dict[str, Any]]) -> List[Dict[
 # --------------------------------------------------------------------------
 
 def parse_hours(raw: Any) -> List[int]:
-    """Same accepted shapes as the overlay: JSON list, '15,0', or a single int."""
-    if raw is None or raw == "":
-        return []
-    if isinstance(raw, (list, tuple)):
-        values = list(raw)
-    else:
-        text = str(raw).strip()
-        try:
-            loaded = json.loads(text)
-            values = loaded if isinstance(loaded, list) else [loaded]
-        except Exception:
-            values = [p.strip() for p in text.split(",") if p.strip()]
-    out: List[int] = []
-    for value in values:
-        try:
-            hour = int(value) % 24
-        except (TypeError, ValueError):
-            continue
-        if hour not in out:
-            out.append(hour)
-    return out
+    """Same accepted shapes as Growth V2: JSON list, '8,17', or a single int."""
+    return slot_schedule.parse_hours(raw)
 
 
 def scheduled_hours(settings: Optional[dict] = None) -> List[int]:
-    settings = settings or {}
-    hours = parse_hours(os.environ.get("AUTONOMOUS_HOURS") or settings.get("autonomous_hours"))
-    if not hours:
-        hours = parse_hours(os.environ.get("AUTONOMOUS_HOUR") or settings.get("autonomous_hour") or 9)
-    return sorted(hours)
+    """Local hours in AUTONOMOUS_TZ (default America/Los_Angeles). Default 8 and 17."""
+    return slot_schedule.scheduled_hours(settings)
 
 
 def autoposting_on(settings: Optional[dict] = None) -> bool:
@@ -194,34 +174,13 @@ def autoposting_on(settings: Optional[dict] = None) -> bool:
 def expected_slots(now: datetime, hours: Iterable[int], lookback_hours: int) -> List[Dict[str, Any]]:
     """Slots whose start time is within (now - lookback, now], oldest first.
 
-    Slot ids match the overlay: f"{date}-{hour}" in container time (UTC on Railway).
+    Slot ids are `{local_date}-{local_hour}` in America/Los_Angeles (see slot_schedule).
     """
-    now = now.astimezone(timezone.utc)
-    start = now - timedelta(hours=lookback_hours)
-    hours = sorted(set(int(h) % 24 for h in hours))
-    out = []
-    day = start.date()
-    while day <= now.date():
-        for hour in hours:
-            at = datetime(day.year, day.month, day.day, hour, tzinfo=timezone.utc)
-            if start < at <= now:
-                out.append({"slot": f"{day.isoformat()}-{hour}", "at": at})
-        day += timedelta(days=1)
-    return out
+    return slot_schedule.expected_slots(now, hours, lookback_hours)
 
 
 def next_slot(now: datetime, hours: Iterable[int]) -> Optional[datetime]:
-    hours = sorted(set(int(h) % 24 for h in hours))
-    if not hours:
-        return None
-    now = now.astimezone(timezone.utc)
-    for offset in range(0, 3):
-        day = (now + timedelta(days=offset)).date()
-        for hour in hours:
-            at = datetime(day.year, day.month, day.day, hour, tzinfo=timezone.utc)
-            if at > now:
-                return at
-    return None
+    return slot_schedule.next_slot(now, hours)
 
 
 def load_slot_ledger(state_dir: Optional[Path] = None) -> dict:
@@ -489,7 +448,9 @@ def report(settings: Optional[dict] = None, posts: Optional[List[dict]] = None,
         "enabled": True,
         "checked_at_utc": _iso(now),
         "status": slots["status"],
-        "schedule": {"hours_utc": hours, "grace_min": grace, "lookback_hours": lookback,
+        "schedule": {"hours_local": hours, "timezone": slot_schedule.slot_tz_name(),
+                     "hours_utc": slot_schedule.utc_hours_today(now, hours),
+                     "grace_min": grace, "lookback_hours": lookback,
                      "next_slot_utc": _iso(nxt), "next_slot_pt": _pt(nxt) if nxt else None,
                      "autoposting_on": autoposting_on(settings)},
         "last_success_slot": ledger.get("last_success_slot"),

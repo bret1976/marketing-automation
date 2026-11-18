@@ -37,14 +37,15 @@ def test_hashtags_normalized_and_brand_removed():
 
 
 def test_due_slot_stops_after_max_attempts(monkeypatch, tmp_path):
-    monkeypatch.setattr(g, "slot_hours", lambda s: [15])
+    monkeypatch.setattr(g, "slot_hours", lambda s: [8, 17])
     monkeypatch.setattr(g, "slot_succeeded", lambda slot: False)
-    now = datetime(2026, 10, 14, 15, 5)
-    slot = "2026-10-14-15"
+    # 15:05 UTC Oct 14 2026 (PDT) = 8:05 AM PT
+    now = datetime(2026, 10, 14, 15, 5, tzinfo=timezone.utc)
+    slot = "2026-10-14-8"
     assert g.due_slot(now, {}, {"slots": {}}) == slot
     assert g.due_slot(now, {}, {"slots": {slot: {"attempts": 2}}}) is None
     assert g.due_slot(now, {}, {"slots": {slot: {"status": "gave_up"}}}) is None
-    assert g.due_slot(datetime(2026, 10, 14, 16, 5), {}, {"slots": {}}) is None
+    assert g.due_slot(datetime(2026, 10, 14, 16, 5, tzinfo=timezone.utc), {}, {"slots": {}}) is None
 
 
 def test_legacy_cockpit_import_is_stubbed():

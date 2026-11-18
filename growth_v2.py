@@ -42,6 +42,7 @@ import textwrap
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
+import slot_schedule
 from typing import Any, Dict, List, Optional, Tuple
 
 import footage_mode
@@ -1672,35 +1673,12 @@ async def run_autopilot(settings: dict, dry_run: bool = False) -> dict:
 # --------------------------------------------------------------------------
 
 def _parse_hours(raw: Any) -> List[int]:
-    if raw in (None, ""):
-        return []
-    if isinstance(raw, (list, tuple)):
-        values = list(raw)
-    else:
-        try:
-            loaded = json.loads(str(raw))
-            values = loaded if isinstance(loaded, list) else [loaded]
-        except Exception:
-            values = [p for p in str(raw).split(",") if p.strip()]
-    out: List[int] = []
-    for v in values:
-        try:
-            h = int(str(v).strip()) % 24
-        except ValueError:
-            continue
-        if h not in out:
-            out.append(h)
-    return out
+    return slot_schedule.parse_hours(raw)
 
 
 def slot_hours(settings: dict) -> List[int]:
-    hours = _parse_hours(os.environ.get("AUTONOMOUS_HOURS") or settings.get("autonomous_hours"))
-    if not hours:
-        try:
-            hours = [int(os.environ.get("AUTONOMOUS_HOUR") or settings.get("autonomous_hour", 9)) % 24]
-        except ValueError:
-            hours = [9]
-    return hours
+    """Local hours in America/Los_Angeles (8 and 17 by default). See slot_schedule."""
+    return slot_schedule.scheduled_hours(settings)
 
 
 def _ledger_path() -> str:
@@ -1736,9 +1714,9 @@ def slot_succeeded(slot: str) -> bool:
 
 
 def due_slot(now: datetime, settings: dict, state: dict) -> Optional[str]:
-    if now.hour not in slot_hours(settings):
+    slot = slot_schedule.due_slot_id(now, slot_hours(settings))
+    if not slot:
         return None
-    slot = f"{now.date().isoformat()}-{now.hour}"
     if slot_succeeded(slot):
         return None
     info = state.get("slots", {}).get(slot) or {}
@@ -2202,7 +2180,9 @@ def status_payload(settings: Optional[dict] = None) -> dict:
         "video_engines": engine_ladder(), "autopilot_format": stitched_shorts.autopilot_format(settings),
         "transform_fallback": transform_fallback_enabled(), "max_slot_attempts": max_slot_attempts(),
         "legacy_boot_patches_skipped": skipped_legacy_modules(), "legacy_patches_allowed": legacy_patches_allowed(),
-        "slot_hours_server": slot_hours(settings), "platforms": platforms, "platform_notes": notes,
+        "slot_hours_local": slot_hours(settings), "slot_tz": slot_schedule.slot_tz_name(),
+        "slot_hours_server": slot_schedule.utc_hours_today(hours=slot_hours(settings)),
+        "platforms": platforms, "platform_notes": notes,
         "x_quota_until": state.get("x_quota_until"),
         "recent_slots": {k: slots[k] for k in sorted(slots)[-10:]},
         "alerts": state.get("alerts", [])[-15:],

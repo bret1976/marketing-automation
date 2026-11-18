@@ -251,3 +251,16 @@ def test_write_script_from_footage_requires_guaranteed_lines():
     # Only two clips can be guaranteed, MIN_LINES is 6, so the script must be refused.
     assert script is None
     assert any("guaranteed lines" in line for line in log)
+
+
+def test_place_by_meta_downloads_still_before_return(monkeypatch, tmp_path):
+    cand = {"title": "Apollo 11 launch photo", "description": "", "provider": "wikimedia_commons",
+            "id": "File:Apollo11.jpg", "curated": True, "kind": "image"}
+    class _R:
+        content = b"fakepng"
+    monkeypatch.setattr(fv.fm, "_get", lambda *a, **k: _R())
+    monkeypatch.setattr(fv, "_resolve_url", lambda c, get=None: None)
+    got = fv.place_by_meta(cand, 3.0, {}, str(tmp_path))
+    assert got is not None
+    assert cand["_img"] == b"fakepng"
+    assert got["vision"]["method"] == "metadata"

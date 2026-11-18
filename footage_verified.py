@@ -41,7 +41,7 @@ import footage_tts
 
 logger = logging.getLogger("footage_verified")
 MARKER = "FOOTAGE_VERIFIED"
-VERSION = "2026-11-17.4"
+VERSION = "2026-11-17.5"
 
 # Set only by a dry-run to exercise the no-Cloudflare path; the scheduler never sets this.
 _force_fallback = False
@@ -870,6 +870,13 @@ _GENERIC_SUBJECT = {
     "center", "centre", "university", "museum", "building", "portrait", "picture", "view", "near",
     "several", "many", "early", "later", "great", "south", "north", "east", "west", "northern",
     "southern", "eastern", "western",
+    # common English that must never be the proof a photo depicts a line
+    "either", "however", "generally", "reference", "class", "terms", "often", "interchangeably",
+    "such", "feature", "features", "extensive", "examples", "example", "earliest", "completed",
+    "development", "practices", "practice", "conditions", "condition", "constrained",
+    "agricultural", "structures", "structure", "buildings", "both", "used", "high", "tech",
+    "production", "facilities", "facility", "commercial", "large", "cultivating", "cultivation",
+    "plants", "plant", "refer", "before", "weather", "house", "houses", "placed", "grow",
 }
 
 _PLACE_WORDS = {
@@ -878,6 +885,9 @@ _PLACE_WORDS = {
     "harbor", "port", "city", "town", "village", "county", "province", "district", "republic",
     "kingdom", "empire", "university", "museum", "church", "cathedral", "palace", "street", "road",
     "avenue", "station", "stations", "airport", "base", "camp", "field", "space",
+    "garden", "gardens", "conservatory", "greenhouse", "greenhouses", "glasshouse", "hothouse",
+    "orchard", "vineyard", "plantation", "laboratory", "observatory", "library", "hospital",
+    "temple", "abbey", "chapel", "square", "plaza", "farm", "farmhouse",
 }
 
 _ORG_WORDS = {
@@ -972,6 +982,8 @@ def _dates(text: str) -> List[tuple]:
 
 def _date_in_text(token: tuple, text: str) -> bool:
     have = _dates(text)
+    if token[0] == "y":
+        return bool(re.search(rf"\b{token[1]}\b", text or ""))
     if token[0] == "t":
         return any(h[0] == "t" and h[1] == token[1] and h[2] == token[2] for h in have)
     y, mo, d = token[1], token[2], token[3]
@@ -1027,7 +1039,8 @@ def _name_in_text(name: str, text: str) -> bool:
     if len(toks) >= 2 and len(compact) >= 3 and compact in blob.replace(" ", ""):
         return True  # fdr, jfk
     last = toks[-1]
-    if len(last) >= 5 and last not in _GENERIC_SUBJECT and re.search(rf"\b{re.escape(last)}\b", blob):
+    if (len(last) >= 5 and last not in _GENERIC_SUBJECT and last not in _PLACE_WORDS
+            and last not in _ORG_WORDS and re.search(rf"\b{re.escape(last)}\b", blob)):
         # last name only when the first name is absent is still a mention of that person
         return True
     for tok in toks:
@@ -1035,6 +1048,35 @@ def _name_in_text(name: str, text: str) -> bool:
             if re.search(rf"\b{re.escape(alias)}\b", blob):
                 return True
     return False
+
+
+def _place_names(text: str) -> List[str]:
+    """Capitalized multi-word place or institution names (Belfast Botanic Gardens, Chelsea Physic Garden)."""
+    pat = re.compile(
+        r"\b([A-Z][a-z]+(?:\s+(?:of|the|and|de|da|di|du|van|von)\s+[A-Z][a-z]+|\s+[A-Z][a-z]+)+)\b"
+    )
+    out = []
+    for m in pat.finditer(text or ""):
+        name = re.sub(r"\s+", " ", m.group(1)).strip()
+        toks = [w.lower() for w in name.split() if w.lower() not in {"of", "the", "and", "de", "da", "di", "du", "van", "von"}]
+        if any(w in _PLACE_WORDS for w in toks):
+            out.append(name)
+    return out
+
+
+def _place_in_text(name: str, text: str) -> bool:
+    """A place matches only when its distinctive tokens appear, not merely 'garden' or 'park'."""
+    blob = " " + re.sub(r"[^a-z0-9]+", " ", (text or "").lower()) + " "
+    toks = [w.lower() for w in name.split() if w.lower() not in {"of", "the", "and", "de", "da", "di", "du", "van", "von"}]
+    if not toks:
+        return False
+    phrase = " ".join(toks)
+    if phrase and phrase in blob:
+        return True
+    core = [w for w in toks if w not in _PLACE_WORDS and w not in _META_STOP and w not in _GENERIC_SUBJECT]
+    if not core:
+        core = toks
+    return all(re.search(rf"\b{re.escape(w)}\b", blob) for w in core)
 
 
 def line_specific_terms(line: dict, subj: dict, extra_generic: Optional[set] = None) -> dict:
@@ -1046,16 +1088,28 @@ def line_specific_terms(line: dict, subj: dict, extra_generic: Optional[set] = N
         if not set(_meta_words(name)) - generic or _name_in_text(name, subject_name(subj)):
             continue
         people.append(name)
-    subj_dates = set(_dates(subject_name(subj) + " " + (subj.get("lead") or "")[:400] + " " + (subj.get("description") or "")[:200]))
+    places = []
+    for name in _place_names(show):
+        if _place_in_text(name, subject_name(subj)) or not set(_meta_words(name)) - generic:
+            continue
+        places.append(name)
+    subj_blob = subject_name(subj) + " " + (subj.get("lead") or "")[:400] + " " + (subj.get("description") or "")[:200]
+    subj_dates = set(_dates(subj_blob))
+    subj_years = {d[1] for d in subj_dates if d[0] == "d"} | {int(y) for y in re.findall(r"\b(?:1[0-9]|20)\d{2}\b", subj_blob)}
     dates = [d for d in _dates(show) if d not in subj_dates]
+    for y in re.findall(r"\b((?:1[0-9]|20)\d{2})\b", show):
+        year = int(y)
+        if year not in subj_years and ("y", year) not in dates:
+            dates.append(("y", year))
+    named = people + places
     words = []
     for w in _meta_words(show):
         if w in generic or w in _META_STOP or w in _MONTHS:
             continue
-        if any(w in n.lower() for n in people):
+        if any(w in n.lower() for n in named):
             continue
         words.append(w)
-    return {"people": people, "dates": dates, "words": words}
+    return {"people": people, "places": places, "dates": dates, "words": words}
 
 
 def clip_is_of_subject(c: dict, subj: dict) -> bool:
@@ -1081,30 +1135,37 @@ def meta_line_match(c: dict, subj: dict, line: dict, extra_generic: Optional[set
     if missing_people:
         return {"ok": False, "reason": "missing line-specific name: " + ", ".join(missing_people),
                 "score": 0.0, "overlap": []}
+    missing_places = [n for n in terms.get("places") or [] if not _place_in_text(n, text)]
+    if missing_places:
+        return {"ok": False, "reason": "missing line-specific place: " + ", ".join(missing_places),
+                "score": 0.0, "overlap": []}
     missing_dates = [d for d in terms["dates"] if not _date_in_text(d, text)]
     if missing_dates:
         return {"ok": False, "reason": "missing line-specific date", "score": 0.0, "overlap": []}
     word_hits = [w for w in terms["words"] if re.search(r"\b" + re.escape(w) + r"\b", text.lower())]
     person_hits = [n for n in terms["people"] if _name_in_text(n, text)]
+    place_hits = [n for n in terms.get("places") or [] if _place_in_text(n, text)]
     date_hits = [d for d in terms["dates"] if _date_in_text(d, text)]
     # Subject-category overlap alone is not enough: need the line's own entities.
-    if person_hits or date_hits:
-        if word_hits or person_hits:
-            overlap = [n.lower() for n in person_hits] + word_hits
-            score = 0.9 + 0.02 * min(len(person_hits) + len(date_hits) + len(word_hits), 5)
+    if person_hits or place_hits or date_hits:
+        if word_hits or person_hits or place_hits:
+            overlap = [n.lower() for n in person_hits + place_hits] + word_hits
+            score = 0.9 + 0.02 * min(len(person_hits) + len(place_hits) + len(date_hits) + len(word_hits), 5)
             return {"ok": True, "reason": "line-specific entity in title/description",
                     "score": round(score, 3), "overlap": overlap}
         return {"ok": False, "reason": "name/date present but no line-specific detail",
-                "score": 0.2, "overlap": [n.lower() for n in person_hits]}
+                "score": 0.2, "overlap": [n.lower() for n in person_hits + place_hits]}
     if len(word_hits) >= 2:
         return {"ok": True, "reason": "line-specific terms in title/description",
                 "score": round(0.8 + 0.04 * min(len(word_hits), 5), 3), "overlap": word_hits}
-    if len(word_hits) == 1 and (len(word_hits[0]) >= 6 or word_hits[0] not in _GENERIC_SUBJECT):
-        # A single highly specific noun (radar, splashdown, heliopause) can carry the line.
-        if len(word_hits[0]) >= 6:
+    if len(word_hits) == 1:
+        # A single specific term may carry the line only if it appears in the title, not a long description.
+        w = word_hits[0]
+        title = (c.get("title") or "").lower()
+        if w in title and w not in _GENERIC_SUBJECT and (len(w) >= 7 or "-" in w):
             return {"ok": True, "reason": "line-specific term in title/description",
                     "score": 0.76, "overlap": word_hits}
-    reason_bits = terms["words"][:6] or terms["people"] or ["(none)"]
+    reason_bits = terms["words"][:6] or terms["people"] or terms.get("places") or ["(none)"]
     return {"ok": False, "reason": "no line-specific terms in title/description (need %s)" % ", ".join(map(str, reason_bits)),
             "score": round(0.08 * len(word_hits), 3), "overlap": word_hits}
 

@@ -195,7 +195,7 @@ def test_meta_line_match_accepts_category_clip_with_title_overlap():
     line = {"show": "Apollo 11 lifts off from Kennedy Space Center."}
     got = fv.meta_line_match(cand, subj, line)
     assert got["ok"] is True
-    assert "kennedy" in got["overlap"] or "apollo" in got["overlap"] or "center" in got["overlap"]
+    assert any("kennedy" in x or "apollo" in x or "lifts" in x for x in got["overlap"])
 
 
 def test_meta_line_match_rejects_unrelated_or_uncurated_clip():
@@ -413,3 +413,62 @@ def test_run_fallback_skips_slot_when_no_topic_has_enough_lines(monkeypatch):
     assert fv.run_fallback(set(), "", "/tmp", log) is None
     assert any("ai fallback (cf 429)" == line for line in log)
     assert any("skipping slot" in line for line in log)
+
+
+GREENHOUSE = {
+    "title": "Greenhouse",
+    "commons_category": "Greenhouses",
+    "description": "Building for growing plants",
+    "lead": "A greenhouse is a structure with walls and roof made of transparent material in which plants requiring regulated climatic conditions are grown.",
+    "url": "https://en.wikipedia.org/wiki/Greenhouse",
+}
+
+
+def test_meta_line_match_rejects_greenhouse_false_positives_from_first_tight_run():
+    """Regression: the first tightened dry-run still accepted stills on weak words or place last-names."""
+    flower = _still("PepperFlower4K.jpg", "a pepper flower, either indoors or out", "File:PepperFlower4K.jpg")
+    heated = {"show": "However, both heated and unheated structures can generally class as greenhouses. may reference either a hothouse or a glasshouse."}
+    assert fv.meta_line_match(flower, GREENHOUSE, heated)["ok"] is False
+
+    plan = _still(
+        "Decorations for parks and gardens - designs for gates, garden seats, alcoves, temples, baths, "
+        "entrance gates, lodges, facades, prospect towers, cattle sheds, ruins, bridges, greenhouses, &c. &c. also (14770045621).jpg",
+        ident="File:decorations.jpg",
+    )
+    belfast = {"show": "One of the earliest examples of a palm house is in the Belfast Botanic Gardens."}
+    assert fv.meta_line_match(plan, GREENHOUSE, belfast)["ok"] is False
+
+    woodward = _still("The Conservatory at Woodward's Garden (NYPL b11707333-G89F411 007F).tiff",
+                      ident="File:woodward.tiff")
+    chelsea = {"show": "The first 'stove' greenhouse in the UK was completed at Chelsea Physic Garden by 1681."}
+    assert fv.meta_line_match(woodward, GREENHOUSE, chelsea)["ok"] is False
+
+    bau = _still("BAU greenhouse.jpg", "Bangladesh Agricultural University greenhouse", "File:BAU greenhouse.jpg")
+    before = {"show": "Before the development of greenhouses, agricultural practices were constrained to weather conditions."}
+    assert fv.meta_line_match(bau, GREENHOUSE, before)["ok"] is False
+
+
+def test_meta_line_match_accepts_true_greenhouse_line_specific_stills():
+    glass = _still("Glasshouse 1-2.jpg", "a glasshouse with potted plants", "File:Glasshouse 1-2.jpg")
+    terms = {"show": "The terms greenhouse, glasshouse, and hothouse often refer interchangeably to buildings used for cultivating plants."}
+    got = fv.meta_line_match(glass, GREENHOUSE, terms)
+    assert got["ok"] is True
+    assert "glasshouse" in got["overlap"]
+
+    equip = _still(
+        'Photograph with caption "Humidifying and cooling equipment for a propagating case in the greenhouses used for plant... - NARA - 282464.jpg',
+        ident="File:equip.jpg",
+    )
+    line = {"show": "Such glass greenhouses may feature extensive equipment."}
+    got = fv.meta_line_match(equip, GREENHOUSE, line)
+    assert got["ok"] is True
+    assert "equipment" in got["overlap"]
+
+    belfast_photo = _still(
+        "Palm house in the Belfast Botanic Gardens.jpg",
+        "The palm house at Belfast Botanic Gardens",
+        "File:belfast.jpg",
+    )
+    belfast = {"show": "One of the earliest examples of a palm house is in the Belfast Botanic Gardens."}
+    got = fv.meta_line_match(belfast_photo, GREENHOUSE, belfast)
+    assert got["ok"] is True

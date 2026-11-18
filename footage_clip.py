@@ -19,7 +19,9 @@ logger = logging.getLogger("footage_clip")
 DEFAULT_MODEL = os.environ.get("FOOTAGE_CLIP_ONNX", "/opt/clip/model_quantized.onnx")
 DEFAULT_TOKENIZER = os.environ.get("FOOTAGE_CLIP_TOKENIZER", "/opt/clip/tokenizer.json")
 MIN_SCORE = float(os.environ.get("FOOTAGE_CLIP_MIN_SCORE", "0.20"))
-DESC_SLACK = float(os.environ.get("FOOTAGE_CLIP_DESC_SLACK", "0.045"))
+DESC_SLACK = float(os.environ.get("FOOTAGE_CLIP_DESC_SLACK", "0.02"))
+WIN_MARGIN = float(os.environ.get("FOOTAGE_CLIP_WIN_MARGIN", "0.03"))
+ENTITY_DESC_SLACK = float(os.environ.get("FOOTAGE_CLIP_ENTITY_DESC_SLACK", "0.045"))
 
 _SESSION = None
 _TOKENIZER = None
@@ -146,29 +148,65 @@ def score_image_texts(image, texts: Sequence[str]) -> Optional[List[float]]:
     return [float(row @ img) for row in txt]
 
 
-def confirm_line(image, line: str, image_description: str = "") -> dict:
-    """Accept a line only when it scores like a description of this frame, not just the same subject."""
+def confirm_line(image, line: str, image_description: str = "", other_lines: Optional[Sequence[str]] = None,
+                 exact_entity: bool = False) -> dict:
+    """Accept a line only when it is a clear CLIP winner for this frame.
+
+    The assigned line must beat the next-best script line by WIN_MARGIN (0.03) and must
+    not trail the file's own description by more than DESC_SLACK (0.02). A slightly
+    tighter caption than the voiceover is allowed (v4 letter 0.253 vs 0.265, sectors
+    0.237 vs 0.245). A strong exact-entity match (named person/place, or a distinctive
+    title term) may use a slightly larger description slack and may keep a unique or
+    near-unique winner that misses the 0.03 margin, so true matches like the Eisenhower
+    letter are not dropped.
+    """
     t0 = time.time()
+    desc = (image_description or "").strip()
+    others = []
+    seen = {(line or "").strip().lower()}
+    for raw in other_lines or []:
+        text = (raw or "").strip()
+        if text and text.lower() not in seen:
+            seen.add(text.lower())
+            others.append(text)
     texts = [line]
-    if image_description.strip():
-        texts.append(image_description.strip())
+    has_desc = bool(desc)
+    if has_desc:
+        texts.append(desc)
+    texts.extend(others)
     scores = score_image_texts(image, texts)
     ms = (time.time() - t0) * 1000.0
     if scores is None:
         return {"ok": None, "reason": "clip unavailable: " + (_LOAD_ERROR or "not loaded"),
-                "line": None, "desc": None, "ms": ms, "rss_mb": _LAST_RSS_MB}
+                "line": None, "desc": None, "best_other": None, "ms": ms, "rss_mb": _LAST_RSS_MB}
     line_score = scores[0]
-    desc_score = scores[1] if len(scores) > 1 else None
+    idx = 1
+    desc_score = None
+    if has_desc:
+        desc_score = scores[idx]
+        idx += 1
+    other_scores = scores[idx:]
+    best_other = max(other_scores) if other_scores else None
+    desc_slack = ENTITY_DESC_SLACK if exact_entity else DESC_SLACK
     ok = line_score >= MIN_SCORE
-    if ok and desc_score is not None and line_score < desc_score - DESC_SLACK:
-        ok = False
-        reason = f"line {line_score:.3f} trails image description {desc_score:.3f} by more than {DESC_SLACK:.3f}"
-    elif not ok:
+    reason = "clip confirms line"
+    if not ok:
         reason = f"line score {line_score:.3f} below {MIN_SCORE:.2f}"
-    else:
-        reason = "clip confirms line"
+    elif desc_score is not None and line_score < desc_score - desc_slack:
+        ok = False
+        reason = (f"line {line_score:.3f} trails image description {desc_score:.3f} "
+                  f"by more than {desc_slack:.3f}")
+    elif best_other is not None and line_score < best_other + WIN_MARGIN:
+        if exact_entity and line_score + 0.01 >= best_other:
+            reason = (f"clip exact-entity keeps line {line_score:.3f} vs best other {best_other:.3f} "
+                      f"(margin below {WIN_MARGIN:.2f})")
+        else:
+            ok = False
+            reason = (f"line {line_score:.3f} is not a clear winner over other lines "
+                      f"(best other {best_other:.3f}, need +{WIN_MARGIN:.2f})")
     return {"ok": ok, "reason": reason, "line": round(line_score, 3),
             "desc": None if desc_score is None else round(desc_score, 3),
+            "best_other": None if best_other is None else round(best_other, 3),
             "ms": round(ms, 1), "rss_mb": _LAST_RSS_MB}
 
 

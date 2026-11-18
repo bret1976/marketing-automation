@@ -19,9 +19,10 @@ Wikipedia page, then cut over a Tekken talk show). This module replaces the keyw
                  the safe area; credits only on the end card (never under a caption).
 All calls are free (Cloudflare Workers AI free plan, public archives). No Gemini, no xAI, no paid API.
 When Cloudflare returns 429 (neuron limit) or is unavailable, produce() logs 'ai fallback (cf 429)' and
-builds from library or previously verified subjects with a template script and metadata-only clip matches.
-A clip is kept only when its own title, description or caption explicitly depicts that line's specific
-entity or event (not merely the subject category); otherwise the slot is skipped (never a mismatched video).
+builds from library or previously verified subjects. The script is written image-first: each verified file
+keeps a Wikipedia sentence only when that file's own description clearly depicts the sentence, then a local
+CLIP check (free ONNX, no Cloudflare) confirms the pixels look like the line. Otherwise the line is dropped
+and the slot is skipped if too few lines remain (never a mismatched video).
 """
 import json
 import logging
@@ -41,7 +42,7 @@ import footage_tts
 
 logger = logging.getLogger("footage_verified")
 MARKER = "FOOTAGE_VERIFIED"
-VERSION = "2026-11-17.6"
+VERSION = "2026-11-17.7"
 
 # Set only by a dry-run to exercise the no-Cloudflare path; the scheduler never sets this.
 _force_fallback = False
@@ -876,12 +877,18 @@ _GENERIC_SUBJECT = {
     "agricultural", "structures", "structure", "buildings", "both", "used", "high", "tech",
     "production", "facilities", "facility", "commercial", "large", "cultivating", "cultivation",
     "plants", "plant", "refer", "before", "weather", "house", "houses", "placed", "grow",
+    # weak verbs and count nouns that overlapped v3 mismatches (initial/divisions/assault, etc.)
+    "initial", "divisions", "division", "assault", "scale", "insisted", "tentatively",
+    "selected", "intended", "positions", "position", "units", "unit", "strength", "stretch",
+    "target", "generals", "general", "craft", "ready", "hardened", "arrived", "provided",
+    "mainly", "told", "serious", "drawback", "overcome", "lack", "lacked", "date", "chose",
+    "choosing", "five", "four", "three", "seven", "eight", "nine", "ten", "dozen",
 }
 
 _PLACE_WORDS = {
     "center", "centre", "peninsula", "beach", "island", "islands", "river", "ocean", "sea", "gulf",
     "bay", "mount", "mountain", "mountains", "valley", "desert", "forest", "park", "bridge", "harbour",
-    "harbor", "port", "city", "town", "village", "county", "province", "district", "republic",
+    "harbor", "port", "channel", "strait", "cape", "city", "town", "village", "county", "province", "district", "republic",
     "kingdom", "empire", "university", "museum", "church", "cathedral", "palace", "street", "road",
     "avenue", "station", "stations", "airport", "base", "camp", "field", "space",
     "garden", "gardens", "conservatory", "greenhouse", "greenhouses", "glasshouse", "hothouse",
@@ -892,7 +899,9 @@ _PLACE_WORDS = {
 _ORG_WORDS = {
     "force", "forces", "headquarters", "command", "army", "navy", "corps", "division", "regiment",
     "battalion", "fleet", "squadron", "committee", "commission", "council", "department", "office",
-    "agency", "administration", "conference", "treaty", "alliance",
+    "agency", "administration", "conference", "treaty", "alliance", "guard", "guards",
+    "chart", "letter", "report", "map", "poster", "document", "diary", "memo", "memorandum",
+    "telegram", "order", "orders",
 }
 
 _PERSON_TITLES = {
@@ -930,6 +939,30 @@ _COMPOUND_MODIFIERS = {
     "captured", "motorised", "motorized", "unreliable", "artificial", "amphibious",
     "self-propelled", "anti-tank", "airborne",
 }
+# Whole phrases that must appear as written, not as a substring of a related word
+# ("landing" must not match "Landings").
+_COMPOUND_PHRASES = {
+    "landing craft", "landing barge", "landing barges", "landing ship", "landing ships",
+}
+
+# Words that look like a capitalized name but are not people (quantifiers, nationalities, months).
+_NOT_PERSON_PREFIXES = {
+    "the", "a", "an", "this", "that", "these", "those", "their", "his", "her", "its", "our",
+    "many", "most", "some", "all", "both", "each", "every", "other", "various", "several",
+    "such", "few", "any", "no", "more", "much", "half", "both",
+    "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve",
+    "first", "second", "third", "new", "old", "late", "early", "next", "last", "same",
+    "allied", "axis", "allies", "germans", "americans", "british", "french", "russians",
+    "english", "operation", "invasion", "landings", "campaign",
+    "europe", "america", "asia", "africa", "pacific", "atlantic", "world", "war",
+}
+
+_PERSON_VERBS = (
+    r"had|has|have|was|were|is|are|selected|appointed|ordered|commanded|issued|wrote|"
+    r"signed|directed|led|decided|announced|declared|told|insisted|chose|planned|"
+    r"launched|arrived|visited|reviewed|approved|authorized|authorised|inspected|"
+    r"addressed|radioed|cabled"
+)
 
 
 def _meta_words(text: str) -> List[str]:
@@ -977,18 +1010,35 @@ def pool_generic_words(pool: List[dict], subj: dict, threshold: float = 0.3) -> 
 
 
 def _dates(text: str) -> List[tuple]:
-    """Calendar dates and clock times found in text, as ('d', y, m, d) or ('t', h, m)."""
+    """Calendar dates and clock times found in text, as ('d', y, m, d) or ('t', h, m).
+
+    Day-month without a year is stored as ('d', 0, month, day) so a conflicting
+    day (5 June vs 6 June 1944) can still be rejected. A date is never the sole
+    reason to accept a pairing: it has no visual meaning on its own.
+    """
     raw = text or ""
     found: List[tuple] = []
+    seen = set()
     month = r"(January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)"
+
+    def _add(tok):
+        if tok not in seen:
+            seen.add(tok)
+            found.append(tok)
+
     for m in re.finditer(rf"\b(\d{{1,2}})\s+{month}\s+(\d{{4}})\b", raw, re.I):
-        found.append(("d", int(m.group(3)), _MONTHS[m.group(2).lower()], int(m.group(1))))
+        _add(("d", int(m.group(3)), _MONTHS[m.group(2).lower()], int(m.group(1))))
     for m in re.finditer(rf"\b{month}\s+(\d{{1,2}})(?:st|nd|rd|th)?,?\s+(\d{{4}})\b", raw, re.I):
-        found.append(("d", int(m.group(3)), _MONTHS[m.group(1).lower()], int(m.group(2))))
+        _add(("d", int(m.group(3)), _MONTHS[m.group(1).lower()], int(m.group(2))))
     for m in re.finditer(rf"\b{month}\s+(\d{{4}})\b", raw, re.I):
-        found.append(("d", int(m.group(2)), _MONTHS[m.group(1).lower()], 0))
+        _add(("d", int(m.group(2)), _MONTHS[m.group(1).lower()], 0))
+    # Day + month with no year ("5 June", "June 5th")
+    for m in re.finditer(rf"\b(\d{{1,2}})(?:st|nd|rd|th)?\s+{month}\b", raw, re.I):
+        _add(("d", 0, _MONTHS[m.group(2).lower()], int(m.group(1))))
+    for m in re.finditer(rf"\b{month}\s+(\d{{1,2}})(?:st|nd|rd|th)?\b", raw, re.I):
+        _add(("d", 0, _MONTHS[m.group(1).lower()], int(m.group(2))))
     for m in re.finditer(r"\b(\d{1,2}):(\d{2})\b", raw):
-        found.append(("t", int(m.group(1)), int(m.group(2))))
+        _add(("t", int(m.group(1)), int(m.group(2))))
     return found
 
 
@@ -1000,21 +1050,69 @@ def _date_in_text(token: tuple, text: str) -> bool:
         return any(h[0] == "t" and h[1] == token[1] and h[2] == token[2] for h in have)
     y, mo, d = token[1], token[2], token[3]
     for h in have:
-        if h[0] != "d" or h[1] != y or h[2] != mo:
+        if h[0] != "d":
             continue
-        if d == 0 or h[3] == 0 or h[3] == d:
-            return True
-    # month name + year written without being parsed as a full date pattern already
+        if mo and h[2] and mo != h[2]:
+            continue
+        if y and h[1] and y != h[1]:
+            continue
+        if d and h[3] and d != h[3]:
+            continue
+        return True
     if y and mo:
         month_name = max((n for n, num in _MONTHS.items() if num == mo), key=len)
-        if re.search(rf"\b{month_name}\b", text, re.I) and re.search(rf"\b{y}\b", text):
-            if d == 0 or re.search(rf"\b{d}\b", text):
+        if re.search(rf"\b{month_name}\b", text or "", re.I) and re.search(rf"\b{y}\b", text or ""):
+            if d == 0 or re.search(rf"\b{d}\b", text or ""):
                 return True
     return False
 
 
+def _dates_conflict(line_dates: List[tuple], text: str) -> bool:
+    """True when the image names a different calendar day, month, or year than the line."""
+    have = [h for h in _dates(text) if h[0] in {"d", "y"}]
+    if not have:
+        return False
+    years_in_image = {h[1] for h in have if h[0] == "d" and h[1]} | {h[1] for h in have if h[0] == "y"}
+    for ld in line_dates:
+        if ld[0] == "y":
+            if years_in_image and ld[1] not in years_in_image:
+                return True
+            continue
+        if ld[0] != "d":
+            continue
+        ly, lm, ld_ = ld[1], ld[2], ld[3]
+        for h in have:
+            if h[0] != "d":
+                continue
+            hy, hm, hd = h[1], h[2], h[3]
+            if ly and hy and ly != hy:
+                return True
+            if lm and hm and lm != hm:
+                return True
+            if lm and hm and lm == hm and ld_ and hd and ld_ != hd:
+                return True
+    return False
+
+
+def _looks_like_person(name: str) -> bool:
+    toks = [w.lower().rstrip(".") for w in (name or "").split() if w]
+    if not toks:
+        return False
+    if toks[0] in _NOT_PERSON_PREFIXES or toks[0] in _NATIONALITIES or toks[0] in _MONTHS:
+        return False
+    if any(w in _PLACE_WORDS or w in _ORG_WORDS or w in _NATIONALITIES or w in _MONTHS for w in toks):
+        return False
+    if all(w in _PERSON_TITLES or w in _META_STOP or w in _GENERIC_SUBJECT or len(w) <= 1 for w in toks):
+        return False
+    return True
+
+
 def _person_names(text: str) -> List[str]:
-    """Person-like 'First (M.) Last' phrases, excluding places and organizations."""
+    """Person-like names, including a bare surname ('Eisenhower had...').
+
+    Capitalized non-names such as 'Many German' are rejected: a leading quantifier
+    or nationality is not a person.
+    """
     titles = (
         r"(?:(?:US|U\.S\.)\s+)?(?:President|Vice President|Prime Minister|General|"
         r"Major General|Brigadier(?:\s+General)?|Admiral|Colonel|Captain|Lieutenant|"
@@ -1026,15 +1124,26 @@ def _person_names(text: str) -> List[str]:
         rf"\b(?:{titles})?([A-Z][a-z]+(?:\s+[A-Z]\.?)*(?:\s+[A-Z][a-z]+)+)\b"
     )
     names = []
+    seen = set()
     for m in pat.finditer(text or ""):
         name = re.sub(r"\s+", " ", m.group(1)).strip()
-        toks = [w.lower().rstrip(".") for w in name.split()]
-        if toks and toks[0] in {"the", "a", "an", "this", "that", "these", "those"}:
+        if not _looks_like_person(name):
             continue
-        if any(w in _PLACE_WORDS or w in _ORG_WORDS for w in toks):
+        key = name.lower()
+        if key not in seen:
+            seen.add(key)
+            names.append(name)
+    # Bare surname as the grammatical subject: "Eisenhower had tentatively selected..."
+    bare = re.compile(rf"\b([A-Z][a-z]{{4,}})(?:['’]s|\s+(?:{_PERSON_VERBS}))\b")
+    for m in bare.finditer(text or ""):
+        name = m.group(1)
+        if not _looks_like_person(name):
             continue
-        if all(w in _PERSON_TITLES or w in _META_STOP or w in _GENERIC_SUBJECT or len(w) <= 1 for w in toks):
+        key = name.lower()
+        # Skip if this surname is already part of a fuller name we extracted.
+        if key in seen or any(key == n.lower().split()[-1] for n in names):
             continue
+        seen.add(key)
         names.append(name)
     return names
 
@@ -1072,6 +1181,9 @@ def _place_names(text: str) -> List[str]:
         name = re.sub(r"\s+", " ", m.group(1)).strip()
         toks = [w.lower() for w in name.split() if w.lower() not in {"of", "the", "and", "de", "da", "di", "du", "van", "von"}]
         if any(w in _PLACE_WORDS for w in toks):
+            core = [w for w in toks if w not in _PLACE_WORDS and w not in _META_STOP and w not in _GENERIC_SUBJECT]
+            if not core or all(len(w) <= 3 or w in {"day", "new", "old", "great"} for w in core):
+                continue
             out.append(name)
     return out
 
@@ -1089,6 +1201,21 @@ def _place_in_text(name: str, text: str) -> bool:
     if not core:
         core = toks
     return all(re.search(rf"\b{re.escape(w)}\b", blob) for w in core)
+
+
+
+def _compound_in_text(phrase: str, text: str) -> bool:
+    """True when the full phrase appears, or (for modifier+noun) the modifier as a whole word."""
+    blob = (text or "").lower()
+    if not phrase:
+        return False
+    if re.search(r"\b" + re.escape(phrase) + r"\b", blob):
+        return True
+    # Explicit craft phrases must appear in full so "landing" cannot match "Landings".
+    if phrase in _COMPOUND_PHRASES:
+        return False
+    modifier = phrase.split()[0]
+    return bool(modifier and re.search(r"\b" + re.escape(modifier) + r"\b", blob))
 
 
 def line_specific_terms(line: dict, subj: dict, extra_generic: Optional[set] = None) -> dict:
@@ -1119,11 +1246,16 @@ def line_specific_terms(line: dict, subj: dict, extra_generic: Optional[set] = N
         if w in _NATIONALITIES and w not in generic and w not in nations:
             nations.append(w)
     compounds = []
+    shown = show.lower()
+    for phrase in _COMPOUND_PHRASES:
+        if re.search(r"\b" + re.escape(phrase) + r"\b", shown) and phrase not in compounds:
+            compounds.append(phrase)
     for m in re.finditer(
         r"\b(" + "|".join(re.escape(x) for x in sorted(_COMPOUND_MODIFIERS, key=len, reverse=True)) + r")\s+[a-z][a-z\-]+\b",
-        show.lower(),
+        shown,
     ):
-        compounds.append(m.group(0))
+        if m.group(0) not in compounds:
+            compounds.append(m.group(0))
     words = []
     for w in _meta_words(show):
         if w in generic or w in _META_STOP or w in _MONTHS:
@@ -1162,31 +1294,40 @@ def meta_line_match(c: dict, subj: dict, line: dict, extra_generic: Optional[set
     if missing_places:
         return {"ok": False, "reason": "missing line-specific place: " + ", ".join(missing_places),
                 "score": 0.0, "overlap": []}
-    missing_dates = [d for d in terms["dates"] if not _date_in_text(d, text)]
-    if missing_dates:
-        return {"ok": False, "reason": "missing line-specific date", "score": 0.0, "overlap": []}
+    if _dates_conflict(terms["dates"], text):
+        return {"ok": False, "reason": "conflicting date in title/description", "score": 0.0, "overlap": []}
     missing_nations = [n for n in terms.get("nations") or [] if not re.search(r"\b" + re.escape(n) + r"\b", text.lower())]
     if missing_nations:
         return {"ok": False, "reason": "missing line-specific nationality: " + ", ".join(missing_nations),
                 "score": 0.0, "overlap": []}
-    missing_compounds = [c for c in terms.get("compounds") or [] if c not in text.lower() and c.split()[0] not in text.lower()]
-    # The distinctive modifier (captured, motorised, ...) must appear, not just the noun (equipment, transport).
+    missing_compounds = [c for c in terms.get("compounds") or [] if not _compound_in_text(c, text)]
+    # The distinctive modifier (captured, motorised, ...) must appear as a whole word, not just the noun.
     if missing_compounds:
         return {"ok": False, "reason": "missing line-specific phrase: " + ", ".join(missing_compounds),
                 "score": 0.0, "overlap": []}
     word_hits = [w for w in terms["words"] if re.search(r"\b" + re.escape(w) + r"\b", text.lower())]
     person_hits = [n for n in terms["people"] if _name_in_text(n, text)]
     place_hits = [n for n in terms.get("places") or [] if _place_in_text(n, text)]
-    date_hits = [d for d in terms["dates"] if _date_in_text(d, text)]
+    nation_hits = [n for n in terms.get("nations") or [] if re.search(r"\b" + re.escape(n) + r"\b", text.lower())]
+    compound_hits = [c for c in terms.get("compounds") or [] if _compound_in_text(c, text)]
+    # A date has no visual meaning on its own and is never the basis for accepting a pair.
     # Subject-category overlap alone is not enough: need the line's own entities.
-    if person_hits or place_hits or date_hits:
+    if person_hits or place_hits:
         if word_hits or person_hits or place_hits:
             overlap = [n.lower() for n in person_hits + place_hits] + word_hits
-            score = 0.9 + 0.02 * min(len(person_hits) + len(place_hits) + len(date_hits) + len(word_hits), 5)
+            score = 0.9 + 0.02 * min(len(person_hits) + len(place_hits) + len(word_hits), 5)
             return {"ok": True, "reason": "line-specific entity in title/description",
                     "score": round(score, 3), "overlap": overlap}
-        return {"ok": False, "reason": "name/date present but no line-specific detail",
+        return {"ok": False, "reason": "name present but no line-specific detail",
                 "score": 0.2, "overlap": [n.lower() for n in person_hits + place_hits]}
+    if nation_hits and (word_hits or compound_hits):
+        overlap = nation_hits + compound_hits + word_hits
+        return {"ok": True, "reason": "line-specific nationality and detail in title/description",
+                "score": round(0.85 + 0.03 * min(len(overlap), 4), 3), "overlap": overlap}
+    if compound_hits and (word_hits or len(compound_hits) >= 1 and any(len(c) >= 10 for c in compound_hits)):
+        overlap = compound_hits + word_hits
+        return {"ok": True, "reason": "line-specific phrase in title/description",
+                "score": round(0.84 + 0.03 * min(len(overlap), 4), 3), "overlap": overlap}
     if len(word_hits) >= 2:
         return {"ok": True, "reason": "line-specific terms in title/description",
                 "score": round(0.8 + 0.04 * min(len(word_hits), 5), 3), "overlap": word_hits}
@@ -1202,8 +1343,48 @@ def meta_line_match(c: dict, subj: dict, line: dict, extra_generic: Optional[set
             "score": round(0.08 * len(word_hits), 3), "overlap": word_hits}
 
 
+
+def image_terms_in_sentence(c: dict, subj: dict, line: dict, extra_generic: Optional[set] = None) -> List[str]:
+    """Distinctive terms from the file's own title/description that also appear in the sentence.
+
+    Image-first assignment: a sentence may be used with this file only when it talks about
+    what the file itself claims to show, not merely when the file mentions a word from the sentence.
+    """
+    img = line_specific_terms({"show": _clip_text(c)}, subj, extra_generic)
+    show = line.get("show") or line.get("say") or ""
+    hits: List[str] = []
+    for name in img.get("people") or []:
+        if _name_in_text(name, show) and name.lower() not in {h.lower() for h in hits}:
+            hits.append(name)
+    for name in img.get("places") or []:
+        if _place_in_text(name, show) and name.lower() not in {h.lower() for h in hits}:
+            hits.append(name)
+    for n in img.get("nations") or []:
+        if re.search(r"\b" + re.escape(n) + r"\b", show.lower()) and n not in hits:
+            hits.append(n)
+    for phrase in img.get("compounds") or []:
+        if _compound_in_text(phrase, show) and phrase not in hits:
+            hits.append(phrase)
+    for w in img.get("words") or []:
+        if re.search(r"\b" + re.escape(w) + r"\b", show.lower()) and w not in {h.lower() for h in hits}:
+            hits.append(w)
+    return hits
+
+
+def _mentions_subject(show: str, name: str) -> bool:
+    first = (show or "").lower()
+    if name.lower() in first:
+        return True
+    return any(w in first for w in _meta_words(name))
+
+
 def write_script_from_footage(subj: dict, pool: List[dict], log: List[str]) -> Optional[dict]:
-    """Pick Wikipedia sentences that describe what the available images or clips actually show."""
+    """For each verified file, pick a Wikipedia sentence that describes what that file shows.
+
+    Clips are considered first (videos before stills). A file with no sentence whose
+    distinctive terms appear in the file's own title/description is dropped, not forced.
+    The opening line must still name the subject.
+    """
     name = subject_name(subj)
     source = (subj.get("text") or subj.get("lead") or "")
     try:
@@ -1214,7 +1395,7 @@ def write_script_from_footage(subj: dict, pool: List[dict], log: List[str]) -> O
     # Prefer real video over stills when both can be guaranteed.
     provenanced.sort(key=lambda c: (c.get("kind") != "video", not c.get("curated")))
     extra_generic = pool_generic_words(provenanced, subj)
-    lines: List[dict] = []
+    chosen: List[tuple] = []
     used, said = set(), set()
     for c in provenanced:
         best = None
@@ -1235,27 +1416,35 @@ def write_script_from_footage(subj: dict, pool: List[dict], log: List[str]) -> O
             m = meta_line_match(c, subj, rec, extra_generic)
             if not m["ok"]:
                 continue
-            score = m["score"] + (0.05 if c.get("kind") == "video" else 0.0)
+            img_hits = image_terms_in_sentence(c, subj, rec, extra_generic)
+            if not img_hits:
+                continue
+            score = m["score"] + 0.08 * min(len(img_hits), 5) + (0.05 if c.get("kind") == "video" else 0.0)
             if best is None or score > best[0]:
-                best = (score, m, rec, c)
+                best = (score, m, rec, c, img_hits)
         if not best:
+            log.append(f"ai fallback script: no Wikipedia sentence describes {(c.get('title') or c.get('id') or '')[:80]}")
             continue
         key = (c.get("provider"), c.get("id"))
         say_key = best[2]["say"].lower()
         if key in used or say_key in said:
             continue
-        if not lines:
-            first = best[2]["show"].lower()
-            if name.lower() not in first and not any(w in first for w in _meta_words(name)):
-                continue
         rec = best[2]
         rec["picks"] = [c]
         rec["match_reason"] = best[1].get("reason")
-        lines.append(rec)
+        rec["image_terms"] = best[4] if len(best) > 4 else []
         used.add(key)
         said.add(say_key)
-        if len(lines) >= 12:
+        chosen.append(best)
+        if len(chosen) >= 12:
             break
+    named = [item for item in chosen if _mentions_subject(item[2]["show"], name)]
+    if not named:
+        log.append(f"ai fallback script: no image-backed opening line names {name}")
+        return None
+    # Opening line names the subject; remaining files keep the sentences that describe them.
+    first = named[0]
+    lines = [first[2]] + [item[2] for item in chosen if item is not first]
     if len(lines) < FALLBACK_MIN_LINES:
         log.append(f"ai fallback script: only {len(lines)} guaranteed lines for {name}")
         return None
@@ -1312,6 +1501,50 @@ def place_by_meta(c: dict, need: float, used: Dict[str, List[float]], workdir: s
     return {"cand": c, "start": start, "crop": meta.get("crop"), "vision": vis}
 
 
+
+def _clip_confirm_placement(placed: dict, line: dict, log: List[str]):
+    """Second gate: score the raw still or video frame (never a captioned render) against the line.
+
+    Returns False to reject, True to keep when CLIP is unavailable, or a result dict when it ran.
+    A load or decode failure must not crash the slot; metadata remains the authority in that case.
+    """
+    try:
+        import footage_clip as clip
+    except Exception as exc:  # noqa: BLE001
+        log.append(f"clip check skipped (import): {exc}"[:160])
+        return True
+    if not clip.available():
+        if not getattr(_clip_confirm_placement, "_logged_skip", False):
+            why = getattr(clip, "_LOAD_ERROR", None) or "model not baked into the image"
+            log.append(f"clip check skipped: {why}"[:200])
+            _clip_confirm_placement._logged_skip = True
+        return True
+    cand = placed.get("cand") or {}
+    img = None
+    try:
+        if cand.get("_img"):
+            img = clip.image_from_bytes(cand["_img"])
+        elif cand.get("_src") or cand.get("path"):
+            img = clip.frame_from_video(cand.get("_src") or cand.get("path"), placed.get("start") or 0.0)
+    except Exception as exc:  # noqa: BLE001
+        log.append(f"clip check skipped (frame): {exc}"[:160])
+        return True
+    if img is None:
+        log.append("clip check skipped: no decodable source frame")
+        return True
+    desc = " ".join(str(cand.get(k) or "") for k in ("title", "description", "caption")).strip()
+    result = clip.confirm_line(img, line.get("show") or line.get("say") or "", desc)
+    rss = result.get("rss_mb")
+    rss_s = f"{rss:.0f}MB" if isinstance(rss, (int, float)) else "?"
+    log.append(
+        f"clip check line={result.get('line')} desc={result.get('desc')} "
+        f"rss={rss_s} ms={result.get('ms')} {result.get('reason')}"
+    )
+    if result.get("ok") is False:
+        return False
+    return result
+
+
 def match_lines_meta(subj: dict, script: dict, durations: List[float], pool: List[dict],
                      workdir: str, log: List[str]) -> List[Optional[dict]]:
     used: Dict[str, List[float]] = {}
@@ -1337,8 +1570,16 @@ def match_lines_meta(subj: dict, script: dict, durations: List[float], pool: Lis
             got = place_by_meta(c, need, used, workdir)
             if not got:
                 continue
+            clip_result = _clip_confirm_placement(got, line, log)
+            if clip_result is False:
+                continue
             got["meta_score"] = score
             got["vision"] = {**got["vision"], "reason": m["reason"], "overlap": m.get("overlap")}
+            if isinstance(clip_result, dict):
+                got["clip"] = clip_result
+                if clip_result.get("line") is not None:
+                    got["vision"]["clip_line"] = clip_result.get("line")
+                    got["vision"]["clip_desc"] = clip_result.get("desc")
             uses[c["id"]] = uses.get(c["id"], 0) + 1
             used.setdefault(c["id"], []).append(got["start"])
             placed = got

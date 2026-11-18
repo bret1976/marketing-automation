@@ -250,7 +250,11 @@ def test_write_script_from_footage_requires_guaranteed_lines():
     script = fv.write_script_from_footage(subj, pool, log)
     # Only two clips can be guaranteed, FALLBACK_MIN_LINES is 5, so the script must be refused.
     assert script is None
-    assert any("guaranteed lines" in line for line in log)
+    assert any(
+        "guaranteed lines" in line or "no Wikipedia sentence describes" in line
+        or "no image-backed" in line or "skipping slot" in line
+        for line in log
+    )
 
 
 def test_place_by_meta_downloads_still_before_return(monkeypatch, tmp_path):
@@ -370,7 +374,7 @@ def test_write_script_from_footage_picks_sentences_that_fit_the_images():
 
 def test_write_script_prefers_video_when_a_still_also_matches():
     subj = {"title": "Apollo 11", "commons_category": "Apollo 11",
-            "text": "The Apollo 11 launch took place at Kennedy Space Center. "
+            "text": "Apollo 11 lifts off from Kennedy Space Center. "
                     "Neil Armstrong stepped onto the lunar surface. "
                     "A camera recorded the Apollo 11 landing on the Moon. "
                     "The crew splashed down in the Pacific Ocean after Apollo 11. "
@@ -695,3 +699,133 @@ def test_v4_true_matches_and_document_letterbox_still_hold():
     cover = fm._shot_filter("image", 1080, 1920, 5.0, 0, 0.5, "cover")
     assert "force_original_aspect_ratio=decrease" in contain and "pad=" in contain
     assert "zoompan" in cover and "pad=" not in cover
+
+
+ARTEMIS = {
+    "title": "Artemis 1",
+    "commons_category": "Artemis 1",
+    "description": "uncrewed Moon mission",
+}
+
+
+def test_v5_weak_heads_and_place_only_without_event_are_rejected():
+    """v5 Artemis holes: weak nouns never count; a place-only match without the event never counts."""
+    michoud_line = {"show": "Construction began mid-November 2014 at the Michoud Assembly Facility."}
+    assert "Michoud Assembly Facility" in fv.required_heads(michoud_line, ARTEMIS)
+    # Same place, later engine install, even with the year stripped so the date gate cannot carry the reject.
+    engine = _still(
+        "RS-25 engine install at Michoud.jpg",
+        "An RS-25 engine is installed at the Michoud Assembly Facility.",
+        "File:engine.jpg",
+    )
+    got = fv.meta_line_match(engine, ARTEMIS, michoud_line)
+    assert got["ok"] is False
+    assert "place-only" in got["reason"] or "event" in got["reason"] or "date" in got["reason"]
+
+    engine_dated = _still(
+        "RS-25 engine install at Michoud.jpg",
+        "An RS-25 engine is installed at the Michoud Assembly Facility, 2019-10-28.",
+        "File:engine-dated.jpg",
+    )
+    assert fv.meta_line_match(engine_dated, ARTEMIS, michoud_line)["ok"] is False
+
+    started = _still(
+        "Michoud construction 2014.jpg",
+        "Construction of the core stage began in mid-November 2014 at the Michoud Assembly Facility.",
+        "File:started.jpg",
+    )
+    assert fv.meta_line_match(started, ARTEMIS, michoud_line)["ok"] is True
+
+    stage = {"show": "The stage adapter was stacked on the Core Stage on June 22."}
+    weak = {h.lower() for h in fv.required_heads(stage, ARTEMIS) + fv.line_head_terms(stage, ARTEMIS)}
+    assert "stage" not in weak and "stages" not in weak
+    sep = _still(
+        "Orion ICPS separation.jpg",
+        "Orion and the interim cryogenic propulsion stage separate in space on November 16.",
+        "File:sep.jpg",
+    )
+    assert fv.meta_line_match(sep, ARTEMIS, stage)["ok"] is False
+
+    crew = {"show": "A shorter crewed flight would have carried two astronauts."}
+    crew_heads = [h.lower() for h in fv.required_heads(crew, ARTEMIS)]
+    assert "astronauts" not in crew_heads
+    assert "flight" not in crew_heads
+    assert "crew" not in crew_heads and "crewed" not in crew_heads
+    graphic = _still("lunar gravity assist.jpg", "A graphic of a lunar gravity-assist trajectory.", "File:g.jpg")
+    assert fv.meta_line_match(graphic, ARTEMIS, crew)["ok"] is False
+
+
+def test_clip_confirm_placement_fails_closed_and_scores_the_chosen_segment(monkeypatch):
+    """Decode or score failure rejects the line; video frames come from the chosen segment, not a skip."""
+    log = []
+    line = {"show": "Construction began at the Michoud Assembly Facility.", "_other_lines": ["other line"],
+            "_subj": ARTEMIS}
+
+    # No source at all: reject, never skip.
+    assert fv._clip_confirm_placement({"cand": {}, "start": 0.0}, line, log, need=6.0) is False
+    assert any("rejecting line" in row and "skipped" not in row for row in log)
+
+    class _Mod:
+        @staticmethod
+        def available():
+            return True
+
+        @staticmethod
+        def image_from_bytes(data):
+            return None
+
+        @staticmethod
+        def frames_from_segment(path, start, duration, n=3):
+            seen["args"] = (path, start, duration, n)
+            return [None, object(), object()]
+
+        @staticmethod
+        def confirm_line(*a, **k):
+            raise AssertionError("must not score a missing frame")
+
+    seen = {}
+    monkeypatch.setitem(__import__("sys").modules, "footage_clip", _Mod)
+    log = []
+    placed = {"cand": {"_src": "/tmp/path.mp4", "title": "Path to the Pad"}, "start": 297.0}
+    assert fv._clip_confirm_placement(placed, line, log, need=6.0) is False
+    assert seen["args"][0] == "/tmp/path.mp4"
+    assert seen["args"][1] == 297.0
+    assert seen["args"][2] == 6.0
+    assert any("rejecting line" in row for row in log)
+    assert not any("skipped" in row for row in log)
+
+    class _OkThenFail:
+        @staticmethod
+        def available():
+            return True
+
+        @staticmethod
+        def frames_from_segment(path, start, duration, n=3):
+            return [object(), object(), object()]
+
+        n = {"i": 0}
+
+        @staticmethod
+        def confirm_line(*a, **k):
+            _OkThenFail.n["i"] += 1
+            if _OkThenFail.n["i"] < 3:
+                return {"ok": True, "reason": "clip confirms line", "line": 0.3, "desc": 0.28,
+                        "best_other": 0.2, "ms": 1, "rss_mb": 100}
+            return {"ok": False, "reason": "line is not a clear winner", "line": 0.21, "desc": 0.28,
+                    "best_other": 0.25, "ms": 1, "rss_mb": 100}
+
+    monkeypatch.setitem(__import__("sys").modules, "footage_clip", _OkThenFail)
+    log = []
+    assert fv._clip_confirm_placement(placed, line, log, need=6.0) is False
+    assert any("rejecting line" in row for row in log)
+
+
+def test_run_fallback_skip_log_names_the_five_line_floor(monkeypatch):
+    monkeypatch.setattr(fv, "cached_fallback_subjects", lambda *a, **k: [])
+    monkeypatch.setattr(fv, "library_fallback_subjects", lambda *a, **k: [
+        (NORMANDY, {"title": "Normandy landings", "views_per_hour": 0}, "v2-normandy-landings")
+    ])
+    monkeypatch.setattr(fv, "build_fallback_topic", lambda *a, **k: None)
+    log = []
+    assert fv.run_fallback(set(), "", "/tmp", log) is None
+    assert any("fewer than 5 lines survived with guaranteed footage; skipping slot" in line for line in log)

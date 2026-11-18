@@ -69,3 +69,58 @@ def test_run_fallback_respects_topic_budget(monkeypatch):
     assert fv.run_fallback(set(), "", "/tmp", log) is None
     assert any("budget exhausted" in line or "skipping slot" in line for line in log)
     assert any(line == "ai fallback (cf 429)" for line in log)
+
+
+def test_confirm_line_fails_closed_when_scores_unavailable(monkeypatch):
+    monkeypatch.setattr(fc, "score_image_texts", lambda *a, **k: None)
+    got = fc.confirm_line(_FakeImg(), "a line", "a description", other_lines=["other"])
+    assert got["ok"] is False
+    assert "unavailable" in (got.get("reason") or "")
+
+
+def test_exact_entity_only_keeps_a_first_place_line(monkeypatch):
+    def scores_for(values):
+        def _score(image, texts):
+            return list(values[:len(texts)])
+        return _score
+
+    img = _FakeImg()
+    # Ranked first (0.27 > 0.26) but margin 0.01 < 0.03: exact-entity may keep it.
+    monkeypatch.setattr(fc, "score_image_texts", scores_for([0.27, 0.25, 0.26]))
+    got = fc.confirm_line(img, "Eisenhower was appointed SHAEF commander",
+                          "General Eisenhower letter",
+                          other_lines=["Mulberry harbours were built"], exact_entity=True)
+    assert got["ok"] is True
+
+    # Ranked second: exact-entity must not override the winner rule.
+    monkeypatch.setattr(fc, "score_image_texts", scores_for([0.26, 0.25, 0.27]))
+    got = fc.confirm_line(img, "Eisenhower was appointed SHAEF commander",
+                          "General Eisenhower letter",
+                          other_lines=["Mulberry harbours were built"], exact_entity=True)
+    assert got["ok"] is False
+
+    # Tie is not ranked first.
+    monkeypatch.setattr(fc, "score_image_texts", scores_for([0.26, 0.25, 0.26]))
+    got = fc.confirm_line(img, "Eisenhower was appointed SHAEF commander",
+                          "General Eisenhower letter",
+                          other_lines=["Mulberry harbours were built"], exact_entity=True)
+    assert got["ok"] is False
+
+
+def test_frames_from_segment_samples_two_or_three_offsets(monkeypatch):
+    seen = []
+
+    def fake_frame(path, start=0.0):
+        seen.append((path, round(float(start), 4)))
+        return _FakeImg()
+
+    monkeypatch.setattr(fc, "frame_from_video", fake_frame)
+    frames = fc.frames_from_segment("/tmp/src.mp4", start=100.0, duration=10.0, n=3)
+    assert len(frames) == 3
+    assert all(isinstance(f, _FakeImg) for f in frames)
+    assert seen == [("/tmp/src.mp4", 102.0), ("/tmp/src.mp4", 105.0), ("/tmp/src.mp4", 108.0)]
+
+    seen.clear()
+    frames = fc.frames_from_segment("/tmp/src.mp4", start=10.0, duration=1.0, n=3)
+    assert len(frames) == 2
+    assert seen == [("/tmp/src.mp4", 10.3), ("/tmp/src.mp4", 10.7)]

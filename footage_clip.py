@@ -3,7 +3,7 @@
 A quantized OpenAI CLIP ViT-B-32 (~150 MB) is baked into the image under /opt/clip,
 like Kokoro, and is never stored on the data volume. Used only to confirm that a
 frame actually looks like its voiceover line after metadata has already accepted
-the pairing. If the model is missing or fails, the caller falls back to metadata.
+the pairing. If the model is missing or a frame cannot be scored, the caller must reject the line.
 """
 from __future__ import annotations
 
@@ -150,15 +150,13 @@ def score_image_texts(image, texts: Sequence[str]) -> Optional[List[float]]:
 
 def confirm_line(image, line: str, image_description: str = "", other_lines: Optional[Sequence[str]] = None,
                  exact_entity: bool = False) -> dict:
-    """Accept a line only when it is a clear CLIP winner for this frame.
+    """Accept a line only when it is a clear CLIP winner for this exact frame.
 
+    Fail closed: if scoring is unavailable, the line is rejected (ok=False), never skipped.
     The assigned line must beat the next-best script line by WIN_MARGIN (0.03) and must
-    not trail the file's own description by more than DESC_SLACK (0.02). A slightly
-    tighter caption than the voiceover is allowed (v4 letter 0.253 vs 0.265, sectors
-    0.237 vs 0.245). A strong exact-entity match (named person/place, or a distinctive
-    title term) may use a slightly larger description slack and may keep a unique or
-    near-unique winner that misses the 0.03 margin, so true matches like the Eisenhower
-    letter are not dropped.
+    not trail the file's own description by more than DESC_SLACK (0.02). An exact-entity
+    match does not waive the winner rule unless this line is also ranked first
+    (line > best other); a second-place or tied line is always rejected.
     """
     t0 = time.time()
     desc = (image_description or "").strip()
@@ -177,7 +175,7 @@ def confirm_line(image, line: str, image_description: str = "", other_lines: Opt
     scores = score_image_texts(image, texts)
     ms = (time.time() - t0) * 1000.0
     if scores is None:
-        return {"ok": None, "reason": "clip unavailable: " + (_LOAD_ERROR or "not loaded"),
+        return {"ok": False, "reason": "clip unavailable: " + (_LOAD_ERROR or "not loaded"),
                 "line": None, "desc": None, "best_other": None, "ms": ms, "rss_mb": _LAST_RSS_MB}
     line_score = scores[0]
     idx = 1
@@ -187,19 +185,19 @@ def confirm_line(image, line: str, image_description: str = "", other_lines: Opt
         idx += 1
     other_scores = scores[idx:]
     best_other = max(other_scores) if other_scores else None
-    desc_slack = ENTITY_DESC_SLACK if exact_entity else DESC_SLACK
     ok = line_score >= MIN_SCORE
     reason = "clip confirms line"
     if not ok:
         reason = f"line score {line_score:.3f} below {MIN_SCORE:.2f}"
-    elif desc_score is not None and line_score < desc_score - desc_slack:
+    elif desc_score is not None and line_score < desc_score - DESC_SLACK:
         ok = False
         reason = (f"line {line_score:.3f} trails image description {desc_score:.3f} "
-                  f"by more than {desc_slack:.3f}")
+                  f"by more than {DESC_SLACK:.3f}")
     elif best_other is not None and line_score < best_other + WIN_MARGIN:
-        if exact_entity and line_score + 0.01 >= best_other:
-            reason = (f"clip exact-entity keeps line {line_score:.3f} vs best other {best_other:.3f} "
-                      f"(margin below {WIN_MARGIN:.2f})")
+        # Exact-entity may keep a first-place line that misses the margin, never a loser or tie.
+        if exact_entity and line_score > best_other:
+            reason = (f"clip ranks line first {line_score:.3f} vs best other {best_other:.3f} "
+                      f"(exact-entity, margin below {WIN_MARGIN:.2f})")
         else:
             ok = False
             reason = (f"line {line_score:.3f} is not a clear winner over other lines "
@@ -214,6 +212,15 @@ def image_from_bytes(data: bytes):
     from io import BytesIO
     from PIL import Image
     return Image.open(BytesIO(data)).convert("RGB")
+
+
+def frames_from_segment(path: str, start: float, duration: float, n: int = 3) -> List:
+    """Sample 2–3 frames from the exact segment that will be rendered. None entries mean a decode miss."""
+    duration = max(0.0, float(duration or 0.0))
+    start = max(0.0, float(start or 0.0))
+    count = 3 if n >= 3 and duration >= 1.5 else 2
+    fracs = (0.2, 0.5, 0.8) if count == 3 else (0.3, 0.7)
+    return [frame_from_video(path, start + duration * f) for f in fracs[:count]]
 
 
 def frame_from_video(path: str, start: float = 0.0):

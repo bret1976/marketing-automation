@@ -494,3 +494,129 @@ def test_meta_line_match_rejects_normandy_polarity_and_nationality_mismatches():
     got = fv.meta_line_match(harbor, NORMANDY, mulberry)
     assert got["ok"] is True
     assert "mulberry" in " ".join(got["overlap"]) or "artificial" in got["overlap"]
+
+
+def test_person_names_extract_bare_surname_but_not_many_german():
+    names = fv._person_names("Eisenhower had tentatively selected 5 June as the date for the assault.")
+    assert any(n.lower() == "eisenhower" for n in names)
+    assert fv._person_names("Many German units were under strength.") == []
+    assert fv._person_names("The two generals insisted that the scale of the initial assault should be increased.") == []
+    # Full names still work, including FDR + Eisenhower
+    both = fv._person_names("US president Franklin D Roosevelt placed Major General Dwight D Eisenhower in command.")
+    assert any("roosevelt" in n.lower() for n in both)
+    assert any("eisenhower" in n.lower() for n in both)
+
+
+def test_dates_extract_day_month_but_are_never_the_accept_basis():
+    dates = fv._dates("Eisenhower had tentatively selected 5 June as the date for the assault.")
+    assert any(d[0] == "d" and d[2] == 6 and d[3] == 5 for d in dates)
+    # Conflicting calendar days still reject (May 1 vs June 6; 5 June vs 6 June).
+    assert fv._dates_conflict([("d", 1944, 5, 1)], "British Forces during the Invasion of Normandy 6 June 1944")
+    assert fv._dates_conflict([("d", 0, 6, 5)], "Invasion of Normandy 6 June 1944")
+    assert not fv._dates_conflict([("d", 0, 6, 5)], "American soldiers on a Coast Guard assault transport")
+    # A line whose only distinctive token is a date must not be accepted on the date alone.
+    date_only = {"show": "The landings were scheduled for 5 June."}
+    transport = _still(
+        "H Hour has arrived. American soldiers, hardened and ready, lounge under full fighting equipment "
+        "on the deck of a Coast Guard assault transport in the fateful trip across the English Channel. (49380246091).jpg",
+        ident="File:transport.jpg",
+    )
+    assert fv.meta_line_match(transport, NORMANDY, date_only)["ok"] is False
+
+
+def test_v3_normandy_failures_and_near_miss_are_rejected():
+    """Regression: v3 dry-run job 8af4f105 still accepted three mismatches and a near miss."""
+    generals = {"show": "The two generals insisted that the scale of the initial assault should be increased from three to five divisions."}
+    road = _still("The Allied Campaign in North-West Europe 6 June 1944 - 7 May 1945 B5221.jpg",
+                  ident="File:B5221.jpg")
+    assert fv.meta_line_match(road, NORMANDY, generals)["ok"] is False
+
+    ike_date = {"show": "Eisenhower had tentatively selected 5 June as the date for the assault."}
+    us_transport = _still(
+        "H Hour has arrived. American soldiers, hardened and ready, lounge under full fighting equipment "
+        "on the deck of a Coast Guard assault transport in the fateful trip across the English Channel. (49380246091).jpg",
+        ident="File:transport.jpg",
+    )
+    terms = fv.line_specific_terms(ike_date, NORMANDY)
+    assert any("eisenhower" in n.lower() for n in terms["people"])
+    assert fv.meta_line_match(us_transport, NORMANDY, ike_date)["ok"] is False
+
+    german_str = {"show": "Many German units were under strength."}
+    tank = _still("D-day - British Forces during the Invasion of Normandy 6 June 1944 B5089.jpg",
+                  ident="File:B5089.jpg")
+    assert fv.line_specific_terms(german_str, NORMANDY)["people"] == []
+    assert fv.meta_line_match(tank, NORMANDY, german_str)["ok"] is False
+
+    winds = {"show": "Strong winds blew the landing craft east of their intended positions."}
+    navy = _still(
+        "The Royal Navy during the Second World War- Operation Overlord (the Normandy Landings), June 1944 A24101.jpg",
+        ident="File:A24101.jpg",
+    )
+    assert fv.meta_line_match(navy, NORMANDY, winds)["ok"] is False
+
+
+def test_write_script_image_first_does_not_reuse_v3_mismatches():
+    """Start from the images: each file keeps a sentence that describes its own metadata, or is dropped."""
+    subj = dict(NORMANDY)
+    subj["text"] = (
+        "The Normandy landings were the Allied invasion of France. "
+        "The two generals insisted that the scale of the initial assault should be increased from three to five divisions. "
+        "The most serious drawback of the Normandy coast would be overcome through the development of artificial Mulberry harbours. "
+        "Eisenhower had tentatively selected 5 June as the date for the assault. "
+        "American soldiers crossed the English Channel on a Coast Guard assault transport. "
+        "General Eisenhower was appointed commander of the Supreme Headquarters Allied Expeditionary Force. "
+        "Strong winds blew the landing craft east of their intended positions. "
+        "Many German units were under strength. "
+        "British tanks came ashore with the first waves on D-Day. "
+        "The landing was divided into sectors shown on the official D-Day sectors chart."
+    )
+    pool = [
+        _still("D-Day Sectors Chart NARA 84786164.jpg",
+               "Chart of the D-Day sectors", "File:sectors.jpg"),
+        _still("The Allied Campaign in North-West Europe 6 June 1944 - 7 May 1945 B5221.jpg",
+               ident="File:B5221.jpg"),
+        _still("D-Day Harbor (15103484811).jpg",
+               "Remains of an artificial Mulberry harbour caisson", "File:harbor.jpg"),
+        _still(
+            "H Hour has arrived. American soldiers, hardened and ready, lounge under full fighting equipment "
+            "on the deck of a Coast Guard assault transport in the fateful trip across the English Channel. (49380246091).jpg",
+            ident="File:transport.jpg",
+        ),
+        _still("General Eisenhower Letter to Soldiers of the Allied Expeditionary Force.png",
+               "General Dwight D Eisenhower appointed commander of the Supreme Headquarters Allied Expeditionary Force",
+               "File:letter.png"),
+        _still("The Royal Navy during the Second World War- Operation Overlord (the Normandy Landings), June 1944 A24101.jpg",
+               ident="File:A24101.jpg"),
+        _still("D-day - British Forces during the Invasion of Normandy 6 June 1944 B5089.jpg",
+               "A British tank coming ashore with the first waves on D-Day", "File:B5089.jpg"),
+    ]
+    log = []
+    script = fv.write_script_from_footage(subj, pool, log)
+    assert script is not None, log
+    by_id = {}
+    for ln in script["lines"]:
+        pick = (ln.get("picks") or [{}])[0]
+        by_id[pick.get("id")] = ln["show"].lower()
+    shows = " ".join(by_id.values())
+    # Known-good pairings
+    assert "File:harbor.jpg" in by_id
+    assert "mulberry" in by_id["File:harbor.jpg"]
+    assert "File:letter.png" in by_id
+    assert "eisenhower" in by_id["File:letter.png"]
+    assert "File:transport.jpg" in by_id
+    assert "channel" in by_id["File:transport.jpg"] or "transport" in by_id["File:transport.jpg"]
+    assert "eisenhower" not in by_id["File:transport.jpg"]
+    assert "5 june" not in by_id["File:transport.jpg"]
+    # v3 failures must not be reassigned to those stills
+    if "File:B5221.jpg" in by_id:
+        assert "generals" not in by_id["File:B5221.jpg"] and "divisions" not in by_id["File:B5221.jpg"]
+    if "File:B5089.jpg" in by_id:
+        assert "under strength" not in by_id["File:B5089.jpg"]
+        assert "german" not in by_id["File:B5089.jpg"]
+    if "File:A24101.jpg" in by_id:
+        assert "winds" not in by_id["File:A24101.jpg"]
+    # And the bad sentences should not appear at all on any still
+    assert "two generals" not in shows
+    assert "tentatively selected" not in shows
+    assert "under strength" not in shows
+    assert "strong winds" not in shows

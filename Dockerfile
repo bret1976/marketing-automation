@@ -65,9 +65,20 @@ RUN mkdir -p /opt/kokoro \
     && curl -fsSL -o /opt/kokoro/voices-v1.0.bin https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin \
     && python -c "import os; from kokoro_onnx import Kokoro; k = Kokoro(os.environ['KOKORO_MODEL_FP32'], os.environ['KOKORO_VOICES']); a, sr = k.create('Footage mode voice check.', voice='am_fenrir', speed=1.0, lang='en-us'); assert sr == 24000 and len(a) > 12000, len(a); print('KOKORO_BUILD_OK', len(a) / sr, 's')"
 
+
+# Footage fallback (no Cloudflare): bake a quantized CLIP ViT-B-32 (~150 MB) into the image, like Kokoro,
+# never onto the data volume. Used to confirm a raw still or video frame matches its voiceover line.
+ENV FOOTAGE_CLIP_ONNX=/opt/clip/model_quantized.onnx \
+    FOOTAGE_CLIP_TOKENIZER=/opt/clip/tokenizer.json
+RUN mkdir -p /opt/clip \
+    && curl -fsSL -o /opt/clip/model_quantized.onnx https://huggingface.co/Xenova/clip-vit-base-patch32/resolve/main/onnx/model_quantized.onnx \
+    && curl -fsSL -o /opt/clip/tokenizer.json https://huggingface.co/Xenova/clip-vit-base-patch32/resolve/main/tokenizer.json \
+    && python -c "from pathlib import Path; p=Path('/opt/clip/model_quantized.onnx'); assert p.stat().st_size > 100_000_000, p.stat().st_size; t=Path('/opt/clip/tokenizer.json'); assert t.stat().st_size > 1000, t.stat().st_size; print('CLIP_FILES_OK', p.stat().st_size, t.stat().st_size)"
+
 # Copy rest of the application code
 COPY . .
 RUN chmod a+rx /app/bin/ytdlp-shim/yt-dlp
+RUN python -c "import footage_clip; print(footage_clip.self_check())"
 
 # Expose FastAPI default port
 EXPOSE 8000

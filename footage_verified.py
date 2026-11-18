@@ -952,12 +952,27 @@ def place_by_meta(c: dict, need: float, used: Dict[str, List[float]], workdir: s
                   get=fm._get) -> Optional[dict]:
     """Pick a clean segment of a metadata-guaranteed clip. No vision call."""
     src = _resolve_url(c, get)
-    if not src:
+    if not src and c["kind"] != "image":
         c["_last"] = "no file url"
         return None
     if c["kind"] == "image":
         if c.get("id") in used:
             c["_last"] = "still already used"
+            return None
+        if c.get("_img") is None:
+            thumb = src
+            if c["provider"] == "wikimedia_commons":
+                thumb = "https://commons.wikimedia.org/wiki/Special:FilePath/" + requests_quote(c["id"].replace("File:", "")) + "?width=1600"
+            if not thumb:
+                c["_last"] = "no file url"
+                return None
+            try:
+                data = fm._get(thumb, timeout=60).content
+                c["_img"] = data or b""
+            except Exception as exc:  # noqa: BLE001
+                c["_last"] = f"image download failed: {exc}"[:120]
+                c["_img"] = b""
+        if not c.get("_img"):
             return None
         vis = {"ok": True, "match": None, "on_topic": True, "has_text": False, "type": "photo",
                "description": "accepted by metadata guarantee (no vision)", "method": "metadata"}

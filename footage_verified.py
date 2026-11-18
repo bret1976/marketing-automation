@@ -42,7 +42,7 @@ import footage_tts
 
 logger = logging.getLogger("footage_verified")
 MARKER = "FOOTAGE_VERIFIED"
-VERSION = "2026-11-17.7"
+VERSION = "2026-11-17.8"
 
 # Set only by a dry-run to exercise the no-Cloudflare path; the scheduler never sets this.
 _force_fallback = False
@@ -54,6 +54,7 @@ CLIP_GOOD_MATCH = 8
 MAX_CHECKS_PER_LINE = int(os.environ.get("FOOTAGE_MAX_CHECKS_PER_LINE", "4"))
 MIN_LINES = int(os.environ.get("FOOTAGE_MIN_LINES", "6"))
 FALLBACK_MIN_LINES = int(os.environ.get("FOOTAGE_FALLBACK_MIN_LINES", "5"))
+FALLBACK_TOPIC_BUDGET_S = float(os.environ.get("FOOTAGE_FALLBACK_TOPIC_BUDGET_S", "480"))
 FILE_MENU = 45
 MAX_VIDEO_SECONDS = float(os.environ.get("FOOTAGE_MAX_VIDEO_SECONDS", "900"))
 LEAD = 0.35
@@ -598,7 +599,10 @@ def localize_shot(p: dict, dur: float, workdir: str, idx: int) -> dict:
         open(raw, "wb").write(c["_img"])
         flat = os.path.join(workdir, f"still_flat_{idx}.png")
         fm._run([fm._bin("ffmpeg"), "-y", "-v", "error", "-i", raw, "-vf", "scale='min(3840,iw)':-2,format=rgb24", "-frames:v", "1", flat])
-        return {"path": flat, "kind": "image", "start": 0.0, "dur": dur}
+        out = {"path": flat, "kind": "image", "start": 0.0, "dur": dur}
+        if still_is_document(c) or p.get("fit") == "contain":
+            out["fit"] = "contain"
+        return out
     cc = dict(c, crop=p.get("crop"))
     return fm.localize(cc, c["_src"], p["start"], dur, workdir, idx)
 
@@ -945,6 +949,44 @@ _COMPOUND_PHRASES = {
     "landing craft", "landing barge", "landing barges", "landing ship", "landing ships",
 }
 
+# Units, formations and generic military nouns. They never prove a line's distinctive claim
+# ("airborne" in "6th Airborne Division" does not depict "dummies").
+_UNIT_WORDS = {
+    "division", "divisions", "brigade", "regiment", "battalion", "corps", "army", "navy",
+    "force", "forces", "guard", "guards", "commando", "commandos", "squadron", "fleet",
+    "airborne", "infantry", "artillery", "cavalry", "headquarters", "command", "unit",
+    "units", "troops", "troop", "soldiers", "soldier", "men", "man", "crew", "crews",
+}
+
+# A line whose claim is a numeric count or estimate cannot be depicted by a photograph.
+_STAT_WORDS = {
+    "casualties", "casualty", "killed", "wounded", "dead", "deaths", "losses", "loss",
+    "estimated", "estimate", "estimates", "toll", "numbered", "count", "counted",
+    "total", "totals", "totalled", "totaled", "amounted",
+}
+
+# Stills that must be letterboxed (fit/contain) so a cover crop cannot hide the claim.
+_DOCUMENT_WORDS = {
+    "chart", "map", "letter", "document", "plan", "diagram", "poster", "manuscript",
+    "telegram", "memo", "memorandum", "blueprint", "schematic", "page", "report",
+    "orders", "proclamation",
+}
+
+# Words that may appear in a line but never prove the image depicts its distinctive claim.
+_WEAK_HEAD = {
+    "believe", "believed", "additional", "occurred", "occur", "led", "lead", "made",
+    "shown", "official", "strong", "several", "various", "including", "without",
+    "through", "among", "become", "became", "given", "taken", "having", "divided",
+    "preparation", "prepared", "terms", "examples", "earliest", "feature", "features",
+    "extensive", "reference", "generally", "however", "stations", "station",
+    "facilities", "facility", "structures", "structure", "conditions", "practice",
+    "practices", "president", "major", "lifts", "glass", "estimated", "estimate",
+    "kilometre", "kilometer", "kilometres", "kilometers", "metre", "meter", "miles",
+    "yards", "stretch", "target", "serious", "drawback", "overcome", "development",
+    "lack", "provided", "mainly", "germans", "americans", "britons", "british",
+    "french", "russians", "allies", "occurred",
+}
+
 # Words that look like a capitalized name but are not people (quantifiers, nationalities, months).
 _NOT_PERSON_PREFIXES = {
     "the", "a", "an", "this", "that", "these", "those", "their", "his", "her", "its", "our",
@@ -1218,6 +1260,108 @@ def _compound_in_text(phrase: str, text: str) -> bool:
     return bool(modifier and re.search(r"\b" + re.escape(modifier) + r"\b", blob))
 
 
+
+def is_statistic_line(show: str) -> bool:
+    """True when the line's claim is a numeric count or estimate, which a photo cannot depict."""
+    text = show or ""
+    has_number = bool(re.search(r"\d", text) or re.search(r"\b(thousands|hundreds|dozens|millions)\b", text, re.I))
+    words = set(re.findall(r"[a-z]+", text.lower()))
+    if has_number and (words & _STAT_WORDS):
+        return True
+    # Two or more large written counts (4,000 / 45,827), ignoring years.
+    nums = []
+    for m in re.finditer(r"\b\d{1,3}(?:,\d{3})+\b|\b\d{3,}\b", text):
+        raw = m.group(0).replace(",", "")
+        try:
+            n = int(raw)
+        except ValueError:
+            continue
+        if 1000 <= n <= 2100 and len(raw) == 4:
+            continue  # a year, not a casualty count
+        nums.append(n)
+    if len(nums) >= 2:
+        return True
+    if has_number and re.search(r"\b(estimated|numbered|counted|totalled|totaled|amounted)\b", text, re.I):
+        return True
+    return False
+
+
+def still_is_document(c: dict) -> bool:
+    text = _clip_text(c).lower()
+    return any(re.search(r"\b" + re.escape(w) + r"\b", text) for w in _DOCUMENT_WORDS)
+
+
+def _head_in_text(head: str, text: str) -> bool:
+    if " " in (head or ""):
+        return _compound_in_text(head, text) or _name_in_text(head, text) or _place_in_text(head, text)
+    blob = (text or "").lower()
+    h = (head or "").lower()
+    variants = {h, h + "s", h + "es"}
+    if h.endswith("s") and len(h) > 4:
+        variants.add(h[:-1])
+    if "our" in h:
+        variants.add(h.replace("our", "or"))
+    if "or" in h:
+        variants.add(h.replace("or", "our"))
+    return any(re.search(r"\b" + re.escape(v) + r"\b", blob) for v in variants if v)
+
+
+def _is_nation_word(w: str) -> bool:
+    w = (w or "").lower()
+    return w in _NATIONALITIES or w.rstrip("s") in _NATIONALITIES
+
+
+def line_head_terms(line: dict, subj: dict, extra_generic: Optional[set] = None) -> List[str]:
+    """Distinctive head nouns or events the image must itself mention.
+
+    Nationality, unit and generic nouns never count. 'airborne landing' is not enough
+    for a line about dummies; 'landing craft' is not enough for a line about winds
+    blowing craft east of their intended positions.
+    """
+    terms = line_specific_terms(line, subj, extra_generic)
+    heads: List[str] = []
+    for name in terms.get("people") or []:
+        heads.append(name)
+    for name in terms.get("places") or []:
+        heads.append(name)
+    for phrase in terms.get("compounds") or []:
+        toks = [w for w in re.findall(r"[a-z0-9]+", phrase.lower())]
+        if toks and all(w in _UNIT_WORDS or w in _GENERIC_SUBJECT or _is_nation_word(w) or w in _META_STOP for w in toks):
+            continue
+        heads.append(phrase)
+    skip = _UNIT_WORDS | _NATIONALITIES | _GENERIC_SUBJECT | _META_STOP | set(_MONTHS) | _WEAK_HEAD
+    for w in terms.get("words") or []:
+        if w in skip or _is_nation_word(w) or len(w) < 4:
+            continue
+        if w not in {h.lower() for h in heads}:
+            heads.append(w)
+    return heads
+
+
+def required_heads(line: dict, subj: dict, extra_generic: Optional[set] = None) -> List[str]:
+    """The claims the image must itself name. People, places and distinctive compounds
+    always; otherwise the first distinctive content word in the sentence."""
+    terms = line_specific_terms(line, subj, extra_generic)
+    req: List[str] = []
+    for name in (terms.get("people") or []) + (terms.get("places") or []):
+        req.append(name)
+    for phrase in terms.get("compounds") or []:
+        toks = [w for w in re.findall(r"[a-z0-9]+", phrase.lower())]
+        if toks and all(w in _UNIT_WORDS or w in _GENERIC_SUBJECT or _is_nation_word(w) or w in _META_STOP for w in toks):
+            continue
+        req.append(phrase)
+    if req:
+        return req
+    skip = (_UNIT_WORDS | _NATIONALITIES | _GENERIC_SUBJECT | _META_STOP | set(_MONTHS) | _WEAK_HEAD
+            | subject_generic_words(subj, extra_generic))
+    show = (line.get("show") or line.get("say") or "").lower()
+    for w in re.findall(r"[a-z0-9]+", show):
+        if w in skip or _is_nation_word(w) or len(w) < 5:
+            continue
+        return [w]
+    return []
+
+
 def line_specific_terms(line: dict, subj: dict, extra_generic: Optional[set] = None) -> dict:
     """Entities and dates that belong to this line, with generic subject words removed."""
     show = line.get("show") or line.get("say") or ""
@@ -1258,7 +1402,7 @@ def line_specific_terms(line: dict, subj: dict, extra_generic: Optional[set] = N
             compounds.append(m.group(0))
     words = []
     for w in _meta_words(show):
-        if w in generic or w in _META_STOP or w in _MONTHS:
+        if w in generic or w in _META_STOP or w in _MONTHS or w in _NATIONALITIES or w in _UNIT_WORDS:
             continue
         if any(w in n.lower() for n in named):
             continue
@@ -1282,6 +1426,9 @@ def clip_is_of_subject(c: dict, subj: dict) -> bool:
 
 def meta_line_match(c: dict, subj: dict, line: dict, extra_generic: Optional[set] = None) -> dict:
     """A clip may be used only when its own title/description/caption depicts this line's specific entity or event."""
+    show = line.get("show") or line.get("say") or ""
+    if is_statistic_line(show):
+        return {"ok": False, "reason": "statistic lines are never matched to photos", "score": 0.0, "overlap": []}
     text = _clip_text(c)
     if not clip_is_of_subject(c, subj):
         return {"ok": False, "reason": "clip is not provenance-tied to the subject", "score": 0.0, "overlap": []}
@@ -1305,6 +1452,15 @@ def meta_line_match(c: dict, subj: dict, line: dict, extra_generic: Optional[set
     if missing_compounds:
         return {"ok": False, "reason": "missing line-specific phrase: " + ", ".join(missing_compounds),
                 "score": 0.0, "overlap": []}
+    heads = required_heads(line, subj, extra_generic)
+    if not heads:
+        return {"ok": False, "reason": "no distinctive head noun or event in the line", "score": 0.0, "overlap": []}
+    missing_heads = [h for h in heads if not _head_in_text(h, text)]
+    if missing_heads:
+        need = ", ".join(str(h) for h in missing_heads[:6])
+        return {"ok": False, "reason": "missing distinctive head noun or event: " + need,
+                "score": 0.0, "overlap": []}
+    head_hits = [h for h in heads if _head_in_text(h, text)]
     word_hits = [w for w in terms["words"] if re.search(r"\b" + re.escape(w) + r"\b", text.lower())]
     person_hits = [n for n in terms["people"] if _name_in_text(n, text)]
     place_hits = [n for n in terms.get("places") or [] if _place_in_text(n, text)]
@@ -1413,6 +1569,8 @@ def write_script_from_footage(subj: dict, pool: List[dict], log: List[str]) -> O
                    "visual": say, "queries": [name], "picks": [c]}
             rec["show"] = tightened if isinstance(tightened, str) else say
             rec["say"] = fm.spoken(rec["show"])
+            if is_statistic_line(rec["show"]):
+                continue
             m = meta_line_match(c, subj, rec, extra_generic)
             if not m["ok"]:
                 continue
@@ -1533,12 +1691,20 @@ def _clip_confirm_placement(placed: dict, line: dict, log: List[str]):
         log.append("clip check skipped: no decodable source frame")
         return True
     desc = " ".join(str(cand.get(k) or "") for k in ("title", "description", "caption")).strip()
-    result = clip.confirm_line(img, line.get("show") or line.get("say") or "", desc)
+    show = line.get("show") or line.get("say") or ""
+    others = line.get("_other_lines") or []
+    subj = line.get("_subj") or {}
+    terms = line_specific_terms(line, subj) if subj else {"people": [], "places": []}
+    heads = line_head_terms(line, subj) if subj else []
+    title = cand.get("title") or ""
+    title_term = any(len(str(h)) >= 7 and _head_in_text(h, title) for h in heads)
+    exact = bool(terms.get("people") or terms.get("places") or title_term)
+    result = clip.confirm_line(img, show, desc, other_lines=others, exact_entity=exact)
     rss = result.get("rss_mb")
     rss_s = f"{rss:.0f}MB" if isinstance(rss, (int, float)) else "?"
     log.append(
         f"clip check line={result.get('line')} desc={result.get('desc')} "
-        f"rss={rss_s} ms={result.get('ms')} {result.get('reason')}"
+        f"best_other={result.get('best_other')} rss={rss_s} ms={result.get('ms')} {result.get('reason')}"
     )
     if result.get("ok") is False:
         return False
@@ -1551,7 +1717,11 @@ def match_lines_meta(subj: dict, script: dict, durations: List[float], pool: Lis
     uses: Dict[str, int] = {}
     out: List[Optional[dict]] = []
     extra_generic = pool_generic_words(pool, subj)
+    all_shows = [ln.get("show") or ln.get("say") or "" for ln in script["lines"]]
     for line, need in zip(script["lines"], durations):
+        line = dict(line)
+        line["_subj"] = subj
+        line["_other_lines"] = [s for s in all_shows if s and s != (line.get("show") or line.get("say") or "")]
         ranked = []
         seen = set()
         for c in (line.get("picks") or []) + pool:
@@ -1691,7 +1861,7 @@ def remember_verified(subj: dict, script: dict, sources: List[dict], fallback: b
         logger.warning("could not write verified-subject cache: %s", exc)
 
 
-def library_fallback_subjects(avoid: set, recent: str, log: List[str], get=fm._get, limit: int = 8) -> List[tuple]:
+def library_fallback_subjects(avoid: set, recent: str, log: List[str], get=fm._get, limit: int = 12) -> List[tuple]:
     import footage_topics
     out = []
     for topic in footage_topics.TOPICS:
@@ -1767,11 +1937,17 @@ def run_fallback(avoid: set, recent: str, workdir: str, log: List[str]) -> Optio
     """Build one topic without Cloudflare. Returns None (and logs) rather than a mismatched video."""
     if "ai fallback (cf 429)" not in log:
         log.append("ai fallback (cf 429)")
+    t0 = time.time()
     candidates = cached_fallback_subjects(avoid, recent, log) + library_fallback_subjects(avoid, recent, log)
     if not candidates:
         log.append("ai fallback: no library or previously verified subjects available")
         return None
+    log.append(f"ai fallback: trying {len(candidates)} library/cache topics, budget {FALLBACK_TOPIC_BUDGET_S:.0f}s")
     for subj, item, key in candidates:
+        elapsed = time.time() - t0
+        if elapsed > FALLBACK_TOPIC_BUDGET_S:
+            log.append(f"ai fallback: topic budget exhausted after {elapsed:.0f}s; skipping slot")
+            return None
         try:
             built = build_fallback_topic(subj, item, key, workdir, log)
         except Exception as exc:  # noqa: BLE001

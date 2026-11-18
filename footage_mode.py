@@ -1430,9 +1430,15 @@ def focus_x(path: str, kind: str, out_aspect: float = 9 / 16, samples: int = 6) 
         return 0.5
 
 
-def _shot_filter(kind: str, w: int, h: int, dur: float, idx: int, focus: float = 0.5) -> str:
+def _shot_filter(kind: str, w: int, h: int, dur: float, idx: int, focus: float = 0.5,
+                 fit: str = "cover") -> str:
     frames = int(round(dur * FPS))
     portrait = h > w
+    # Maps, charts, letters and other documents must be letterboxed so a 9:16 cover
+    # crop cannot hide what the voiceover claims (e.g. a five-sector chart cropped to one sector).
+    if kind == "image" and (fit or "cover") == "contain":
+        return (f"fps={FPS},scale={w}:{h}:force_original_aspect_ratio=decrease:flags=lanczos,"
+                f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:black,setsar=1")
     if kind == "image":  # Ken Burns ONLY on stills: slow push-in, alternating drift
         z = "min(1.0+0.0009*on,1.14)"
         cx = f"(iw*{focus:.3f})" if portrait else "(iw/2)"
@@ -1542,7 +1548,7 @@ def render(shots: List[dict], vo_wav: Optional[str], captions: List[dict], music
         else:
             cmd += ["-ss", f"{s['start']:.3f}", "-t", f"{s['dur'] + 0.2:.3f}", "-i", s["path"]]
         focus = s.get("focus", 0.5) if vertical else 0.5
-        filt = (f"[0:v]{_shot_filter(s['kind'], bw, bh, s['dur'], i, focus)},setpts=PTS-STARTPTS,"
+        filt = (f"[0:v]{_shot_filter(s['kind'], bw, bh, s['dur'], i, focus, s.get('fit') or 'cover')},setpts=PTS-STARTPTS,"
                 f"tpad=stop_mode=clone:stop_duration=1,trim=end_frame={frames},setpts=N/({FPS}*TB),format=yuv420p[v]")
         cmd += ["-filter_complex", filt, "-map", "[v]", "-r", str(FPS), "-frames:v", str(frames),
                 "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p",

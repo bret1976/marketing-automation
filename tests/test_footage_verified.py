@@ -620,3 +620,78 @@ def test_write_script_image_first_does_not_reuse_v3_mismatches():
     assert "tentatively selected" not in shows
     assert "under strength" not in shows
     assert "strong winds" not in shows
+
+
+def test_statistic_lines_are_never_matched_to_photos():
+    assert fv.is_statistic_line("German casualties on D-Day have been estimated at 4,000 to 9,000 men.")
+    assert fv.is_statistic_line("All told, the German forces stationed in France were deprived of 45,827 troops and 363 tanks.")
+    assert not fv.is_statistic_line("The target 80-kilometre stretch of the Normandy coast was divided into five sectors.")
+    assert not fv.is_statistic_line("General Eisenhower was appointed commander of the Supreme Headquarters Allied Expeditionary Force.")
+    prisoners = _still(
+        "D-day - British Forces during the Invasion of Normandy 6 June 1944 B5089.jpg",
+        "A group of German prisoners standing in the water next to a disabled Sherman Crab flail tank "
+        "watch as a jeep is towed from the sea, Queen beach, Sword area, 6 June 1944.",
+        "File:B5089.jpg",
+    )
+    casualties = {"show": "German casualties on D-Day have been estimated at 4,000 to 9,000 men."}
+    assert fv.meta_line_match(prisoners, NORMANDY, casualties)["ok"] is False
+    assert fv.meta_line_match(prisoners, NORMANDY, casualties)["reason"].startswith("statistic")
+
+
+def test_v4_dummies_winds_and_airborne_compound_are_rejected():
+    """v4 dry-run f6c59af3: distinctive head noun/event must appear in the image description."""
+    dummies = {"show": "These dummies led the Germans to believe that an additional airborne landing had occurred."}
+    benouville = _still(
+        "D-day - British Forces during the Invasion of Normandy 6 June 1944 B5058.jpg",
+        "Commandos of No. 4 Commando, 1st Special Service Brigade, and troops of 6th Airborne Division "
+        "in Bénouville after the link-up between the two forces, 6 June 1944.",
+        "File:B5058.jpg",
+    )
+    got = fv.meta_line_match(benouville, NORMANDY, dummies)
+    assert got["ok"] is False
+    assert any(h.lower() == "dummies" for h in fv.required_heads(dummies, NORMANDY))
+    # A nationality or 'airborne landing' compound alone must never carry the line.
+    assert "dummies" not in (benouville["title"] + " " + benouville["description"]).lower()
+
+    winds = {"show": "Strong winds blew the landing craft east of their intended positions."}
+    lcts = _still(
+        "D-day - British Forces during the Invasion of Normandy 6 June 1944 B5170.jpg",
+        "LSTs (Landing Ship Tank) and LCTs (Landing Craft Tank) off the Normandy coast, "
+        "as seen from LST 406, 6 June 1944. Visible are LST 228 and LCT 3627.",
+        "File:B5170.jpg",
+    )
+    got = fv.meta_line_match(lcts, NORMANDY, winds)
+    assert got["ok"] is False
+    heads = [h.lower() for h in fv.line_head_terms(winds, NORMANDY)]
+    assert any("wind" in h or h == "blew" or h == "winds" for h in heads)
+
+
+def test_v4_true_matches_and_document_letterbox_still_hold():
+    letter = _still(
+        "General Eisenhower Letter to Soldiers of the Allied Expeditionary Force.png",
+        "General Dwight D Eisenhower appointed commander of the Supreme Headquarters Allied Expeditionary Force",
+        "File:letter.png",
+    )
+    ike = {"show": "General Dwight D Eisenhower was appointed commander of the Supreme Headquarters Allied Expeditionary Force."}
+    got = fv.meta_line_match(letter, NORMANDY, ike)
+    assert got["ok"] is True
+    assert fv.still_is_document(letter) is True
+
+    harbor = _still("D-Day Harbor (15103484811).jpg",
+                    "Remains of an artificial Mulberry harbour caisson", "File:harbor.jpg")
+    mulberry = {"show": "The most serious drawback of the Normandy coast would be overcome through the development of artificial Mulberry harbours."}
+    assert fv.meta_line_match(harbor, NORMANDY, mulberry)["ok"] is True
+    assert fv.still_is_document(harbor) is False
+
+    chart = _still("D-Day Sectors Chart NARA 84786164.jpg", "Chart of the D-Day sectors", "File:sectors.jpg")
+    sectors = {"show": "The target 80-kilometre stretch of the Normandy coast was divided into five sectors: Utah, Omaha, Gold, Juno, and Sword."}
+    got = fv.meta_line_match(chart, NORMANDY, sectors)
+    assert got["ok"] is True
+    assert fv.still_is_document(chart) is True
+
+    # Maps and documents are letterboxed (fit/contain), not cover-cropped.
+    import footage_mode as fm
+    contain = fm._shot_filter("image", 1080, 1920, 5.0, 0, 0.5, "contain")
+    cover = fm._shot_filter("image", 1080, 1920, 5.0, 0, 0.5, "cover")
+    assert "force_original_aspect_ratio=decrease" in contain and "pad=" in contain
+    assert "zoompan" in cover and "pad=" not in cover

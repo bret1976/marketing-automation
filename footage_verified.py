@@ -42,7 +42,7 @@ import footage_tts
 
 logger = logging.getLogger("footage_verified")
 MARKER = "FOOTAGE_VERIFIED"
-VERSION = "2026-11-17.8"
+VERSION = "2026-11-17.9"
 
 # Set only by a dry-run to exercise the no-Cloudflare path; the scheduler never sets this.
 _force_fallback = False
@@ -898,6 +898,8 @@ _PLACE_WORDS = {
     "garden", "gardens", "conservatory", "greenhouse", "greenhouses", "glasshouse", "hothouse",
     "orchard", "vineyard", "plantation", "laboratory", "observatory", "library", "hospital",
     "temple", "abbey", "chapel", "square", "plaza", "farm", "farmhouse",
+    "facility", "facilities", "assembly", "factory", "complex", "site",
+    "stage", "stages",
 }
 
 _ORG_WORDS = {
@@ -980,11 +982,16 @@ _WEAK_HEAD = {
     "preparation", "prepared", "terms", "examples", "earliest", "feature", "features",
     "extensive", "reference", "generally", "however", "stations", "station",
     "facilities", "facility", "structures", "structure", "conditions", "practice",
-    "practices", "president", "major", "lifts", "glass", "estimated", "estimate",
+    "practices", "president", "major", "glass", "estimated", "estimate",
     "kilometre", "kilometer", "kilometres", "kilometers", "metre", "meter", "miles",
     "yards", "stretch", "target", "serious", "drawback", "overcome", "development",
     "lack", "provided", "mainly", "germans", "americans", "britons", "british",
     "french", "russians", "allies", "occurred",
+    # generic nouns that never prove a line's event (v5 Artemis mismatches)
+    "stage", "stages", "flight", "flights", "astronauts", "astronaut", "crew",
+    "crewed", "uncrewed", "launch", "launched", "launching", "mission", "missions",
+    "rocket", "rockets", "vehicle", "vehicles", "spacecraft", "version", "module",
+    "modules",
 }
 
 # Words that look like a capitalized name but are not people (quantifiers, nationalities, months).
@@ -1081,6 +1088,10 @@ def _dates(text: str) -> List[tuple]:
         _add(("d", 0, _MONTHS[m.group(1).lower()], int(m.group(2))))
     for m in re.finditer(r"\b(\d{1,2}):(\d{2})\b", raw):
         _add(("t", int(m.group(1)), int(m.group(2))))
+    for m in re.finditer(r"\b((?:1[0-9]|20)\d{2})-(\d{2})-(\d{2})\b", raw):
+        y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        if 1 <= mo <= 12 and 1 <= d <= 31:
+            _add(("d", y, mo, d))
     return found
 
 
@@ -1343,23 +1354,41 @@ def required_heads(line: dict, subj: dict, extra_generic: Optional[set] = None) 
     always; otherwise the first distinctive content word in the sentence."""
     terms = line_specific_terms(line, subj, extra_generic)
     req: List[str] = []
-    for name in (terms.get("people") or []) + (terms.get("places") or []):
+    for name in terms.get("people") or []:
         req.append(name)
     for phrase in terms.get("compounds") or []:
         toks = [w for w in re.findall(r"[a-z0-9]+", phrase.lower())]
         if toks and all(w in _UNIT_WORDS or w in _GENERIC_SUBJECT or _is_nation_word(w) or w in _META_STOP for w in toks):
             continue
         req.append(phrase)
-    if req:
-        return req
     skip = (_UNIT_WORDS | _NATIONALITIES | _GENERIC_SUBJECT | _META_STOP | set(_MONTHS) | _WEAK_HEAD
             | subject_generic_words(subj, extra_generic))
     show = (line.get("show") or line.get("say") or "").lower()
-    for w in re.findall(r"[a-z0-9]+", show):
-        if w in skip or _is_nation_word(w) or len(w) < 5:
-            continue
-        return [w]
-    return []
+
+    def _event_words(min_len: int) -> List[str]:
+        place_blob = " ".join(str(n).lower() for n in (terms.get("places") or []))
+        out: List[str] = []
+        for w in re.findall(r"[a-z0-9]+", show):
+            if w in skip or _is_nation_word(w) or len(w) < min_len:
+                continue
+            if w in place_blob:
+                continue
+            if w not in out:
+                out.append(w)
+        return out
+
+    places = list(terms.get("places") or [])
+    if req:
+        # people or distinctive compounds can carry a line; still require a named place when present
+        return req + places
+    if places:
+        # A place is required, but a place-only line with no event language cannot be used.
+        # Event overlap itself is checked in meta_line_match (any event word, not one forced head).
+        if not _event_words(min_len=4):
+            return []
+        return places
+    evs = _event_words(min_len=5)
+    return evs[:1]
 
 
 def line_specific_terms(line: dict, subj: dict, extra_generic: Optional[set] = None) -> dict:
@@ -1469,7 +1498,20 @@ def meta_line_match(c: dict, subj: dict, line: dict, extra_generic: Optional[set
     # A date has no visual meaning on its own and is never the basis for accepting a pair.
     # Subject-category overlap alone is not enough: need the line's own entities.
     if person_hits or place_hits:
-        if word_hits or person_hits or place_hits:
+        place_blob = " ".join(str(n).lower() for n in (terms.get("places") or []))
+        ev_skip = (_UNIT_WORDS | _NATIONALITIES | _GENERIC_SUBJECT | _META_STOP | set(_MONTHS)
+                   | _WEAK_HEAD | subject_generic_words(subj, extra_generic))
+        event_hits = []
+        for w in re.findall(r"[a-z0-9]+", show.lower()):
+            if w in ev_skip or _is_nation_word(w) or len(w) < 4 or w in place_blob:
+                continue
+            if re.search(r"\b" + re.escape(w) + r"\b", text.lower()):
+                event_hits.append(w)
+        event_hits = event_hits + [c for c in compound_hits]
+        if place_hits and not person_hits and not compound_hits and not event_hits:
+            return {"ok": False, "reason": "place-only match without the event",
+                    "score": 0.0, "overlap": [n.lower() for n in place_hits]}
+        if word_hits or person_hits or event_hits or compound_hits:
             overlap = [n.lower() for n in person_hits + place_hits] + word_hits
             score = 0.9 + 0.02 * min(len(person_hits) + len(place_hits) + len(word_hits), 5)
             return {"ok": True, "reason": "line-specific entity in title/description",
@@ -1660,36 +1702,44 @@ def place_by_meta(c: dict, need: float, used: Dict[str, List[float]], workdir: s
 
 
 
-def _clip_confirm_placement(placed: dict, line: dict, log: List[str]):
-    """Second gate: score the raw still or video frame (never a captioned render) against the line.
+def _clip_confirm_placement(placed: dict, line: dict, log: List[str], need: float = 0.0):
+    """Second gate: score the exact raw still or chosen video segment (never a captioned render).
 
-    Returns False to reject, True to keep when CLIP is unavailable, or a result dict when it ran.
-    A load or decode failure must not crash the slot; metadata remains the authority in that case.
+    Fail closed: if the model cannot load, or any sampled frame cannot be decoded or scored,
+    the line is rejected. Never skip the check. Every sampled frame must pass the winner rule.
     """
+    def _reject(why: str):
+        log.append(f"clip check failed: {why}; rejecting line"[:240])
+        return False
+
     try:
         import footage_clip as clip
     except Exception as exc:  # noqa: BLE001
-        log.append(f"clip check skipped (import): {exc}"[:160])
-        return True
+        return _reject(f"import: {exc}")
     if not clip.available():
-        if not getattr(_clip_confirm_placement, "_logged_skip", False):
-            why = getattr(clip, "_LOAD_ERROR", None) or "model not baked into the image"
-            log.append(f"clip check skipped: {why}"[:200])
-            _clip_confirm_placement._logged_skip = True
-        return True
+        why = getattr(clip, "_LOAD_ERROR", None) or "model not baked into the image"
+        return _reject(why)
+
     cand = placed.get("cand") or {}
-    img = None
+    frames = []
     try:
         if cand.get("_img"):
             img = clip.image_from_bytes(cand["_img"])
+            frames = [img]
         elif cand.get("_src") or cand.get("path"):
-            img = clip.frame_from_video(cand.get("_src") or cand.get("path"), placed.get("start") or 0.0)
+            path = cand.get("_src") or cand.get("path")
+            start = float(placed.get("start") or 0.0)
+            dur = float(need or placed.get("need") or 0.0)
+            frames = clip.frames_from_segment(path, start, dur, n=3)
+        else:
+            return _reject("no source still or video path")
     except Exception as exc:  # noqa: BLE001
-        log.append(f"clip check skipped (frame): {exc}"[:160])
-        return True
-    if img is None:
-        log.append("clip check skipped: no decodable source frame")
-        return True
+        return _reject(f"decode: {exc}")
+    if not frames:
+        return _reject("no decodable source frame")
+    if any(img is None for img in frames):
+        return _reject(f"{sum(1 for img in frames if img is None)} of {len(frames)} segment frames could not be decoded")
+
     desc = " ".join(str(cand.get(k) or "") for k in ("title", "description", "caption")).strip()
     show = line.get("show") or line.get("say") or ""
     others = line.get("_other_lines") or []
@@ -1699,16 +1749,19 @@ def _clip_confirm_placement(placed: dict, line: dict, log: List[str]):
     title = cand.get("title") or ""
     title_term = any(len(str(h)) >= 7 and _head_in_text(h, title) for h in heads)
     exact = bool(terms.get("people") or terms.get("places") or title_term)
-    result = clip.confirm_line(img, show, desc, other_lines=others, exact_entity=exact)
-    rss = result.get("rss_mb")
-    rss_s = f"{rss:.0f}MB" if isinstance(rss, (int, float)) else "?"
-    log.append(
-        f"clip check line={result.get('line')} desc={result.get('desc')} "
-        f"best_other={result.get('best_other')} rss={rss_s} ms={result.get('ms')} {result.get('reason')}"
-    )
-    if result.get("ok") is False:
-        return False
-    return result
+    last = None
+    for i, img in enumerate(frames, 1):
+        result = clip.confirm_line(img, show, desc, other_lines=others, exact_entity=exact)
+        last = result
+        rss = result.get("rss_mb")
+        rss_s = f"{rss:.0f}MB" if isinstance(rss, (int, float)) else "?"
+        log.append(
+            f"clip check frame={i}/{len(frames)} line={result.get('line')} desc={result.get('desc')} "
+            f"best_other={result.get('best_other')} rss={rss_s} ms={result.get('ms')} {result.get('reason')}"
+        )
+        if result.get("ok") is not True:
+            return _reject(result.get("reason") or "confirm did not accept this frame")
+    return last
 
 
 def match_lines_meta(subj: dict, script: dict, durations: List[float], pool: List[dict],
@@ -1740,7 +1793,8 @@ def match_lines_meta(subj: dict, script: dict, durations: List[float], pool: Lis
             got = place_by_meta(c, need, used, workdir)
             if not got:
                 continue
-            clip_result = _clip_confirm_placement(got, line, log)
+            got["need"] = need
+            clip_result = _clip_confirm_placement(got, line, log, need=need)
             if clip_result is False:
                 continue
             got["meta_score"] = score
@@ -1956,5 +2010,5 @@ def run_fallback(avoid: set, recent: str, workdir: str, log: List[str]) -> Optio
         if built:
             log.append(f"ai fallback: built {subj['title']} with {len(built['lines'])} metadata-guaranteed lines")
             return built
-    log.append("ai fallback: no topic with line-guaranteed footage; skipping slot")
+    log.append("ai fallback: fewer than 5 lines survived with guaranteed footage; skipping slot")
     return None

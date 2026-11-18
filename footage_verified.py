@@ -20,8 +20,8 @@ Wikipedia page, then cut over a Tekken talk show). This module replaces the keyw
 All calls are free (Cloudflare Workers AI free plan, public archives). No Gemini, no xAI, no paid API.
 When Cloudflare returns 429 (neuron limit) or is unavailable, produce() logs 'ai fallback (cf 429)' and
 builds from library or previously verified subjects with a template script and metadata-only clip matches.
-A clip is kept only when metadata guarantees it shows the subject and the voiceover line; otherwise the
-slot is skipped (never a mismatched video).
+A clip is kept only when its own title, description or caption explicitly depicts that line's specific
+entity or event (not merely the subject category); otherwise the slot is skipped (never a mismatched video).
 """
 import json
 import logging
@@ -41,7 +41,10 @@ import footage_tts
 
 logger = logging.getLogger("footage_verified")
 MARKER = "FOOTAGE_VERIFIED"
-VERSION = "2026-11-17.3"
+VERSION = "2026-11-17.4"
+
+# Set only by a dry-run to exercise the no-Cloudflare path; the scheduler never sets this.
+_force_fallback = False
 
 SUBJECT_MIN_CONF = float(os.environ.get("FOOTAGE_SUBJECT_MIN_CONF", "0.75"))
 SUBJECT_MIN_SIM = float(os.environ.get("FOOTAGE_SUBJECT_MIN_SIM", "0.55"))
@@ -49,6 +52,7 @@ CLIP_MIN_MATCH = int(os.environ.get("FOOTAGE_CLIP_MIN_MATCH", "6"))  # vision sc
 CLIP_GOOD_MATCH = 8
 MAX_CHECKS_PER_LINE = int(os.environ.get("FOOTAGE_MAX_CHECKS_PER_LINE", "4"))
 MIN_LINES = int(os.environ.get("FOOTAGE_MIN_LINES", "6"))
+FALLBACK_MIN_LINES = int(os.environ.get("FOOTAGE_FALLBACK_MIN_LINES", "5"))
 FILE_MENU = 45
 MAX_VIDEO_SECONDS = float(os.environ.get("FOOTAGE_MAX_VIDEO_SECONDS", "900"))
 LEAD = 0.35
@@ -604,8 +608,9 @@ def produce(out_dir: str, viral: Optional[dict] = None, avoid_keys: Optional[set
     """Same contract as footage_mode.produce_footage: (vertical_mp4, landscape_mp4, concept, info). Raises when no
     topic can be built with verified, matching footage (no video beats a wrong video)."""
     t0 = time.time()
+    forced = _force_fallback or (os.environ.get("FOOTAGE_FORCE_FALLBACK") or "").strip().lower() in {"1", "true", "yes"}
     fallback = False
-    if not cf_ai.ready():
+    if forced or not cf_ai.ready():
         fallback = True
         # logged again below once `log` exists
     else:
@@ -617,8 +622,13 @@ def produce(out_dir: str, viral: Optional[dict] = None, avoid_keys: Optional[set
     avoid = avoid_keys or set()
     recent = " | ".join(recent_topics or []).lower()
     if fallback:
-        log.append("ai fallback (cf 429)")
-        log.append("ai fallback reason: Cloudflare Workers AI is not configured")
+        if forced and cf_ai.ready():
+            log.append("ai fallback (forced)")
+            log.append("ai fallback reason: dry-run forced the no-Cloudflare path")
+        else:
+            log.append("ai fallback (cf 429)")
+            if not cf_ai.ready():
+                log.append("ai fallback reason: Cloudflare Workers AI is not configured")
     try:
         if viral is None:
             viral = fm.todays_viral()
@@ -848,19 +858,210 @@ _META_STOP = {
     "out", "down", "off", "again", "real", "footage",
 }
 
+# Words that only place a file in the same subject/category. They never prove a line's specific claim.
+_GENERIC_SUBJECT = {
+    "footage", "photograph", "photographer", "photo", "image", "film", "video", "still", "official",
+    "archive", "archival", "commons", "wikimedia", "nasa", "public", "domain", "credit", "caption",
+    "war", "world", "wartime", "wars", "military", "army", "navy", "forces", "force", "troops", "troop",
+    "soldiers", "soldier", "men", "man", "allied", "allies", "enemy", "battle", "campaign", "operation",
+    "invasion", "landing", "landings", "front", "coast", "beach", "beaches", "shore", "aboard",
+    "second", "first", "history", "historical", "century", "american", "british", "french", "german",
+    "nazi", "soviet", "russian", "chinese", "japanese", "national", "united", "states", "royal",
+    "center", "centre", "university", "museum", "building", "portrait", "picture", "view", "near",
+    "several", "many", "early", "later", "great", "south", "north", "east", "west", "northern",
+    "southern", "eastern", "western",
+}
+
+_PLACE_WORDS = {
+    "center", "centre", "peninsula", "beach", "island", "islands", "river", "ocean", "sea", "gulf",
+    "bay", "mount", "mountain", "mountains", "valley", "desert", "forest", "park", "bridge", "harbour",
+    "harbor", "port", "city", "town", "village", "county", "province", "district", "republic",
+    "kingdom", "empire", "university", "museum", "church", "cathedral", "palace", "street", "road",
+    "avenue", "station", "stations", "airport", "base", "camp", "field", "space",
+}
+
+_ORG_WORDS = {
+    "force", "forces", "headquarters", "command", "army", "navy", "corps", "division", "regiment",
+    "battalion", "fleet", "squadron", "committee", "commission", "council", "department", "office",
+    "agency", "administration", "conference", "treaty", "alliance",
+}
+
+_PERSON_TITLES = {
+    "president", "vice", "prime", "minister", "general", "major", "brigadier", "admiral", "colonel",
+    "captain", "lieutenant", "commander", "sergeant", "doctor", "sir", "lady", "emperor", "empress",
+    "king", "queen", "pope", "secretary", "chancellor", "chairman", "governor", "senator", "mayor",
+    "professor", "judge", "justice", "tsar", "czar", "pharaoh", "premier",
+}
+
+_MONTHS = {
+    "january": 1, "jan": 1, "february": 2, "feb": 2, "march": 3, "mar": 3, "april": 4, "apr": 4,
+    "may": 5, "june": 6, "jun": 6, "july": 7, "jul": 7, "august": 8, "aug": 8, "september": 9,
+    "sep": 9, "sept": 9, "october": 10, "oct": 10, "november": 11, "nov": 11, "december": 12, "dec": 12,
+}
+
+_NAME_ALIASES = {
+    "fdr": ("roosevelt", "franklin roosevelt", "franklin d roosevelt"),
+    "roosevelt": ("fdr", "franklin roosevelt", "franklin d roosevelt"),
+    "jfk": ("kennedy", "john kennedy", "john f kennedy"),
+    "ike": ("eisenhower",),
+    "eisenhower": ("ike",),
+    "lbj": ("johnson", "lyndon johnson"),
+    "mlk": ("king", "martin luther king"),
+}
+
 
 def _meta_words(text: str) -> List[str]:
     return [w for w in re.findall(r"[a-z0-9]{4,}", (text or "").lower()) if w not in _META_STOP]
+
+
+def _clip_text(c: dict) -> str:
+    return " ".join(
+        str(c.get(k) or "") for k in ("title", "description", "caption", "object_name", "ImageDescription")
+    )
 
 
 def subject_name(subj: dict) -> str:
     return re.sub(r"\s*\([^)]*\)$", "", subj.get("title") or "").strip()
 
 
+def subject_generic_words(subj: dict, extra: Optional[set] = None) -> set:
+    """Tokens that only identify the subject or its category, plus a global generic list."""
+    chunks = [
+        subject_name(subj),
+        subj.get("commons_category") or "",
+        (subj.get("description") or "")[:280],
+        (subj.get("lead") or "")[:280],
+    ]
+    words = set(_GENERIC_SUBJECT)
+    for chunk in chunks:
+        words.update(_meta_words(chunk))
+        words.update(re.findall(r"[a-z0-9]{3,}", (chunk or "").lower()))
+    if extra:
+        words.update(extra)
+    words -= {w for w in words if w in _MONTHS and w not in _GENERIC_SUBJECT}
+    return words
+
+
+def pool_generic_words(pool: List[dict], subj: dict, threshold: float = 0.3) -> set:
+    texts = [_clip_text(c) for c in pool if clip_is_of_subject(c, subj)]
+    if len(texts) < 4:
+        return set()
+    freq: Dict[str, int] = {}
+    for text in texts:
+        for w in set(_meta_words(text)):
+            freq[w] = freq.get(w, 0) + 1
+    n = len(texts)
+    return {w for w, c in freq.items() if c / n >= threshold}
+
+
+def _dates(text: str) -> List[tuple]:
+    """Calendar dates and clock times found in text, as ('d', y, m, d) or ('t', h, m)."""
+    raw = text or ""
+    found: List[tuple] = []
+    month = r"(January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)"
+    for m in re.finditer(rf"\b(\d{{1,2}})\s+{month}\s+(\d{{4}})\b", raw, re.I):
+        found.append(("d", int(m.group(3)), _MONTHS[m.group(2).lower()], int(m.group(1))))
+    for m in re.finditer(rf"\b{month}\s+(\d{{1,2}})(?:st|nd|rd|th)?,?\s+(\d{{4}})\b", raw, re.I):
+        found.append(("d", int(m.group(3)), _MONTHS[m.group(1).lower()], int(m.group(2))))
+    for m in re.finditer(rf"\b{month}\s+(\d{{4}})\b", raw, re.I):
+        found.append(("d", int(m.group(2)), _MONTHS[m.group(1).lower()], 0))
+    for m in re.finditer(r"\b(\d{1,2}):(\d{2})\b", raw):
+        found.append(("t", int(m.group(1)), int(m.group(2))))
+    return found
+
+
+def _date_in_text(token: tuple, text: str) -> bool:
+    have = _dates(text)
+    if token[0] == "t":
+        return any(h[0] == "t" and h[1] == token[1] and h[2] == token[2] for h in have)
+    y, mo, d = token[1], token[2], token[3]
+    for h in have:
+        if h[0] != "d" or h[1] != y or h[2] != mo:
+            continue
+        if d == 0 or h[3] == 0 or h[3] == d:
+            return True
+    # month name + year written without being parsed as a full date pattern already
+    if y and mo:
+        month_name = max((n for n, num in _MONTHS.items() if num == mo), key=len)
+        if re.search(rf"\b{month_name}\b", text, re.I) and re.search(rf"\b{y}\b", text):
+            if d == 0 or re.search(rf"\b{d}\b", text):
+                return True
+    return False
+
+
+def _person_names(text: str) -> List[str]:
+    """Person-like 'First (M.) Last' phrases, excluding places and organizations."""
+    titles = (
+        r"(?:(?:US|U\.S\.)\s+)?(?:President|Vice President|Prime Minister|General|"
+        r"Major General|Brigadier(?:\s+General)?|Admiral|Colonel|Captain|Lieutenant|"
+        r"Commander|Dr\.?|Sir|Lady|Emperor|Empress|King|Queen|Pope|Secretary|"
+        r"Chancellor|Chairman|Governor|Senator|Mayor|Professor|Judge|Justice)\s+"
+    )
+    # Middle initial is optional and the period is optional: Franklin D Roosevelt.
+    pat = re.compile(
+        rf"\b(?:{titles})?([A-Z][a-z]+(?:\s+[A-Z]\.?)*(?:\s+[A-Z][a-z]+)+)\b"
+    )
+    names = []
+    for m in pat.finditer(text or ""):
+        name = re.sub(r"\s+", " ", m.group(1)).strip()
+        toks = [w.lower().rstrip(".") for w in name.split()]
+        if toks and toks[0] in {"the", "a", "an", "this", "that", "these", "those"}:
+            continue
+        if any(w in _PLACE_WORDS or w in _ORG_WORDS for w in toks):
+            continue
+        if all(w in _PERSON_TITLES or w in _META_STOP or w in _GENERIC_SUBJECT or len(w) <= 1 for w in toks):
+            continue
+        names.append(name)
+    return names
+
+
+def _name_in_text(name: str, text: str) -> bool:
+    blob = " " + re.sub(r"[^a-z0-9]+", " ", (text or "").lower()) + " "
+    toks = [w.lower().rstrip(".") for w in name.split() if w.lower().rstrip(".") not in _PERSON_TITLES]
+    if not toks:
+        return False
+    phrase = " ".join(toks)
+    if phrase and phrase in blob:
+        return True
+    compact = "".join(toks)
+    if len(toks) >= 2 and len(compact) >= 3 and compact in blob.replace(" ", ""):
+        return True  # fdr, jfk
+    last = toks[-1]
+    if len(last) >= 5 and last not in _GENERIC_SUBJECT and re.search(rf"\b{re.escape(last)}\b", blob):
+        # last name only when the first name is absent is still a mention of that person
+        return True
+    for tok in toks:
+        for alias in _NAME_ALIASES.get(tok, ()):
+            if re.search(rf"\b{re.escape(alias)}\b", blob):
+                return True
+    return False
+
+
+def line_specific_terms(line: dict, subj: dict, extra_generic: Optional[set] = None) -> dict:
+    """Entities and dates that belong to this line, with generic subject words removed."""
+    show = line.get("show") or line.get("say") or ""
+    generic = subject_generic_words(subj, extra_generic)
+    people = []
+    for name in _person_names(show):
+        if not set(_meta_words(name)) - generic or _name_in_text(name, subject_name(subj)):
+            continue
+        people.append(name)
+    subj_dates = set(_dates(subject_name(subj) + " " + (subj.get("lead") or "")[:400] + " " + (subj.get("description") or "")[:200]))
+    dates = [d for d in _dates(show) if d not in subj_dates]
+    words = []
+    for w in _meta_words(show):
+        if w in generic or w in _META_STOP or w in _MONTHS:
+            continue
+        if any(w in n.lower() for n in people):
+            continue
+        words.append(w)
+    return {"people": people, "dates": dates, "words": words}
+
+
 def clip_is_of_subject(c: dict, subj: dict) -> bool:
     """True when metadata alone ties the file to this subject (Commons category or subject name)."""
     name = subject_name(subj)
-    text = f"{c.get('title') or ''} {c.get('description') or ''}".lower()
+    text = _clip_text(c).lower()
     name_in = bool(name) and bool(re.search(r"\b" + re.escape(name.lower()) + r"\b", text))
     if not name_in:
         toks = [w for w in _meta_words(name) if len(w) >= 4]
@@ -870,31 +1071,46 @@ def clip_is_of_subject(c: dict, subj: dict) -> bool:
     return bool((curated or nasa) and (name_in or curated))
 
 
-def meta_line_match(c: dict, subj: dict, line: dict) -> dict:
-    """Guarantee, from title/description plus provenance, that the clip shows this subject and this line."""
-    title = c.get("title") or ""
-    text = f"{title} {c.get('description') or ''}"
+def meta_line_match(c: dict, subj: dict, line: dict, extra_generic: Optional[set] = None) -> dict:
+    """A clip may be used only when its own title/description/caption depicts this line's specific entity or event."""
+    text = _clip_text(c)
     if not clip_is_of_subject(c, subj):
         return {"ok": False, "reason": "clip is not provenance-tied to the subject", "score": 0.0, "overlap": []}
-    line_words = _meta_words(line.get("show") or "")
-    title_l, text_l = title.lower(), text.lower()
-    title_hit = [w for w in line_words if w in title_l]
-    text_hit = [w for w in line_words if w in text_l]
-    name = subject_name(subj)
-    extra_in_title = [w for w in title_hit if w not in set(_meta_words(name))]
-    # Subject name in the title plus at least one other line word in the title, or two+ title hits.
-    if (name.lower() in title_l and extra_in_title) or len(title_hit) >= 2:
-        return {"ok": True, "reason": "title overlap with subject-provenance clip",
-                "score": round(0.8 + 0.05 * min(len(title_hit), 4), 3), "overlap": title_hit}
-    if line_words and title_hit and len(title_hit) / max(len(line_words), 1) >= 0.5 and extra_in_title:
-        return {"ok": True, "reason": "title overlap with subject-provenance clip",
-                "score": round(0.75 + 0.05 * len(title_hit), 3), "overlap": title_hit}
-    return {"ok": False, "reason": f"weak line/title overlap {text_hit}",
-            "score": round(0.1 * len(text_hit), 3), "overlap": text_hit}
+    terms = line_specific_terms(line, subj, extra_generic)
+    missing_people = [n for n in terms["people"] if not _name_in_text(n, text)]
+    if missing_people:
+        return {"ok": False, "reason": "missing line-specific name: " + ", ".join(missing_people),
+                "score": 0.0, "overlap": []}
+    missing_dates = [d for d in terms["dates"] if not _date_in_text(d, text)]
+    if missing_dates:
+        return {"ok": False, "reason": "missing line-specific date", "score": 0.0, "overlap": []}
+    word_hits = [w for w in terms["words"] if re.search(r"\b" + re.escape(w) + r"\b", text.lower())]
+    person_hits = [n for n in terms["people"] if _name_in_text(n, text)]
+    date_hits = [d for d in terms["dates"] if _date_in_text(d, text)]
+    # Subject-category overlap alone is not enough: need the line's own entities.
+    if person_hits or date_hits:
+        if word_hits or person_hits:
+            overlap = [n.lower() for n in person_hits] + word_hits
+            score = 0.9 + 0.02 * min(len(person_hits) + len(date_hits) + len(word_hits), 5)
+            return {"ok": True, "reason": "line-specific entity in title/description",
+                    "score": round(score, 3), "overlap": overlap}
+        return {"ok": False, "reason": "name/date present but no line-specific detail",
+                "score": 0.2, "overlap": [n.lower() for n in person_hits]}
+    if len(word_hits) >= 2:
+        return {"ok": True, "reason": "line-specific terms in title/description",
+                "score": round(0.8 + 0.04 * min(len(word_hits), 5), 3), "overlap": word_hits}
+    if len(word_hits) == 1 and (len(word_hits[0]) >= 6 or word_hits[0] not in _GENERIC_SUBJECT):
+        # A single highly specific noun (radar, splashdown, heliopause) can carry the line.
+        if len(word_hits[0]) >= 6:
+            return {"ok": True, "reason": "line-specific term in title/description",
+                    "score": 0.76, "overlap": word_hits}
+    reason_bits = terms["words"][:6] or terms["people"] or ["(none)"]
+    return {"ok": False, "reason": "no line-specific terms in title/description (need %s)" % ", ".join(map(str, reason_bits)),
+            "score": round(0.08 * len(word_hits), 3), "overlap": word_hits}
 
 
 def write_script_from_footage(subj: dict, pool: List[dict], log: List[str]) -> Optional[dict]:
-    """Write VO lines from Wikipedia sentences that a provenance-tied clip's title clearly matches."""
+    """Pick Wikipedia sentences that describe what the available images or clips actually show."""
     name = subject_name(subj)
     source = (subj.get("text") or subj.get("lead") or "")
     try:
@@ -902,6 +1118,9 @@ def write_script_from_footage(subj: dict, pool: List[dict], log: List[str]) -> O
     except Exception:  # noqa: BLE001
         raw_sents = re.split(r"(?<=[.!?])\s+", source)
     provenanced = [c for c in pool if clip_is_of_subject(c, subj)]
+    # Prefer real video over stills when both can be guaranteed.
+    provenanced.sort(key=lambda c: (c.get("kind") != "video", not c.get("curated")))
+    extra_generic = pool_generic_words(provenanced, subj)
     lines: List[dict] = []
     used, said = set(), set()
     for c in provenanced:
@@ -920,27 +1139,31 @@ def write_script_from_footage(subj: dict, pool: List[dict], log: List[str]) -> O
                    "visual": say, "queries": [name], "picks": [c]}
             rec["show"] = tightened if isinstance(tightened, str) else say
             rec["say"] = fm.spoken(rec["show"])
-            m = meta_line_match(c, subj, rec)
+            m = meta_line_match(c, subj, rec, extra_generic)
             if not m["ok"]:
                 continue
-            if best is None or m["score"] > best[0]["score"]:
-                best = (m, rec, c)
+            score = m["score"] + (0.05 if c.get("kind") == "video" else 0.0)
+            if best is None or score > best[0]:
+                best = (score, m, rec, c)
         if not best:
             continue
         key = (c.get("provider"), c.get("id"))
-        say_key = best[1]["say"].lower()
+        say_key = best[2]["say"].lower()
         if key in used or say_key in said:
             continue
         if not lines:
-            first = best[1]["show"].lower()
+            first = best[2]["show"].lower()
             if name.lower() not in first and not any(w in first for w in _meta_words(name)):
                 continue
-        lines.append(best[1])
+        rec = best[2]
+        rec["picks"] = [c]
+        rec["match_reason"] = best[1].get("reason")
+        lines.append(rec)
         used.add(key)
         said.add(say_key)
         if len(lines) >= 12:
             break
-    if len(lines) < MIN_LINES:
+    if len(lines) < FALLBACK_MIN_LINES:
         log.append(f"ai fallback script: only {len(lines)} guaranteed lines for {name}")
         return None
     short = name if len(name.split()) <= 3 else " ".join(name.split()[:3])
@@ -1001,6 +1224,7 @@ def match_lines_meta(subj: dict, script: dict, durations: List[float], pool: Lis
     used: Dict[str, List[float]] = {}
     uses: Dict[str, int] = {}
     out: List[Optional[dict]] = []
+    extra_generic = pool_generic_words(pool, subj)
     for line, need in zip(script["lines"], durations):
         ranked = []
         seen = set()
@@ -1009,10 +1233,10 @@ def match_lines_meta(subj: dict, script: dict, durations: List[float], pool: Lis
             if ident in seen:
                 continue
             seen.add(ident)
-            m = meta_line_match(c, subj, line)
+            m = meta_line_match(c, subj, line, extra_generic)
             if m["ok"]:
                 ranked.append((m["score"], c, m))
-        ranked.sort(key=lambda r: -r[0])
+        ranked.sort(key=lambda r: (r[1].get("kind") != "video", -r[0]))
         placed = None
         for score, c, m in ranked:
             if uses.get(c["id"], 0) >= 2 or c.get("_bad"):
@@ -1049,8 +1273,8 @@ def build_fallback_topic(subj: dict, item: dict, key: str, workdir: str, log: Li
     _, shot_durs, _ = timeline(durs)
     matches = match_lines_meta(subj, script, [d + 0.2 for d in shot_durs], pool, workdir, log)
     keep = [i for i, m in enumerate(matches) if m]
-    if len(keep) < MIN_LINES:
-        log.append(f"ai fallback {subj['title']}: only {len(keep)}/{len(matches)} lines have guaranteed footage (need {MIN_LINES})")
+    if len(keep) < FALLBACK_MIN_LINES:
+        log.append(f"ai fallback {subj['title']}: only {len(keep)}/{len(matches)} lines have guaranteed footage (need {FALLBACK_MIN_LINES})")
         return None
     lines = [script["lines"][i] for i in keep]
     picks = [matches[i] for i in keep]
@@ -1061,7 +1285,7 @@ def build_fallback_topic(subj: dict, item: dict, key: str, workdir: str, log: Li
         log.append(f"ai fallback {subj['title']}: guaranteed lines only fill {total:.1f}s (< {fm.MIN_SECONDS:.0f}s)")
         return None
     if total > fm.MAX_SECONDS:
-        while total > fm.MAX_SECONDS and len(lines) > MIN_LINES:
+        while total > fm.MAX_SECONDS and len(lines) > FALLBACK_MIN_LINES:
             lines, picks, clips, durs = lines[:-1], picks[:-1], clips[:-1], durs[:-1]
             caps, shot_durs, total = timeline(durs)
     for c, ln in zip(caps, lines):
@@ -1222,4 +1446,5 @@ def run_fallback(avoid: set, recent: str, workdir: str, log: List[str]) -> Optio
         if built:
             log.append(f"ai fallback: built {subj['title']} with {len(built['lines'])} metadata-guaranteed lines")
             return built
+    log.append("ai fallback: no topic with line-guaranteed footage; skipping slot")
     return None

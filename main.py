@@ -5448,18 +5448,25 @@ GROWTH_DRY_RUNS: Dict[str, dict] = {}
 
 
 @app.post("/api/growth-v2/dry-run")
-async def growth_v2_dry_run():
+async def growth_v2_dry_run(request: Request):
     """Builds the next Autopilot post (concept, original video, captions, title)
     WITHOUT publishing or writing to the post queue."""
     job_id = uuid.uuid4().hex
     GROWTH_DRY_RUNS[job_id] = {"status": "RUNNING", "started_at": datetime.now().isoformat()}
+    force_fallback = (request.query_params.get("force_fallback") or "").strip().lower() in {"1", "true", "yes"}
 
     async def _run():
+        import footage_verified
+        prev = footage_verified._force_fallback
+        if force_fallback:
+            footage_verified._force_fallback = True
         try:
             result = await growth_v2.run_autopilot(load_settings(), dry_run=True)
             GROWTH_DRY_RUNS[job_id] = {"status": "SUCCESS", **result}
         except Exception as exc:
             GROWTH_DRY_RUNS[job_id] = {"status": "FAILED", "error": str(exc)[-1500:]}
+        finally:
+            footage_verified._force_fallback = prev
 
     asyncio.create_task(_run())
     return {"job_id": job_id, "status": "RUNNING"}

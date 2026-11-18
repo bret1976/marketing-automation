@@ -248,7 +248,7 @@ def test_write_script_from_footage_requires_guaranteed_lines():
     ]
     log = []
     script = fv.write_script_from_footage(subj, pool, log)
-    # Only two clips can be guaranteed, MIN_LINES is 6, so the script must be refused.
+    # Only two clips can be guaranteed, FALLBACK_MIN_LINES is 5, so the script must be refused.
     assert script is None
     assert any("guaranteed lines" in line for line in log)
 
@@ -264,3 +264,152 @@ def test_place_by_meta_downloads_still_before_return(monkeypatch, tmp_path):
     assert got is not None
     assert cand["_img"] == b"fakepng"
     assert got["vision"]["method"] == "metadata"
+
+
+NORMANDY = {
+    "title": "Normandy landings",
+    "commons_category": "Normandy landings",
+    "description": "Allied invasion of France, 6 June 1944",
+    "lead": "The Normandy landings were the landing operations on Tuesday, 6 June 1944 of the Allied invasion of Normandy in Operation Overlord during World War II.",
+    "url": "https://en.wikipedia.org/wiki/Normandy_landings",
+}
+
+
+def _still(title, description="", ident="File:X.jpg"):
+    return {"title": title, "description": description, "provider": "wikimedia_commons",
+            "id": ident, "curated": True, "kind": "image"}
+
+
+def test_meta_line_match_rejects_normandy_radar_barges_fdr_fleet_and_may_infantry():
+    """Regression: the first 429 fallback used subject-category stills that did not depict the line."""
+    radar = {"show": "Many of the German radar stations on the French coast were destroyed in preparation for the landings."}
+    barges = _still(
+        "From Coast Guard landing barges hitting the French Coast with the first waves of invaders, "
+        "American fighting men wade ashore under heavy machine gun fire from Nazi beach nests. (51210534892).jpg",
+        ident="File:barges.jpg",
+    )
+    assert fv.meta_line_match(barges, NORMANDY, radar)["ok"] is False
+
+    fdr = {"show": "US president Franklin D Roosevelt placed Major General Dwight D Eisenhower in command of Allied forces."}
+    fleet = _still("D-day - Allied Forces during the Invasion of Normandy 6 June 1944 A23843.jpg",
+                   ident="File:fleet.jpg")
+    assert fv.meta_line_match(fleet, NORMANDY, fdr)["ok"] is False
+
+    may_plan = {"show": "The Allies planned to launch the invasion on 1 May 1944."}
+    infantry = _still("D-day - British Forces during the Invasion of Normandy 6 June 1944 B5058.jpg",
+                      ident="File:inf.jpg")
+    assert fv.meta_line_match(infantry, NORMANDY, may_plan)["ok"] is False
+
+
+def test_meta_line_match_accepts_line_specific_normandy_stills():
+    radar = {"show": "Many of the German radar stations on the French coast were destroyed in preparation for the landings."}
+    radar_still = _still(
+        "Destroyed German radar station on the French coast before the Normandy landings.jpg",
+        "A German radar station wrecked in preparation for the landings",
+        "File:radar.jpg",
+    )
+    got = fv.meta_line_match(radar_still, NORMANDY, radar)
+    assert got["ok"] is True
+    assert "radar" in got["overlap"]
+
+    fdr = {"show": "US president Franklin D Roosevelt placed Major General Dwight D Eisenhower in command of Allied forces."}
+    fdr_still = _still(
+        "President Franklin D. Roosevelt and General Eisenhower.jpg",
+        "US president Franklin D Roosevelt with Dwight D Eisenhower, appointed to command Allied forces",
+        "File:fdr.jpg",
+    )
+    got = fv.meta_line_match(fdr_still, NORMANDY, fdr)
+    assert got["ok"] is True
+    assert any("roosevelt" in x for x in got["overlap"])
+
+
+def test_write_script_from_footage_picks_sentences_that_fit_the_images():
+    subj = dict(NORMANDY)
+    subj["text"] = (
+        "The Normandy landings began on 6 June 1944. "
+        "Many of the German radar stations on the French coast were destroyed in preparation for the landings. "
+        "US president Franklin D Roosevelt placed Major General Dwight D Eisenhower in command of Allied forces. "
+        "Allied landing craft approached the Normandy beaches at dawn. "
+        "British infantry advanced through a Normandy village on D-Day. "
+        "Glider borne troops passed over Royal Navy ships on their way to the invasion beaches of Normandy. "
+        "The Allies planned to launch the invasion on 1 May 1944. "
+        "General Dwight D Eisenhower was appointed commander of the Supreme Headquarters Allied Expeditionary Force."
+    )
+    pool = [
+        _still("Destroyed German radar station on the French coast before the Normandy landings.jpg",
+               "A German radar station wrecked in preparation for the landings", "File:radar.jpg"),
+        _still("President Franklin D. Roosevelt and General Eisenhower at the Normandy landings conference.jpg",
+               "US president Franklin D Roosevelt with Dwight D Eisenhower, appointed to command Allied forces",
+               "File:fdr.jpg"),
+        {"title": "Allied landing craft approach the Normandy beaches.ogv",
+         "description": "Landing craft approaching the Normandy beaches at dawn",
+         "provider": "wikimedia_commons", "id": "File:craft.ogv", "curated": True, "kind": "video"},
+        _still("British infantry in a Normandy village on D-Day.jpg",
+               "British infantry advanced through a Normandy village on D-Day", "File:infantry.jpg"),
+        _still("Glider borne troops passing over Royal Navy ships towards the Normandy landings.jpg",
+               "Glider borne troops passed over Royal Navy ships on their way to the invasion beaches of Normandy",
+               "File:gliders.jpg"),
+        _still("General Eisenhower Letter to Soldiers of the Allied Expeditionary Force.png",
+               "General Dwight D Eisenhower appointed commander of the Supreme Headquarters Allied Expeditionary Force",
+               "File:letter.png"),
+    ]
+    log = []
+    script = fv.write_script_from_footage(subj, pool, log)
+    assert script is not None, log
+    shows = " ".join(ln["show"].lower() for ln in script["lines"])
+    assert "radar" in shows
+    assert "roosevelt" in shows
+    # The May-plan sentence must not be attached to the infantry village still.
+    for ln in script["lines"]:
+        pick = (ln.get("picks") or [{}])[0]
+        if "1 may" in ln["show"].lower() or "1 may" in ln["say"].lower():
+            assert "infantry" not in (pick.get("title") or "").lower()
+        if "radar" in ln["show"].lower():
+            assert "radar" in (pick.get("title") or "").lower() + (pick.get("description") or "").lower()
+
+
+def test_write_script_prefers_video_when_a_still_also_matches():
+    subj = {"title": "Apollo 11", "commons_category": "Apollo 11",
+            "text": "The Apollo 11 launch took place at Kennedy Space Center. "
+                    "Neil Armstrong stepped onto the lunar surface. "
+                    "A camera recorded the Apollo 11 landing on the Moon. "
+                    "The crew splashed down in the Pacific Ocean after Apollo 11. "
+                    "The command module Columbia carried the Apollo 11 crew home. "
+                    "Mission control in Houston watched the Apollo 11 landing."}
+    # Six guaranteed line/clip pairs; launch has both a still and a video.
+    pool = [
+        {"title": "Apollo 11 launch from Kennedy Space Center still", "description": "Saturn V lifts off",
+         "provider": "wikimedia_commons", "id": "File:launch.jpg", "curated": True, "kind": "image"},
+        {"title": "Apollo 11 launch from Kennedy Space Center video", "description": "Saturn V lifts off",
+         "provider": "wikimedia_commons", "id": "File:launch.ogv", "curated": True, "kind": "video"},
+        {"title": "Neil Armstrong steps onto the lunar surface", "description": "Armstrong on the Moon",
+         "provider": "wikimedia_commons", "id": "File:arm.ogv", "curated": True, "kind": "video"},
+        {"title": "Apollo 11 landing on the Moon", "description": "camera recorded the landing",
+         "provider": "wikimedia_commons", "id": "File:land.ogv", "curated": True, "kind": "video"},
+        {"title": "Apollo 11 crew splashdown in the Pacific Ocean", "description": "the crew splashed down",
+         "provider": "wikimedia_commons", "id": "File:splash.ogv", "curated": True, "kind": "video"},
+        {"title": "Command module Columbia after Apollo 11", "description": "Columbia carried the crew home",
+         "provider": "wikimedia_commons", "id": "File:columbia.ogv", "curated": True, "kind": "video"},
+        {"title": "Mission control in Houston during the Apollo 11 landing", "description": "Houston mission control",
+         "provider": "wikimedia_commons", "id": "File:houston.ogv", "curated": True, "kind": "video"},
+    ]
+    log = []
+    script = fv.write_script_from_footage(subj, pool, log)
+    assert script is not None, log
+    launch_lines = [ln for ln in script["lines"] if "kennedy" in ln["show"].lower() or "launch" in ln["show"].lower()]
+    assert launch_lines
+    pick = (launch_lines[0].get("picks") or [{}])[0]
+    assert pick.get("kind") == "video"
+    assert pick.get("id") == "File:launch.ogv"
+
+
+def test_run_fallback_skips_slot_when_no_topic_has_enough_lines(monkeypatch):
+    monkeypatch.setattr(fv, "cached_fallback_subjects", lambda *a, **k: [])
+    monkeypatch.setattr(fv, "library_fallback_subjects", lambda *a, **k: [
+        (NORMANDY, {"title": "Normandy landings", "views_per_hour": 0}, "v2-normandy-landings")
+    ])
+    monkeypatch.setattr(fv, "build_fallback_topic", lambda *a, **k: None)
+    log = []
+    assert fv.run_fallback(set(), "", "/tmp", log) is None
+    assert any("ai fallback (cf 429)" == line for line in log)
+    assert any("skipping slot" in line for line in log)
